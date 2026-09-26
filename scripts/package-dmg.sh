@@ -12,7 +12,10 @@ mkdir -p "$2"
 output="$(cd -- "$2" && pwd -P)"
 version="$("$payload/mlxtop" --version)"
 version="${version#mlxtop }"
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] || {
+    printf 'Unsupported version: %s (expected X.Y.Z or X.Y.Z-rc.N).\n' "$version" >&2
+    exit 1
+}
 [[ -f "$payload/LICENSE" && -d "$payload/licenses" ]] || {
     printf '%s\n' 'Release payload must include LICENSE and dependency licenses.' >&2
     exit 1

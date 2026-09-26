@@ -65,32 +65,42 @@ fn exact(n: u64) -> String {
     output
 }
 
-fn comparison(current: &providers::RequestUsage, previous: Option<&Entry>) -> String {
-    let Some(previous) = previous else {
-        return "PREVIOUS OBSERVED — awaiting another request".into();
+fn clock_stamp(at: SystemTime) -> String {
+    let Ok(elapsed) = at.duration_since(SystemTime::UNIX_EPOCH) else {
+        return "--:--:--".into();
     };
-    let previous = &previous.usage;
-    if current.provider != previous.provider || current.model != previous.model {
-        return "PREVIOUS OBSERVED — different provider/model; no comparison".into();
+    let seconds = elapsed.as_secs() % 86_400;
+    let hours = seconds / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
+}
+
+fn compact_comparison(current: &providers::RequestUsage, previous: Option<&Entry>) -> String {
+    let Some(previous) = previous else {
+        return "PREVIOUS OBSERVED — · no earlier request".into();
+    };
+    if current.provider != previous.usage.provider || current.model != previous.usage.model {
+        return "PREVIOUS OBSERVED — · different provider/model".into();
     }
-    let sign = if current.prompt >= previous.prompt {
+    let sign = if current.prompt >= previous.usage.prompt {
         "+"
     } else {
         "−"
     };
-    let amount = current.prompt.abs_diff(previous.prompt);
-    let percent = if previous.prompt > 0 {
+    let amount = current.prompt.abs_diff(previous.usage.prompt);
+    let percent = if previous.usage.prompt > 0 {
         format!(
             " ({sign}{:.1}%)",
-            amount as f64 / previous.prompt as f64 * 100.0
+            amount as f64 / previous.usage.prompt as f64 * 100.0
         )
     } else {
         String::new()
     };
     format!(
-        "PREVIOUS OBSERVED {} · CHANGE {sign}{}{percent}",
-        exact(previous.prompt),
-        exact(amount)
+        "Δ {sign}{}{percent} · PREVIOUS OBSERVED {}",
+        exact(amount),
+        exact(previous.usage.prompt)
     )
 }
 
@@ -151,7 +161,7 @@ fn insight(history: &History, index: usize) -> Insight {
         return Insight {
             title: "PROMPT JUMP · input increased".into(),
             detail,
-            action: "Inspect added context or large tool results.".into(),
+            action: "Inspect context/tool results.".into(),
             tone: Tone::Yellow,
         };
     }
@@ -165,7 +175,7 @@ fn insight(history: &History, index: usize) -> Insight {
                     current.prompt as f64 / median as f64
                 ),
                 detail,
-                action: "Inspect added context or large tool results.".into(),
+                action: "Inspect context/tool results.".into(),
                 tone: Tone::Yellow,
             };
         }
@@ -173,21 +183,21 @@ fn insight(history: &History, index: usize) -> Insight {
             return Insight {
                 title: "SMALLER INPUT · below recent median".into(),
                 detail,
-                action: "Less input; check prefill time for impact.".into(),
+                action: "Compare prefill time.".into(),
                 tone: Tone::Cyan,
             };
         }
         return Insight {
             title: "TYPICAL INPUT · near recent median".into(),
             detail,
-            action: "If slow, inspect prefill, queue and GPU.".into(),
+            action: "If slow, check prefill/queue/GPU.".into(),
             tone: Tone::Cyan,
         };
     }
     Insight {
         title: "BASELINE SAMPLING".into(),
         detail,
-        action: "Compare more requests before judging size.".into(),
+        action: "Collect more requests.".into(),
         tone: Tone::Muted,
     }
 }
@@ -209,6 +219,116 @@ fn is_live(entry: &Entry, sample: &Sample, now: SystemTime) -> bool {
             .any(|request| same_request(&entry.usage, request))
 }
 
+fn append_detail(line: &mut Line<'static>, text: String, color: Color, width: u16) {
+    let span = Span::styled(format!(" · {text}"), Style::default().fg(color));
+    if line.width() + span.width() <= usize::from(width) {
+        line.spans.push(span);
+    }
+}
+
+fn assessment_line(
+    mut assessment: Insight,
+    low_cache: bool,
+    live: bool,
+    width: u16,
+) -> Line<'static> {
+    // One actionable note owns the footer; baseline detail is optional.
+    if low_cache {
+        assessment.action = "Repeating input? Check prefix reuse.".into();
+    }
+    let title = assessment.title.split(" · ").next().unwrap_or("");
+    let mut line = Line::from(Span::styled(
+        format!(
+            " {}{}{}",
+            if live { "" } else { "HISTORY · " },
+            if assessment.tone == Tone::Yellow {
+                "! "
+            } else {
+                ""
+            },
+            title
+        ),
+        Style::default().fg(if live { assessment.tone.color() } else { MUTED }),
+    ));
+    append_detail(
+        &mut line,
+        assessment.action,
+        if live { Color::White } else { MUTED },
+        width,
+    );
+    append_detail(&mut line, assessment.detail, MUTED, width);
+    if line.width() < usize::from(width) {
+        line.spans.push(Span::raw(" "));
+    }
+    line
+}
+
+fn draw_bar(
+    frame: &mut Frame,
+    area: Rect,
+    usage: &providers::RequestUsage,
+    color: Color,
+    jump: bool,
+) {
+    if area.is_empty() {
+        return;
+    }
+    // Cache metadata must not change a bar's height. Only a full cell can
+    // contain two segment colors without painting above the measured value.
+    let total = (u128::from(chart_value(usage.prompt)) * u128::from(area.height) * 8)
+        .div_ceil(u128::from(TREND_CEILING)) as u64;
+    let cached = usage
+        .cached
+        .filter(|n| *n <= usage.prompt)
+        .filter(|_| usage.prompt > 0)
+        .map(|n| (u128::from(n) * u128::from(total) / u128::from(usage.prompt)) as u64)
+        .unwrap_or(0);
+    let blocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    if total == 0 {
+        frame.buffer_mut()[(area.x, area.bottom() - 1)]
+            .set_symbol("·")
+            .set_fg(DIM);
+    }
+    for row in 0..area.height {
+        let part = total.saturating_sub(u64::from(row) * 8).min(8) as usize;
+        if part == 0 {
+            continue;
+        }
+        let cached_part = cached.saturating_sub(u64::from(row) * 8).min(8) as usize;
+        let (glyph, fg, bg) = if cached_part == part {
+            (blocks[part], GREEN, PANEL)
+        } else if cached_part > 0 && part == 8 {
+            (blocks[cached_part], GREEN, color)
+        } else {
+            // A partial cell has an empty area too: keep its measured height
+            // and use the dominant segment. The readout retains exact reuse.
+            (
+                blocks[part],
+                if cached_part * 2 >= part {
+                    GREEN
+                } else {
+                    color
+                },
+                PANEL,
+            )
+        };
+        frame.buffer_mut()[(area.x, area.bottom() - 1 - row)]
+            .set_symbol(glyph)
+            .set_fg(fg)
+            .set_bg(bg);
+    }
+    if usage.prompt > TREND_CEILING {
+        frame.buffer_mut()[(area.x, area.y)]
+            .set_symbol("↑")
+            .set_fg(color);
+    } else if jump {
+        let top = area.bottom().saturating_sub(total.div_ceil(8) as u16);
+        frame.buffer_mut()[(area.x, top.saturating_sub(1).max(area.y))]
+            .set_symbol("!")
+            .set_fg(YELLOW);
+    }
+}
+
 pub(super) fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -216,30 +336,59 @@ pub(super) fn draw(
     sample: &Sample,
     scroll: usize,
 ) {
-    let block = Block::default()
-        .title(Line::from(vec![
-            Span::styled(
-                " prompt load ",
-                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "· 0–65,536 tokens · ↑↓ history / Home latest ",
-                Style::default().fg(MUTED),
-            ),
-        ]))
-        .title_bottom(Line::from(vec![
-            Span::styled(" cached ", Style::default().fg(GREEN)),
-            Span::styled("uncached ", Style::default().fg(CYAN)),
-            Span::styled("history ", Style::default().fg(BLUE)),
-            Span::styled("! jump ", Style::default().fg(YELLOW)),
-            Span::styled("↑ overflow", Style::default().fg(MUTED)),
-        ]))
+    let selected = history
+        .len()
+        .checked_sub(1)
+        .map(|last| last - scroll.min(last));
+    let now = SystemTime::now();
+    let live = selected.is_some_and(|i| is_live(&history.entries[i], sample, now));
+    let cached = selected.and_then(|i| {
+        let usage = &history.entries[i].usage;
+        usage.cached.filter(|n| *n <= usage.prompt)
+    });
+    let low_cache = selected.is_some_and(|i| {
+        let prompt = history.entries[i].usage.prompt;
+        prompt >= 4096 && cached.is_some_and(|n| u128::from(n) * 5 < u128::from(prompt))
+    });
+    let mut title = Line::from(vec![
+        Span::styled(
+            " prompt load ",
+            Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("· 0–65,536 tokens", Style::default().fg(MUTED)),
+    ]);
+    append_detail(
+        &mut title,
+        "1 bar/request".into(),
+        MUTED,
+        area.width.saturating_sub(2),
+    );
+    append_detail(
+        &mut title,
+        "↑↓ history / Home latest".into(),
+        MUTED,
+        area.width.saturating_sub(2),
+    );
+    title.spans.push(Span::raw(" "));
+    let mut block = Block::default()
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(DIM))
         .style(Style::default().bg(PANEL));
+    if let Some(index) = selected {
+        block = block.title_bottom(assessment_line(
+            insight(history, index),
+            low_cache,
+            live,
+            area.width.saturating_sub(2),
+        ));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if history.entries.is_empty() {
+    if inner.is_empty() {
+        return;
+    }
+    let Some(index) = selected else {
         let text = if matches!(sample.llm_provider.as_str(), "oMLX" | "KoboldCpp") {
             "Waiting for per-request prompt counts."
         } else {
@@ -252,12 +401,10 @@ pub(super) fn draw(
             inner,
         );
         return;
-    }
-    let index = history.len() - 1 - scroll.min(history.len() - 1);
+    };
     let entry = &history.entries[index];
     let previous = index.checked_sub(1).and_then(|i| history.entries.get(i));
-    let now = SystemTime::now();
-    let live = is_live(entry, sample, now);
+    let color = if live { CYAN } else { BLUE };
     let state = if live {
         "LIVE"
     } else if entry.usage.completed {
@@ -265,223 +412,147 @@ pub(super) fn draw(
     } else {
         "LAST SEEN"
     };
-    let change = comparison(&entry.usage, previous);
-    let header_height = if inner.width < 120 { 2 } else { 1 };
-    let rows =
-        Layout::vertical([Constraint::Length(header_height), Constraint::Min(1)]).split(inner);
-    let headline = format!(
-        "#{} · {} tokens · {state} · {}",
-        entry.number,
-        exact(entry.usage.prompt),
-        telemetry_age(Some(entry.last_seen))
+    let mut headline = Line::from(vec![
+        Span::styled(
+            format!("{} tokens", exact(entry.usage.prompt)),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" · {state}"), Style::default().fg(color)),
+    ]);
+    append_detail(
+        &mut headline,
+        format!("{} UTC", clock_stamp(entry.last_seen)),
+        MUTED,
+        inner.width,
     );
-    let summary = if header_height == 1 {
-        vec![Line::from(vec![
-            Span::styled(
-                headline,
-                Style::default()
-                    .fg(if live { CYAN } else { BLUE })
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("   {change}"), Style::default().fg(MUTED)),
-        ])]
-    } else {
-        vec![
-            Line::from(Span::styled(
-                headline,
-                Style::default().fg(if live { CYAN } else { BLUE }),
-            )),
-            Line::from(Span::styled(change, Style::default().fg(MUTED))),
-        ]
-    };
-    frame.render_widget(Paragraph::new(summary), rows[0]);
-    let columns =
-        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(rows[1]);
-    let plot = columns[0];
-    let count = usize::from(plot.width.saturating_sub(1) / 6).clamp(1, 32);
-    let start = (index + 1).saturating_sub(count);
-    // Values occupy their own row so short bars never hide their token count.
-    let bar_area = Rect::new(
-        plot.x,
-        plot.y + 1,
-        plot.width,
-        plot.height.saturating_sub(1),
+    append_detail(
+        &mut headline,
+        telemetry_age(Some(entry.last_seen)),
+        MUTED,
+        inner.width,
     );
-    for (i, old) in history
-        .entries
-        .iter()
-        .enumerate()
-        .take(index + 1)
-        .skip(start)
-    {
-        let jump = material_jump(
-            &old.usage,
-            i.checked_sub(1).and_then(|n| history.entries.get(n)),
-        );
-        let color = if is_live(old, sample, now) {
-            CYAN
-        } else {
-            BLUE
-        };
-        let marker = if i == index && jump {
-            "▶!"
-        } else if i == index {
-            "▶"
-        } else if jump {
-            "!"
-        } else {
-            "#"
-        };
-        let value = if old.usage.prompt > TREND_CEILING {
-            "↑".into()
-        } else {
-            compact_tokens(old.usage.prompt)
-        };
-        let x = plot.x + ((i - start) * 6) as u16;
-        if plot.height == 0 || x >= plot.right() {
-            continue;
-        }
-        let width = 5.min(plot.right() - x);
-        frame.render_widget(
-            Paragraph::new(value).style(Style::default().fg(if jump { YELLOW } else { color })),
-            Rect::new(x, plot.y, width, 1),
-        );
-        if bar_area.height == 0 {
-            continue;
-        }
-        frame.render_widget(
-            Paragraph::new(format!("{marker}{}", old.number)).style(Style::default().fg(if jump {
-                YELLOW
+    let cache_label = cached
+        .map(|n| {
+            let ratio = if entry.usage.prompt == 0 {
+                0.0
             } else {
-                MUTED
-            })),
-            Rect::new(x, bar_area.bottom() - 1, width, 1),
-        );
-        let height = bar_area.height.saturating_sub(1);
-        // Round total height to whole rows so a short stacked bar can show
-        // both colors in one cell. Split that height at eighth-cell precision.
-        let mut total = ((chart_value(old.usage.prompt) as u128 * height as u128)
-            .div_ceil(TREND_CEILING as u128) as u64)
-            * 8;
-        if old
-            .usage
-            .cached
-            .filter(|n| *n <= old.usage.prompt)
-            .is_none()
-        {
-            total = (chart_value(old.usage.prompt) as u128 * height as u128 * 8
-                / TREND_CEILING as u128) as u64;
-        }
-        let cached = old
-            .usage
-            .cached
-            .filter(|n| *n <= old.usage.prompt)
-            .filter(|_| old.usage.prompt > 0)
-            .map(|n| (n as u128 * total as u128 / old.usage.prompt as u128) as u64)
-            .unwrap_or(0)
-            .min(total);
-        for row in 0..height {
-            let total_part = total.saturating_sub(u64::from(row) * 8).min(8) as usize;
-            if total_part == 0 {
-                continue;
-            }
-            let cached_part = cached.saturating_sub(u64::from(row) * 8).min(8) as usize;
-            let blocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-            let (glyph, fg, bg) = if cached_part == total_part {
-                (blocks[total_part], GREEN, PANEL)
-            } else if cached_part > 0 && total_part == 8 {
-                (blocks[cached_part], GREEN, color)
-            } else {
-                (blocks[total_part], color, PANEL)
+                n as f64 / entry.usage.prompt as f64
             };
-            for column in x..x + width {
-                frame.buffer_mut()[(column, bar_area.bottom() - 2 - row)]
-                    .set_symbol(glyph)
-                    .set_fg(fg)
-                    .set_bg(bg);
-            }
-        }
+            format!("CACHE {:.0}%", ratio * 100.0)
+        })
+        .unwrap_or_else(|| "CACHE —".into());
+    let cache_color = if cached.is_none() {
+        MUTED
+    } else if low_cache {
+        YELLOW
+    } else if entry.usage.prompt > 0
+        && cached.is_some_and(|n| u128::from(n) * 5 >= u128::from(entry.usage.prompt) * 4)
+    {
+        GREEN
+    } else {
+        CYAN
+    };
+    let cache_span = Span::styled(cache_label, Style::default().fg(cache_color));
+    let cache_in_header = headline.width() + cache_span.width() + 2 <= usize::from(inner.width);
+    if cache_in_header {
+        headline.spans.push(Span::raw(
+            " ".repeat(usize::from(inner.width) - headline.width() - cache_span.width()),
+        ));
+        headline.spans.push(cache_span.clone());
+    }
+    frame.render_widget(
+        Paragraph::new(headline),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    if inner.height < 2 {
+        return;
+    }
+    let mut details = Line::from(Span::styled(
+        compact_comparison(&entry.usage, previous),
+        Style::default().fg(if live && material_jump(&entry.usage, previous) {
+            YELLOW
+        } else {
+            MUTED
+        }),
+    ));
+    if !cache_in_header {
+        append_detail(
+            &mut details,
+            cache_span.content.into_owned(),
+            cache_color,
+            inner.width,
+        );
+    }
+    if let Some(cached) = cached {
+        append_detail(
+            &mut details,
+            format!("{} uncached", exact(entry.usage.prompt - cached)),
+            color,
+            inner.width,
+        );
+    }
+    append_detail(
+        &mut details,
+        format!("#{} / {}", entry.number, history.next_number),
+        MUTED,
+        inner.width,
+    );
+    frame.render_widget(
+        Paragraph::new(details),
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+    );
+    if inner.height < 4 {
+        return;
     }
 
-    let mut assessment = insight(history, index);
-    let cache = entry
-        .usage
-        .cached
-        .filter(|n| *n <= entry.usage.prompt)
-        .map(|cached| {
-            let ratio = if entry.usage.prompt > 0 {
-                cached as f64 / entry.usage.prompt as f64
-            } else {
-                0.0
-            };
-            if ratio < 0.2 && entry.usage.prompt >= 4096 {
-                assessment.action = "For repeating prompts, check prefix reuse.".into();
-            }
-            let color = if ratio >= 0.8 {
-                GREEN
-            } else if ratio < 0.2 && entry.usage.prompt >= 4096 {
-                YELLOW
-            } else {
+    // Use every remaining column for history; new requests enter on the right.
+    // The axis is ordinal (one bar/request), with timestamps anchored to bars.
+    let plot = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 3);
+    let visible = (index + 1).min(usize::from(plot.width));
+    let start = index + 1 - visible;
+    let first_x = plot.right() - visible as u16;
+    for (offset, old) in history.entries.iter().skip(start).take(visible).enumerate() {
+        let i = start + offset;
+        draw_bar(
+            frame,
+            Rect::new(first_x + offset as u16, plot.y, 1, plot.height),
+            &old.usage,
+            if is_live(old, sample, now) {
                 CYAN
-            };
-            Span::styled(
-                format!(
-                    "CACHE {:.0}% · {} uncached",
-                    ratio * 100.0,
-                    exact(entry.usage.prompt - cached)
-                ),
-                Style::default().fg(color),
-            )
-        });
-    if columns[1].width < 48 {
-        assessment.title = assessment.title.split(" · ").next().unwrap_or("").into();
-        assessment.detail = assessment.detail.split(" · ").next().unwrap_or("").into();
-        assessment.action = if assessment.action.starts_with("Inspect added") {
-            "Inspect context/tool results."
-        } else if assessment.action.starts_with("For repeating") {
-            "Repeating input? Check reuse."
-        } else if assessment.action.starts_with("Less input") {
-            "Compare prefill time."
-        } else if assessment.action.starts_with("Compare more") {
-            "Collect more requests."
-        } else {
-            "Check prefill, queue and GPU."
-        }
-        .into();
+            } else {
+                BLUE
+            },
+            material_jump(
+                &old.usage,
+                i.checked_sub(1).and_then(|n| history.entries.get(n)),
+            ),
+        );
     }
-    let title = if live {
-        assessment.title
-    } else {
-        format!("HISTORY · {}", assessment.title)
-    };
-    let lines =
-        vec![
-            Line::from(Span::styled(
-                title,
-                Style::default()
-                    .fg(assessment.tone.color())
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(assessment.detail, Style::default().fg(MUTED))),
-            Line::from(cache.unwrap_or_else(|| {
-                Span::styled("CACHE — not reported", Style::default().fg(MUTED))
-            })),
-            Line::from(Span::styled(
-                assessment.action,
-                Style::default().fg(if live { Color::White } else { MUTED }),
-            )),
-        ];
-    let fit: Vec<_> = lines
-        .into_iter()
-        .map(|line| {
-            let style = line.spans.first().map(|s| s.style).unwrap_or_default();
-            Line::from(Span::styled(
-                compact_label(&line.to_string(), columns[1].width as usize),
-                style,
-            ))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(fit), columns[1]);
+
+    let axis_y = plot.bottom();
+    let selected_x = plot.right() - 1;
+    frame.buffer_mut()[(selected_x, axis_y)]
+        .set_symbol("▲")
+        .set_style(Style::default().fg(color).add_modifier(Modifier::BOLD));
+    if plot.width >= 9 {
+        let last_label_x = selected_x - 8;
+        frame.render_widget(
+            Paragraph::new(clock_stamp(entry.last_seen)).style(Style::default().fg(color)),
+            Rect::new(last_label_x, axis_y, 8, 1),
+        );
+        let step = visible.div_ceil(4).max(12);
+        for offset in (0..visible).step_by(step) {
+            let x = first_x + offset as u16;
+            if x + 9 > last_label_x {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(clock_stamp(history.entries[start + offset].last_seen))
+                    .style(Style::default().fg(MUTED)),
+                Rect::new(x, axis_y, 8, 1),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -536,16 +607,18 @@ mod tests {
         let mut history = History::default();
         history.observe(&[usage("previous", 22710)]);
         assert_eq!(
-            comparison(&usage("latest", 20055), history.entries.back()),
-            "PREVIOUS OBSERVED 22,710 · CHANGE −2,655 (−11.7%)"
+            compact_comparison(&usage("latest", 20055), history.entries.back()),
+            "Δ −2,655 (−11.7%) · PREVIOUS OBSERVED 22,710"
         );
         let mut other = usage("other", 20055);
         other.model = "different".into();
-        assert!(comparison(&other, history.entries.back()).contains("no comparison"));
+        assert!(
+            compact_comparison(&other, history.entries.back()).contains("different provider/model")
+        );
         history.observe(&[usage("zero", 0)]);
         assert_eq!(
-            comparison(&usage("new", 10), history.entries.back()),
-            "PREVIOUS OBSERVED 0 · CHANGE +10"
+            compact_comparison(&usage("new", 10), history.entries.back()),
+            "Δ +10 · PREVIOUS OBSERVED 0"
         );
     }
 
@@ -607,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn short_prompt_bars_show_reported_cache_but_unknown_cache_stays_unsplit() {
+    fn cache_metadata_does_not_inflate_short_bars() {
         let mut history = History::default();
         let unknown = usage("unknown", 12000);
         let mut cached = usage("cached", 12000);
@@ -618,9 +691,114 @@ mod tests {
             .draw(|frame| draw(frame, frame.area(), &history, &Sample::default(), 0))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        // The chart starts at x=1; the second bar begins six columns later.
-        assert!((1..7).any(|y| buffer[(7, y)].fg == GREEN && buffer[(7, y)].bg == BLUE));
-        assert!(!(1..7).any(|y| buffer[(1, y)].fg == GREEN));
+        // Two equal prompts must have identical geometry even if one reports
+        // cache reuse. In a partial cell, the background must stay empty.
+        for y in 3..6 {
+            assert_eq!(buffer[(87, y)].symbol(), buffer[(88, y)].symbol());
+            assert_eq!(buffer[(88, y)].bg, PANEL);
+            assert_ne!(buffer[(87, y)].fg, GREEN);
+        }
+        assert_eq!(buffer[(88, 5)].fg, GREEN);
+    }
+
+    #[test]
+    fn full_width_history_keeps_timestamps_and_selection_at_supported_sizes() {
+        let mut history = History::default();
+        for i in 0..120 {
+            let mut request = usage(&i.to_string(), 16_384 + i * 128);
+            request.observed_at =
+                Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i * 5));
+            request.completed = true;
+            history.observe(&[request]);
+        }
+        for (width, height) in [(80, 8), (100, 8), (90, 8), (140, 7)] {
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|f| draw(f, f.area(), &history, &Sample::default(), 0))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let visible_bars = (1..width - 1)
+                .filter(|x| {
+                    (3..height - 2)
+                        .any(|y| buffer[(*x, y)].fg == BLUE && buffer[(*x, y)].symbol() != " ")
+                })
+                .count();
+            assert_eq!(visible_bars, usize::from(width - 2).min(120));
+            assert_eq!(buffer[(width - 2, height - 2)].symbol(), "▲");
+            let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+            for label in [
+                "31,616 tokens",
+                "REPORTED",
+                "CACHE —",
+                "22:23:15",
+                "UTC",
+                "PREVIOUS OBSERVED",
+            ] {
+                assert!(text.contains(label), "missing {label} at {width}x{height}");
+            }
+            terminal
+                .draw(|f| draw(f, f.area(), &history, &Sample::default(), usize::MAX))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains("16,384 tokens"));
+            assert!(text.contains("22:13:20"));
+            assert!(!text.contains("31,616"));
+        }
+    }
+
+    #[test]
+    fn selection_survives_a_jump_and_overflow_and_zero_stays_zero() {
+        let mut history = History::default();
+        history.observe(&[
+            usage("zero", 0),
+            usage("small", 12_000),
+            usage("overflow", 100_000),
+        ]);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 8)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &history, &Sample::default(), 0))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(78, 3)].symbol(), "↑");
+        assert_eq!(buffer[(78, 6)].symbol(), "▲");
+        assert_eq!(buffer[(76, 5)].symbol(), "·");
+        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("100,000 tokens"));
+        assert!(text.contains("HISTORY · ! PROMPT JUMP"));
+        assert!(text.contains("Inspect context/tool results."));
+    }
+
+    #[test]
+    fn full_cell_stacks_preserve_both_segments_and_timestamp_rollover_is_explicit() {
+        let mut request = usage("cached", TREND_CEILING);
+        request.cached = Some(TREND_CEILING * 3 / 4);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(1, 3)).unwrap();
+        terminal
+            .draw(|f| draw_bar(f, f.area(), &request, BLUE, false))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 0)].fg, GREEN);
+        assert_eq!(buffer[(0, 0)].bg, BLUE);
+        assert_eq!(buffer[(0, 2)].fg, GREEN);
+        assert_eq!(
+            clock_stamp(SystemTime::UNIX_EPOCH + Duration::from_secs(86_399)),
+            "23:59:59"
+        );
+        assert_eq!(
+            clock_stamp(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400)),
+            "00:00:00"
+        );
+        assert_eq!(
+            clock_stamp(SystemTime::UNIX_EPOCH - Duration::from_secs(1)),
+            "--:--:--"
+        );
     }
 
     #[test]
@@ -656,12 +834,11 @@ mod tests {
         let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
         for label in [
             "LIVE",
-            "10.0k",
-            "12.0k",
+            "OBSERVED",
             "PROMPT JUMP",
             "CACHE 90%",
             "Recent median",
-            "Inspect added context",
+            "Inspect context/tool results.",
         ] {
             assert!(text.contains(label), "missing operator insight: {label}");
         }

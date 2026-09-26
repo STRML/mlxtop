@@ -1,13 +1,17 @@
 # Changelog
 
-## Unreleased
+## 1.1.2-rc.1 — Unreleased
 
+- Introduce release-candidate versions using `X.Y.Z-rc.N`, including support
+  for RC version strings in macOS packages and disk-image names.
+- Expand prompt history across the panel with one bar per request and a
+  consolidated UTC timestamp readout for the selected observation.
 - Keep llama-server live telemetry alongside client-reported prompt history;
   poll slots and metrics independently and sum output across all active slots.
 - Read llama-server active/deferred queue gauges without treating average rates
   as live generation speed.
 - Recognize runtime entrypoints consistently, including MLX-LM Python modules,
-  KoboldCpp scripts, LocalAI and LM Studio's headless daemon.
+  KoboldCpp scripts, LocalAI, LM Studio's headless daemon and the Bionic app.
 - Filter usage files by provider, deduplicate request IDs and accept
   Responses-style usage and LM Studio model instance identifiers.
 - Add a tested counters-only Python client helper with concurrent append support.
