@@ -75,6 +75,142 @@ fn identifier(value: &Value, field: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// oMLX's admin rows for a distributed model carry this placeholder instead of
+/// the request ID, so successive cluster requests would share one identity.
+const OMLX_SYNTHETIC_CLUSTER_ID: &str = "rank0";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OmlxPhase {
+    Generating,
+    Prefilling,
+    Waiting,
+}
+
+/// One live oMLX request, whether reported by the local scheduler or by rank
+/// zero of a distributed deployment.
+#[derive(Clone, Debug)]
+pub(super) struct OmlxRequest {
+    pub phase: OmlxPhase,
+    /// `None` when the server exposes no identity for the request.
+    pub id: Option<String>,
+    pub prompt: Option<u64>,
+    pub cached: Option<u64>,
+    pub output: Option<u64>,
+    pub rate: Option<f64>,
+    /// Age of rank zero's telemetry marker; scheduler rows are current.
+    pub age: Option<Duration>,
+}
+
+/// Rank zero's latest metrics, unless its heartbeat is stale.
+fn omlx_cluster_live(model: &Value) -> Option<(&Value, Option<Duration>)> {
+    let live = model.pointer("/cluster/live")?;
+    if live.get("stale").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let metrics = live.get("metrics").filter(|metrics| metrics.is_object())?;
+    let age = live
+        .get("age_seconds")
+        .and_then(Value::as_f64)
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok());
+    Some((metrics, age))
+}
+
+/// Normalize a model's generating, prefilling and waiting rows. Distributed
+/// rows are replaced by rank zero's per-request metrics, which carry the real
+/// request IDs; counting them once avoids duplicating work seen on every rank.
+pub(super) fn omlx_model_requests(model: &Value) -> Vec<OmlxRequest> {
+    let distributed = model
+        .get("cluster")
+        .is_some_and(|cluster| !cluster.is_null());
+    let cluster = omlx_cluster_live(model);
+    let cluster_requests = cluster.and_then(|(metrics, _)| {
+        metrics
+            .get("active_request_metrics")
+            .and_then(Value::as_array)
+    });
+    let mut result = Vec::new();
+    for (phase, field, rate_keys) in [
+        (
+            OmlxPhase::Generating,
+            "generating",
+            &["tokens_per_second"][..],
+        ),
+        // Recent oMLX admin responses expose prefill progress as `speed`;
+        // older responses used `tokens_per_second`.
+        (
+            OmlxPhase::Prefilling,
+            "prefilling",
+            &[
+                "tokens_per_second",
+                "speed",
+                "prefill_tps",
+                "prompt_tokens_per_second",
+            ][..],
+        ),
+        (OmlxPhase::Waiting, "waiting", &[][..]),
+    ] {
+        let Some(requests) = model.get(field).and_then(Value::as_array) else {
+            continue;
+        };
+        for request in requests {
+            let mut id = identifier(request, "request_id");
+            let mut age = None;
+            if distributed && id.as_deref() == Some(OMLX_SYNTHETIC_CLUSTER_ID) {
+                if cluster_requests.is_some() {
+                    continue;
+                }
+                // Without per-request metrics, the placeholder row was built
+                // from rank zero's most recent running request.
+                id = cluster
+                    .and_then(|(metrics, _)| metrics.get("last_request"))
+                    .filter(|last| last.get("status").and_then(Value::as_str) == Some("running"))
+                    .and_then(|last| identifier(last, "request_id"));
+                age = cluster.and_then(|(_, age)| age);
+            }
+            result.push(OmlxRequest {
+                phase,
+                id,
+                prompt: counter(request, &["prompt_tokens"]),
+                cached: counter(request, &["cached_tokens"]),
+                output: counter(request, &["generated_tokens"]),
+                rate: request_rate(request, rate_keys),
+                age,
+            });
+        }
+    }
+    let Some((_, age)) = cluster else {
+        return result;
+    };
+    for request in cluster_requests.into_iter().flatten() {
+        if request.get("status").and_then(Value::as_str) != Some("running") {
+            continue;
+        }
+        let progress = request.get("prefill_progress");
+        let prefilling = progress
+            .and_then(|progress| progress.get("active"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        result.push(OmlxRequest {
+            phase: if prefilling {
+                OmlxPhase::Prefilling
+            } else {
+                OmlxPhase::Generating
+            },
+            id: identifier(request, "request_id"),
+            prompt: counter(request, &["prompt_tokens"]),
+            cached: counter(request, &["cached_tokens"]),
+            output: counter(request, &["completion_tokens"]),
+            rate: if prefilling {
+                progress.and_then(|progress| request_rate(progress, &["speed"]))
+            } else {
+                request_rate(request, &["decode_tps"])
+            },
+            age,
+        });
+    }
+    result
+}
+
 pub(super) fn omlx_requests(stats: &Value) -> Vec<RequestUsage> {
     let Some(models) = stats
         .pointer("/active_models/models")
@@ -82,35 +218,34 @@ pub(super) fn omlx_requests(stats: &Value) -> Vec<RequestUsage> {
     else {
         return Vec::new();
     };
+    let now = SystemTime::now();
     let mut result = Vec::new();
     for model in models {
-        for phase in ["generating", "prefilling", "waiting"] {
-            let Some(requests) = model.get(phase).and_then(Value::as_array) else {
+        for request in omlx_model_requests(model) {
+            // Without an identity, one request cannot be told from the next.
+            let (Some(id), Some(prompt)) = (request.id, request.prompt) else {
                 continue;
             };
-            for request in requests {
-                let (Some(id), Some(prompt)) = (
-                    identifier(request, "request_id"),
-                    counter(request, &["prompt_tokens"]),
-                ) else {
-                    continue;
-                };
-                // Waiting requests may not have been tokenized yet.
-                if prompt == 0 && phase == "waiting" {
-                    continue;
-                }
-                result.push(RequestUsage {
-                    provider: "oMLX".into(),
-                    model: identifier(model, "id").unwrap_or_else(|| "unknown".into()),
-                    id,
-                    prompt,
-                    cached: counter(request, &["cached_tokens"]).filter(|n| *n <= prompt),
-                    output: counter(request, &["generated_tokens"]),
-                    completed: false,
-                    ttft_ms: None,
-                    observed_at: Some(SystemTime::now()),
-                });
+            // Waiting requests may not have been tokenized yet.
+            if prompt == 0 && request.phase == OmlxPhase::Waiting {
+                continue;
             }
+            result.push(RequestUsage {
+                provider: "oMLX".into(),
+                model: identifier(model, "id").unwrap_or_else(|| "unknown".into()),
+                id,
+                prompt,
+                cached: request.cached.filter(|n| *n <= prompt),
+                output: request.output,
+                completed: false,
+                ttft_ms: None,
+                observed_at: Some(
+                    request
+                        .age
+                        .and_then(|age| now.checked_sub(age))
+                        .unwrap_or(now),
+                ),
+            });
         }
     }
     result
@@ -746,6 +881,101 @@ mod tests {
         assert_eq!(requests[1].prompt, 200);
         assert_eq!(requests[0].cached, None);
         assert_eq!(requests[2].cached, Some(100));
+    }
+
+    /// An oMLX 0.7 distributed model as `_build_active_models_data` renders it:
+    /// one synthetic `rank0` row beside rank zero's per-request metrics.
+    fn omlx_cluster_model(running: Value, age_seconds: f64, stale: bool) -> Value {
+        let last = running.as_array().and_then(|r| r.last()).cloned();
+        json!({"id":"dist","active_requests":running.as_array().map_or(0, Vec::len),
+            "waiting_requests":0,"prefilling":[],
+            "generating":[{"request_id":"rank0","generated_tokens":9,"prompt_tokens":500,
+                "tokens_per_second":12.0}],
+            "cluster":{"deployment_id":"d1","live":{"age_seconds":age_seconds,"stale":stale,
+                "metrics":{"scope":"end_to_end_pipeline","active_requests":2,
+                    "aggregate_decode_tps":0.4,"active_request_metrics":running,
+                    "active_request_metrics_truncated":0,"last_request":last}}}})
+    }
+
+    fn cluster_request(id: &str, prompt: u64, completion: u64, prefilling: bool) -> Value {
+        json!({"status":"running","request_id":id,"prompt_tokens":prompt,"cached_tokens":100,
+            "completion_tokens":completion,"decode_tps":if prefilling { 0.0 } else { 12.0 },
+            "prefill_progress":{"active":prefilling,"processed":64,"total":prompt,"speed":80.0}})
+    }
+
+    #[test]
+    fn omlx_cluster_rows_use_rank_zero_request_ids() {
+        let model = omlx_cluster_model(
+            json!([
+                cluster_request("chatcmpl-a", 500, 9, false),
+                cluster_request("chatcmpl-b", 700, 0, true)
+            ]),
+            2.0,
+            false,
+        );
+        let rows = omlx_model_requests(&model);
+        assert_eq!(rows.len(), 2, "the synthetic row is replaced, not added");
+        assert_eq!(rows[0].id.as_deref(), Some("chatcmpl-a"));
+        assert_eq!(rows[0].phase, OmlxPhase::Generating);
+        assert_eq!(rows[0].rate, Some(12.0));
+        assert_eq!(rows[1].phase, OmlxPhase::Prefilling);
+        assert_eq!(rows[1].rate, Some(80.0));
+        assert_eq!(rows[1].age, Some(Duration::from_secs(2)));
+
+        let before = SystemTime::now();
+        let requests = omlx_requests(&json!({"active_models":{"models":[model]}}));
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.id != "rank0"));
+        assert_eq!(requests[1].cached, Some(100));
+        // Rank zero's marker age, not the poll time, dates the observation.
+        assert!(requests[0].observed_at.unwrap() <= before - Duration::from_secs(1));
+    }
+
+    #[test]
+    fn successive_omlx_cluster_requests_stay_distinct() {
+        let mut history = request_dashboard::History::default();
+        for id in ["chatcmpl-1", "chatcmpl-2"] {
+            let model = omlx_cluster_model(json!([cluster_request(id, 500, 9, false)]), 0.5, false);
+            history.observe(&omlx_requests(&json!({"active_models":{"models":[model]}})));
+        }
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn omlx_cluster_placeholder_falls_back_to_last_running_request() {
+        let mut model = omlx_cluster_model(
+            json!([cluster_request("chatcmpl-a", 500, 9, false)]),
+            0.5,
+            false,
+        );
+        let metrics = &mut model["cluster"]["live"]["metrics"];
+        metrics
+            .as_object_mut()
+            .unwrap()
+            .remove("active_request_metrics");
+        let rows = omlx_model_requests(&model);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("chatcmpl-a"));
+        assert_eq!(rows[0].rate, Some(12.0));
+
+        // Without any identity the row still counts as work, not as history.
+        model["cluster"]["live"]["metrics"]["last_request"]["status"] = json!("completed");
+        assert_eq!(omlx_model_requests(&model)[0].id, None);
+        assert!(omlx_requests(&json!({"active_models":{"models":[model]}})).is_empty());
+    }
+
+    #[test]
+    fn stale_omlx_cluster_metrics_are_ignored() {
+        let model = omlx_cluster_model(
+            json!([cluster_request("chatcmpl-a", 500, 9, false)]),
+            30.0,
+            true,
+        );
+        let rows = omlx_model_requests(&model);
+        // Stale metrics add no requests and give the placeholder no identity.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, None);
+        assert_eq!(rows[0].age, None);
     }
 
     #[test]

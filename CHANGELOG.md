@@ -16,6 +16,10 @@
   Responses-style usage and LM Studio model instance identifiers.
 - Add a tested counters-only Python client helper with concurrent append support.
 - Distinguish KoboldCpp generation IDs after an observed uptime reset.
+- Keep successive oMLX distributed requests separate in prompt history by using
+  rank zero's request IDs instead of the shared `rank0` placeholder.
+- Report oMLX queue counts, rates and output across every loaded model and
+  concurrent request, rather than only the first active model and request.
 
 ## 1.1.1 — 2026-09-15
 

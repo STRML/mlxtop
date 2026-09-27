@@ -6708,90 +6708,116 @@ fn parse_omlx_telemetry(health: &Value, stats: Option<&Value>) -> LlmTelemetry {
     telemetry.model_memory_max =
         json_u64(stats, &["active_models", "model_memory_max"]).or(telemetry.model_memory_max);
 
+    // Headline values describe the whole server: loaded models share it, and
+    // one model's queue or first request is not the server's.
     let models = stats
-        .get("active_models")
-        .and_then(|value| value.get("models"))
+        .pointer("/active_models/models")
         .and_then(Value::as_array);
-    let model = models.and_then(|models| {
-        models
+    let model_requests: Vec<_> = models
+        .into_iter()
+        .flatten()
+        .map(|model| (model, providers::omlx_model_requests(model)))
+        .collect();
+    let busy: Vec<&Value> = model_requests
+        .iter()
+        .filter(|(model, requests)| {
+            !requests.is_empty()
+                || json_u64(model, &["active_requests"]).unwrap_or(0) > 0
+                || json_u64(model, &["waiting_requests"]).unwrap_or(0) > 0
+        })
+        .map(|(model, _)| *model)
+        .collect();
+    let headline = busy
+        .first()
+        .copied()
+        .or_else(|| models.and_then(|models| models.first()));
+    let headline_id = headline.and_then(|model| json_string(model, &["id"]));
+    if let Some(id) = &headline_id {
+        // A distinct label also keeps multi-model throughput out of a single
+        // model's correlation baseline.
+        telemetry.model = Some(if busy.len() > 1 {
+            format!("{} models · {id}", busy.len())
+        } else {
+            id.clone()
+        });
+    }
+    let requests: Vec<&providers::OmlxRequest> = model_requests
+        .iter()
+        .flat_map(|(_, requests)| requests)
+        .collect();
+    let in_phase = |phase| -> Vec<&providers::OmlxRequest> {
+        requests
             .iter()
-            .find(|model| {
-                ["generating", "prefilling"].into_iter().any(|phase| {
-                    model
-                        .get(phase)
-                        .and_then(Value::as_array)
-                        .is_some_and(|requests| !requests.is_empty())
+            .copied()
+            .filter(|request| request.phase == phase)
+            .collect()
+    };
+    let generating = in_phase(providers::OmlxPhase::Generating);
+    let prefilling = in_phase(providers::OmlxPhase::Prefilling);
+    let waiting = in_phase(providers::OmlxPhase::Waiting);
+
+    if let Some(models) = models {
+        let total = |total: &str, per_model: &str| {
+            json_u64(stats, &["active_models", total]).or_else(|| {
+                models.iter().try_fold(0_u64, |sum, model| {
+                    sum.checked_add(json_u64(model, &[per_model])?)
                 })
             })
-            .or_else(|| models.first())
-    });
-    if let Some(model) = model {
-        telemetry.model = json_string(model, &["id"]).or(telemetry.model);
-        telemetry.active_requests = json_u64(model, &["active_requests"]);
-        telemetry.waiting_requests = json_u64(model, &["waiting_requests"]);
-        if let Some(request) = model
-            .get("generating")
-            .and_then(Value::as_array)
-            .and_then(|requests| requests.first())
-        {
-            if let Some(rate) = request_rate(request, &["tokens_per_second"]) {
-                telemetry.generation_tps = Some(rate);
-                telemetry.generation_tps_live = true;
-            }
-            telemetry.output_tokens = json_u64(request, &["generated_tokens"]);
-            telemetry.prompt_tokens = json_u64(request, &["prompt_tokens"]);
-        }
-        if let Some(request) = model
-            .get("prefilling")
-            .and_then(Value::as_array)
-            .and_then(|requests| requests.first())
-        {
-            // Recent oMLX admin responses expose prefill progress as
-            // `speed`; older responses used `tokens_per_second`.
-            if let Some(rate) = request_rate(
-                request,
-                &[
-                    "tokens_per_second",
-                    "speed",
-                    "prefill_tps",
-                    "prompt_tokens_per_second",
-                ],
-            ) {
-                telemetry.prefill_tps = Some(rate);
-                telemetry.prefill_tps_live = true;
-            }
-            telemetry.prompt_tokens = telemetry
-                .prompt_tokens
-                .or_else(|| json_u64(request, &["prompt_tokens"]));
-        }
-        if telemetry.prompt_tokens.is_none() {
-            telemetry.prompt_tokens = model
-                .get("waiting")
-                .and_then(Value::as_array)
-                .and_then(|requests| requests.first())
-                .and_then(|request| json_u64(request, &["prompt_tokens"]));
-        }
-        let loading = model
-            .get("is_loading")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let generating = model
-            .get("generating")
-            .and_then(Value::as_array)
-            .is_some_and(|requests| !requests.is_empty());
-        let prefilling = model
-            .get("prefilling")
-            .and_then(Value::as_array)
-            .is_some_and(|requests| !requests.is_empty());
-        let waiting = telemetry.waiting_requests.unwrap_or(0) > 0;
+        };
+        telemetry.active_requests = total("total_active_requests", "active_requests");
+        telemetry.waiting_requests = total("total_waiting_requests", "waiting_requests");
+    }
+    // Concurrent requests add up; a partial sum is not presented as complete.
+    let live_sum = |requests: &[&providers::OmlxRequest]| {
+        (!requests.is_empty())
+            .then(|| {
+                requests
+                    .iter()
+                    .try_fold(0.0, |sum, request| Some(sum + request.rate?))
+            })
+            .flatten()
+    };
+    if let Some(rate) = live_sum(&generating) {
+        telemetry.generation_tps = Some(rate);
+        telemetry.generation_tps_live = true;
+    }
+    if let Some(rate) = live_sum(&prefilling) {
+        telemetry.prefill_tps = Some(rate);
+        telemetry.prefill_tps_live = true;
+    }
+    telemetry.output_tokens = (!generating.is_empty())
+        .then(|| {
+            generating
+                .iter()
+                .try_fold(0_u64, |sum, request| sum.checked_add(request.output?))
+        })
+        .flatten();
+    // A prompt size describes one request; concurrent requests have none.
+    let active = generating.len() + prefilling.len();
+    telemetry.prompt_tokens = match (active, waiting.as_slice()) {
+        (1, _) => generating
+            .first()
+            .or_else(|| prefilling.first())
+            .and_then(|request| request.prompt),
+        (0, [request]) => request.prompt.filter(|prompt| *prompt > 0),
+        _ => None,
+    };
+    if !model_requests.is_empty() {
+        let loading = model_requests.iter().any(|(model, _)| {
+            model
+                .get("is_loading")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        });
+        // Serving work outranks another model's load.
         telemetry.status = Some(
-            if loading {
-                "loading"
-            } else if prefilling {
+            if !prefilling.is_empty() {
                 "prefilling"
-            } else if generating {
+            } else if !generating.is_empty() {
                 "generating"
-            } else if waiting {
+            } else if loading {
+                "loading"
+            } else if telemetry.waiting_requests.unwrap_or(0) > 0 {
                 "waiting"
             } else if telemetry.active_requests.unwrap_or(0) > 0 {
                 "active"
@@ -6802,18 +6828,29 @@ fn parse_omlx_telemetry(health: &Value, stats: Option<&Value>) -> LlmTelemetry {
         );
     }
 
-    if let Some(model_cache) = stats
-        .get("runtime_cache")
-        .and_then(|value| value.get("models"))
-        .and_then(Value::as_array)
-        .and_then(|models| models.first())
-    {
-        let cumulative = model_cache
-            .get("cache_rates")
-            .and_then(|value| value.get("cumulative"));
-        telemetry.prefix_hit_rate = cumulative
-            .and_then(|value| json_f64(value, &["prefix_hit_rate"]))
-            .map(|value| (value * 100.0).clamp(0.0, 100.0));
+    // Prefix reuse is per model, so several busy models have no single rate.
+    // Older responses list one cache entry without a model ID.
+    let model_caches = stats
+        .pointer("/runtime_cache/models")
+        .and_then(Value::as_array);
+    let model_cache = model_caches.and_then(|caches| {
+        if busy.len() > 1 {
+            return None;
+        }
+        caches
+            .iter()
+            .find(|cache| headline_id.is_some() && json_string(cache, &["id"]) == headline_id)
+            .or_else(|| match caches.as_slice() {
+                [cache] if cache.get("id").is_none() => Some(cache),
+                _ => None,
+            })
+    });
+    if let Some(model_cache) = model_cache {
+        telemetry.prefix_hit_rate = json_f64(
+            model_cache,
+            &["cache_rates", "cumulative", "prefix_hit_rate"],
+        )
+        .map(|value| (value * 100.0).clamp(0.0, 100.0));
     }
     telemetry
 }
@@ -9418,6 +9455,125 @@ mod tests {
         let telemetry = parse_omlx_telemetry(&health, Some(&stats));
         assert_eq!(telemetry.status.as_deref(), Some("waiting"));
         assert_eq!(telemetry.prompt_tokens, Some(12632));
+    }
+
+    #[test]
+    fn omlx_headline_values_cover_every_loaded_model() {
+        let health = json!({"status": "healthy", "default_model": "a"});
+        let stats = json!({
+            "avg_generation_tps": 31.6,
+            "active_models": {
+                "total_active_requests": 3,
+                "total_waiting_requests": 2,
+                "models": [
+                    {"id": "idle", "active_requests": 0, "waiting_requests": 0},
+                    {"id": "a", "active_requests": 1, "waiting_requests": 2,
+                     "waiting": [{"request_id": "w1", "prompt_tokens": 0}],
+                     "generating": [{"request_id": "1", "generated_tokens": 40,
+                                     "prompt_tokens": 900, "tokens_per_second": 20.0}]},
+                    {"id": "b", "active_requests": 2, "waiting_requests": 0,
+                     "generating": [{"request_id": "2", "generated_tokens": 10,
+                                     "prompt_tokens": 300, "tokens_per_second": 8.5}],
+                     "prefilling": [{"request_id": "3", "speed": 150.0, "processed": 64,
+                                     "total": 2048}]}
+                ]
+            },
+            "runtime_cache": {"models": [
+                {"id": "a", "cache_rates": {"cumulative": {"prefix_hit_rate": 0.9}}}
+            ]}
+        });
+
+        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+
+        assert_eq!(telemetry.model.as_deref(), Some("2 models · a"));
+        assert_eq!(telemetry.status.as_deref(), Some("prefilling"));
+        assert_eq!(telemetry.active_requests, Some(3));
+        assert_eq!(telemetry.waiting_requests, Some(2));
+        assert_eq!(telemetry.generation_tps, Some(28.5));
+        assert!(telemetry.generation_tps_live);
+        assert_eq!(telemetry.prefill_tps, Some(150.0));
+        assert_eq!(telemetry.output_tokens, Some(50));
+        // Three requests are in flight, so no single prompt size or cache
+        // reuse rate describes the server.
+        assert_eq!(telemetry.prompt_tokens, None);
+        assert_eq!(telemetry.prefix_hit_rate, None);
+    }
+
+    #[test]
+    fn omlx_queue_totals_fall_back_to_complete_model_counts() {
+        let health = json!({"status": "healthy"});
+        let mut stats = json!({"active_models": {"models": [
+            {"id": "a", "active_requests": 0, "waiting_requests": 1},
+            {"id": "b", "active_requests": 2, "waiting_requests": 0}
+        ]}});
+        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+        assert_eq!(telemetry.active_requests, Some(2));
+        assert_eq!(telemetry.waiting_requests, Some(1));
+        assert_eq!(telemetry.status.as_deref(), Some("waiting"));
+
+        stats["active_models"]["models"][0]["is_loading"] = json!(true);
+        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+        assert_eq!(telemetry.status.as_deref(), Some("loading"));
+        stats["active_models"]["models"][1]["generating"] =
+            json!([{"request_id": "1", "tokens_per_second": 5.0}]);
+        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+        assert_eq!(telemetry.status.as_deref(), Some("generating"));
+
+        stats["active_models"]["models"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("waiting_requests");
+        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+        assert_eq!(telemetry.waiting_requests, None);
+    }
+
+    #[test]
+    fn omlx_concurrent_rates_are_live_only_when_every_request_reports() {
+        let health = json!({"status": "healthy"});
+        let stats = json!({
+            "avg_generation_tps": 31.6,
+            "active_models": {"models": [{"id": "a", "active_requests": 2,
+                "waiting_requests": 0,
+                "generating": [
+                    {"request_id": "1", "generated_tokens": 5, "prompt_tokens": 10,
+                     "tokens_per_second": 20.0},
+                    {"request_id": "2", "prompt_tokens": 12}
+                ]}]}
+        });
+        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+        assert_eq!(telemetry.model.as_deref(), Some("a"));
+        assert_eq!(telemetry.generation_tps, Some(31.6));
+        assert!(!telemetry.generation_tps_live);
+        assert_eq!(telemetry.output_tokens, None);
+    }
+
+    #[test]
+    fn omlx_cluster_rates_come_from_rank_zero_requests() {
+        let health = json!({"status": "healthy"});
+        let running = |id: &str, decode: f64| {
+            json!({"status": "running", "request_id": id, "prompt_tokens": 400,
+                "completion_tokens": 30, "decode_tps": decode,
+                "prefill_progress": {"active": false, "speed": 0.0}})
+        };
+        let stats = json!({"active_models": {"models": [{
+            "id": "dist", "active_requests": 2, "waiting_requests": 0,
+            "prefilling": [],
+            "generating": [{"request_id": "rank0", "generated_tokens": 30,
+                            "prompt_tokens": 400, "tokens_per_second": 11.0}],
+            "cluster": {"live": {"age_seconds": 0.4, "stale": false, "metrics": {
+                "active_requests": 2,
+                "active_request_metrics": [running("r1", 9.0), running("r2", 11.0)],
+                "last_request": running("r2", 11.0)}}}
+        }]}});
+
+        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
+
+        assert_eq!(telemetry.generation_tps, Some(20.0));
+        assert!(telemetry.generation_tps_live);
+        assert_eq!(telemetry.output_tokens, Some(60));
+        assert_eq!(telemetry.prompt_tokens, None);
+        let ids: Vec<_> = telemetry.requests.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["r1", "r2"]);
     }
 
     #[test]
