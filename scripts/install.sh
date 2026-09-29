@@ -1,24 +1,68 @@
 #!/bin/sh
 # SPDX-License-Identifier: MIT
-# Install the published Apple Silicon binary without requiring Rust or sudo.
+# Install the published macOS (Apple Silicon) or Linux (x86_64, aarch64)
+# binary without requiring Rust or sudo.
 set -eu
 
 main() {
     case "$(uname -s)/$(uname -m)" in
-        Darwin/arm64) ;;
-        *) printf '%s\n' 'mlxtop requires macOS on Apple Silicon.' >&2; exit 1 ;;
+        Darwin/arm64)
+            target=aarch64-apple-darwin
+            extension=dmg
+            platform='Apple Silicon'
+            tools='hdiutil pkgutil'
+            ;;
+        Linux/x86_64 | Linux/amd64)
+            target=x86_64-unknown-linux-musl
+            extension=tar.gz
+            platform='Linux x86_64'
+            tools='tar'
+            ;;
+        Linux/aarch64 | Linux/arm64)
+            target=aarch64-unknown-linux-musl
+            extension=tar.gz
+            platform='Linux aarch64'
+            tools='tar'
+            ;;
+        *)
+            printf '%s\n' 'mlxtop requires macOS on Apple Silicon or Linux on x86_64 or aarch64.' >&2
+            exit 1
+            ;;
     esac
 
-    for command in curl shasum hdiutil pkgutil mktemp; do
+    for command in curl grep awk mktemp $tools; do
         command -v "$command" >/dev/null 2>&1 || {
             printf 'Required command not found: %s\n' "$command" >&2
             exit 1
         }
     done
+    if command -v sha256sum >/dev/null 2>&1; then
+        checksum='sha256sum'
+    elif command -v shasum >/dev/null 2>&1; then
+        checksum='shasum -a 256'
+    else
+        printf '%s\n' 'Required command not found: sha256sum or shasum' >&2
+        exit 1
+    fi
 
-    version=1.1.1
-    archive="mlxtop-${version}-aarch64-apple-darwin.dmg"
-    base="https://github.com/maximpri/mlxtop/releases/download/v${version}"
+    repository=https://github.com/maximpri/mlxtop
+    version="${MLXTOP_VERSION:-}"
+    if [ -z "$version" ]; then
+        # GitHub redirects the latest release to its tag; prereleases are
+        # never the latest release.
+        latest=$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --head --output /dev/null --write-out '%{url_effective}' \
+            "$repository/releases/latest")
+        version="${latest##*/tag/}"
+    fi
+    version="${version#v}"
+    printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$' || {
+        printf 'Could not determine an mlxtop release version (got: %s).\n' "$version" >&2
+        exit 1
+    }
+    name="mlxtop-${version}-${target}"
+    archive="${name}.${extension}"
+    base="$repository/releases/download/v${version}"
     install_dir="${MLXTOP_INSTALL_DIR:-$HOME/.local/bin}"
     data_dir="${XDG_DATA_HOME:-$HOME/.local/share}/mlxtop/${version}"
     case "$install_dir" in
@@ -39,21 +83,35 @@ main() {
     trap cleanup EXIT
     trap 'exit 1' HUP INT TERM
 
-    printf 'Downloading mlxtop %s for Apple Silicon...\n' "$version"
+    printf 'Downloading mlxtop %s for %s...\n' "$version" "$platform"
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
         "$base/$archive" -o "$work_dir/$archive"
     curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
         "$base/SHA256SUMS" -o "$work_dir/SHA256SUMS"
-    (cd "$work_dir" && shasum -a 256 -c SHA256SUMS)
-    mkdir "$mount_dir"
-    hdiutil attach "$work_dir/$archive" -readonly -nobrowse -mountpoint "$mount_dir" >/dev/null
-    mounted=1
-    pkgutil --expand-full "$mount_dir/Install mlxtop.pkg" "$work_dir/expanded"
-    hdiutil detach "$mount_dir" >/dev/null
-    mounted=0
-    package="$work_dir/expanded/mlxtop-component.pkg/Payload/usr/local"
-    binary="$package/bin/mlxtop"
-    notices="$package/share/mlxtop/$version"
+    # SHA256SUMS lists every platform's download; verify this one only.
+    awk -v file="$archive" '$2 == file || $2 == "*" file' \
+        "$work_dir/SHA256SUMS" > "$work_dir/SHA256SUMS.selected"
+    [ -s "$work_dir/SHA256SUMS.selected" ] || {
+        printf 'No checksum published for %s.\n' "$archive" >&2
+        exit 1
+    }
+    (cd "$work_dir" && $checksum -c SHA256SUMS.selected)
+
+    if [ "$extension" = dmg ]; then
+        mkdir "$mount_dir"
+        hdiutil attach "$work_dir/$archive" -readonly -nobrowse -mountpoint "$mount_dir" >/dev/null
+        mounted=1
+        pkgutil --expand-full "$mount_dir/Install mlxtop.pkg" "$work_dir/expanded"
+        hdiutil detach "$mount_dir" >/dev/null
+        mounted=0
+        package="$work_dir/expanded/mlxtop-component.pkg/Payload/usr/local"
+        binary="$package/bin/mlxtop"
+        notices="$package/share/mlxtop/$version"
+    else
+        tar -xzf "$work_dir/$archive" -C "$work_dir"
+        binary="$work_dir/$name/mlxtop"
+        notices="$work_dir/$name"
+    fi
     "$binary" --version
 
     mkdir -p "$install_dir" "$data_dir"

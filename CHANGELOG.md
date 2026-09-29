@@ -1,7 +1,9 @@
 # Changelog
 
-## 1.1.2-rc.1 — Unreleased
+## 1.1.2 — 2026-09-29
 
+- Publish static Linux binaries for x86_64 and aarch64; the terminal installer
+  now supports Linux as well as macOS on Apple Silicon.
 - Introduce release-candidate versions using `X.Y.Z-rc.N`, including support
   for RC version strings in macOS packages and disk-image names.
 - Expand prompt history across the panel with one bar per request and a

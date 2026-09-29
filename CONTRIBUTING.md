@@ -40,8 +40,9 @@ The CLI and dashboard obtain their version from Cargo. Rebuild with
 Use matching Git tags such as `v1.1.2-rc.1` when publishing and mark GitHub
 RC releases as prereleases. `scripts/package-dmg.sh` accepts both final and
 RC versions and uses the full version in the package and artifact names.
-The README download links and `scripts/install.sh` default continue to point
-to the latest published final release; update them when that release ships.
+The README links and `scripts/install.sh` follow GitHub's latest release,
+which never includes prereleases, so they need no per-release edits. Attach
+each platform's download and one `SHA256SUMS` covering all of them.
 
 ## Design boundaries
 

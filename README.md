@@ -6,7 +6,7 @@ See which models are running, how much memory they use, and how busy your Mac’
 GPU is. With oMLX, you can also follow generation speed and request activity as
 your model responds.
 
-![mlxtop v1.1.1 Overview showing per-request prompt load, generation and prefill rates, process memory, queue activity, GPU use, and recent events](docs/screenshots/overview.png)
+![mlxtop Overview showing per-request prompt load, generation and prefill rates, process memory, queue activity, GPU use, and recent events](docs/screenshots/overview.png)
 
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
@@ -15,31 +15,35 @@ your model responds.
 
 You’ll need an Apple Silicon Mac or a Linux machine and a terminal with
 Unicode and color support.
-The v1.1.1 binary targets macOS 11 or later and was tested on macOS 26.5.1.
-See the [release notes](https://github.com/maximpri/mlxtop/releases/tag/v1.1.1)
-for compatibility details.
+The macOS binary targets macOS 11 or later. The
+[latest release notes](https://github.com/maximpri/mlxtop/releases/latest)
+list the versions each release was tested on.
 
-[**Download the macOS disk image (.dmg)**](https://github.com/maximpri/mlxtop/releases/download/v1.1.1/mlxtop-1.1.1-aarch64-apple-darwin.dmg).
-Open it, double-click **Install mlxtop.pkg**, and follow the installer. Then
+[**Download the macOS disk image (.dmg)**](https://github.com/maximpri/mlxtop/releases/latest)
+from the latest release. Open it, double-click **Install mlxtop.pkg**, and follow the installer. Then
 open Terminal and run `mlxtop`. This installs in `/usr/local/bin` and requires
 an administrator account. The package is unsigned and not Apple notarized.
 
 ### Install from Terminal
 
-To install in your home directory without sudo:
+To install in your home directory without sudo, on macOS (Apple Silicon) or
+Linux (x86_64 or aarch64):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/maximpri/mlxtop/main/scripts/install.sh | sh
 ```
 
-The installer checks the download’s SHA-256 checksum and places `mlxtop` in
-`~/.local/bin`. No Rust toolchain or sudo is needed. Then run:
+The installer picks the download for your system, checks its SHA-256 checksum
+and places `mlxtop` in `~/.local/bin`. No Rust toolchain or sudo is needed.
+Linux downloads are static binaries with no runtime dependencies. Then run:
 
 ```sh
 ~/.local/bin/mlxtop
 ```
 
 Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
+The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
+example `curl -fsSL … | MLXTOP_VERSION=1.1.2 sh`.
 
 ## Configuration
 
@@ -199,7 +203,10 @@ On Linux, memory and swap come from `/proc/meminfo`, paging rates from
 `/proc/vmstat`, pressure level from the `MemAvailable` ratio blended with
 `/proc/pressure/memory` stalls, GPU readings from `nvidia-smi` when present,
 and thermals from `/sys/class/thermal`. Counters without a source are shown
-as unavailable. Build from source with `cargo install --path . --locked`.
+as unavailable. Install the prebuilt static binary with the
+[terminal installer](#install-from-terminal), download it from the
+[latest release](https://github.com/maximpri/mlxtop/releases/latest), or
+build from source with `cargo install --path . --locked`.
 
 | Runtime | Available information |
 | --- | --- |
