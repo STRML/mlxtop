@@ -332,7 +332,14 @@ The dashboard selects one provider; it does not merge unrelated servers.
 
 - **oMLX:** reads active request IDs and prompt counts from admin statistics.
   Some engines/phases do not expose counts; untokenized queued zeros are skipped
-  in the request journal.
+  in the request journal. Queue counts, rates and output cover every loaded
+  model; concurrent request rates and output counts are summed, and stay
+  unavailable if any request omits its value. With several requests in flight,
+  no single prompt size is shown. When more than one model is busy, the model
+  reads `2 models · <first>` and the per-model prefix hit rate is not shown.
+  For distributed (cluster) models, requests use rank zero's request IDs
+  instead of oMLX's shared `rank0` placeholder, and stale rank-zero metrics are
+  ignored.
 - **KoboldCpp:** reads `/api/extra/perf` last-result counts and rates. This is not
   a complete request history, and a new active request does not make the previous
   completion's rates live.
