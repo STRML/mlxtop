@@ -221,9 +221,11 @@ build from source with `cargo install --path . --locked`.
 | MLX-LM, Ollama, LM Studio, LocalAI | Process detection (including Python entrypoints, LM Studio's `llmster`, and the Bionic app); completed request counts through an optional client-written usage file |
 
 Overview integrates prompt load with generation and prefill on wide terminals.
-It shows the latest count, change from the previous observed request, freshness,
-and cached/uncached segments when reported. Queue and OS process-footprint
-charts complement the system metrics. First-token latency appears only when
+**Prompt load means prompt size in input tokens, including cached tokens.**
+The headline gives the selected request's exact size; each bar represents one
+observed request. The panel also shows the change from the previous observed
+request, freshness, and cached/uncached segments when reported. Queue and OS
+process-footprint charts complement the system metrics. First-token latency appears only when
 explicitly measured client timings are supplied. See the
 [operator charts](docs/USER_GUIDE.md#operator-charts) for scales and data sources.
 Prompt counts also appear in the static report. Journal records each

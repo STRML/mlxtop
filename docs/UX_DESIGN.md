@@ -80,6 +80,9 @@ colors in time-series history instead of recoloring old samples on refresh.
   request; do not assume conversation membership or a tool loop.
 - Show cache reuse only when reported for that request. Do not substitute an
   aggregate cache metric or infer latency from token counts alone.
+- The prompt-load headline is the selected request's exact input-token count,
+  including cached tokens. Keep that total prominent when browsing history or
+  zooming; cached and uncached segments partition the same total.
 - Stacked prompt bars use green for reported cached tokens, and cyan/live or
   blue/historical for the remainder. Unknown cache reuse stays unsplit. Prompt
   changes appear numerically; do not mark growth as an alarm. `↑` marks scale

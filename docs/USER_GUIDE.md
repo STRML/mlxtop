@@ -147,6 +147,11 @@ unavailable while the other per-card readings remain visible. A failed poll
 retains known device names but clears their counters until a successful poll.
 Unsupported counters appear as `—`; idle utilization is a measured `0%`.
 
+The example below uses simulated readings for four NVIDIA cards. It shows the
+per-card comparison, prompt sizes and chart controls in a wide terminal.
+
+![Overview with four simulated NVIDIA cards, per-card utilization and VRAM, and prompt-size history](screenshots/nvidia-multi-gpu.png)
+
 VRAM is shown separately for each card; any **VRAM sum** in the summary is an
 inventory total, not a shared allocation pool. `--once` lists all cards and
 their UUIDs without pagination. These are physical-device readings, not
@@ -264,17 +269,25 @@ and are not uploaded.
 
 ## Request-token telemetry
 
-The compact **prompt load** panel is built into **Overview**. It shows the
-latest prompt size, the change from the previous observed request, and freshness
-on a compact summary. At 160 columns and sufficient height, prompt load occupies
-half of the first chart row beside generation and prefill, instead of a separate
+The **prompt load** panel in **Overview** shows **prompt size in input tokens**.
+The headline is the selected request's exact input-token count, including cached
+tokens. For example, a 20,000-token prompt with 15,000 cached tokens still shows
+**20,000 tokens**; its uncached portion is 5,000 tokens. Each bar represents one
+observed request, and selecting an older request updates the headline to that
+request's size.
+
+The summary also shows the change from the previous observed request and the
+observation's freshness. At 160 columns and sufficient height, prompt load
+occupies half of the first chart row beside generation and prefill, instead of a separate
 full-width strip. It uses eight rows. Smaller terminals keep the stacked layout.
 The chart fills the panel width with one column per request at 1×. Exact selected
 tokens, observation time in UTC, age, cache reuse and the previous-request
-comparison stay above the chart; recent prompt-size statistics sit in the bottom border.
-`LIVE` requires a matching request in a fresh live sample. Once absent
-or stale it reads `LAST SEEN`; client-reported completions read `REPORTED`. Age comes from the request observation or the client timestamp, not the
-most recent redraw. The last sampled output is not assumed to be a final total.
+comparison stay above the chart; recent prompt-size statistics sit in the
+bottom border.
+`LIVE` requires a matching request in a fresh live sample. Once absent or stale,
+an incomplete request reads `LAST SEEN`; completed request counts read `REPORTED`.
+Age comes from the request observation or the client timestamp, not the most
+recent redraw. The last sampled output is not assumed to be a final total.
 
 The colored bar chart reads older to newer, with the selected request marked
 `▲` below the rightmost bar. Sparse UTC timestamps sit below their corresponding
@@ -311,8 +324,8 @@ latency on their own. Request identifiers and sampled output counts remain in
 Journal instead of occupying an Overview table.
 
 Up to 240 distinct requests are retained. Repeated polls update an existing
-observation, and past requests stay available. Use **↑ / ↓** or **PgUp / PgDn**
-to browse, **Home** for latest, **End** for oldest, and **r** to reset history.
+observation, and past requests stay available. Use **Shift-↑ / Shift-↓** or
+**PgUp / PgDn** to browse, **Home** for latest, **End** for oldest, and **r** to reset history.
 
 ## Operator charts
 

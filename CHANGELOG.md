@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Clarify that prompt load shows each request's exact input-token count,
+  including cached tokens, and document the selected request's freshness.
 - Select Overview charts with Tab, arrows or the mouse; zoom each history
   independently with +/− or the wheel, and enlarge/restore with Enter/Esc.
   Move sampling interval controls to { / }.
