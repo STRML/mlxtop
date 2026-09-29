@@ -31,7 +31,9 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 - Use the smallest panel height that preserves readable values, labels and
   useful context. Extra terminal height should benefit the system traces;
   do not add empty rows to a request summary.
-- Keep short-bar values readable independently of bar height. Do not put long
+- Keep exact selected values readable independently of bar height. Give prompt
+  history the full panel width, with one column per request and a single
+  consolidated assessment in the bottom border. Do not put long
   request IDs or raw payloads in Overview; use Journal for request detail.
 - At narrower widths, remove secondary detail before clipping primary values.
   Keep status, throughput, diagnosis and action available. Avoid wrapping chart
@@ -75,7 +77,12 @@ colors in time-series history instead of recoloring old samples on refresh.
   aggregate cache metric or infer latency from token counts alone.
 - Stacked prompt bars use green for reported cached tokens, and cyan/live or
   blue/historical for the remainder. Unknown cache reuse stays unsplit. A yellow
-  `!` and value label mark prompt growth without changing segment meanings.
+  `!` marks prompt growth; `↑` takes precedence for overflow. Keep the selected
+  `▲` on the timestamp row so neither marker hides it. UTC timestamp labels
+  describe observations, while horizontal spacing represents request order.
+  Cache availability must not alter bar height. Partial cells that cannot fit
+  both segment colors and empty space use the dominant segment; the selected
+  readout retains the precise count and reported cache reuse.
 - Label OS process memory with its PID and source. Keep process footprint,
   RSS and allocator counters distinct. Lifetime peak must not be confused with
   a peak observed only during monitoring. Growth requires consecutive readings

@@ -25,6 +25,24 @@ For UI changes, test both the interactive dashboard and the static report:
 ./target/release/mlxtop --once
 ~~~
 
+## Release candidates
+
+Use SemVer release candidates before a final release: `1.1.2-rc.1`,
+`1.1.2-rc.2`, then `1.1.2`. Increment the positive RC number for each new
+candidate of the same target version. When starting a new target version,
+restart at `rc.1`.
+
+Update the package version in `Cargo.toml` and the `mlxtop` entry in
+`Cargo.lock` together, and add the candidate's changes to `CHANGELOG.md`.
+The CLI and dashboard obtain their version from Cargo. Rebuild with
+`cargo build --locked` and check `./target/debug/mlxtop --version`.
+
+Use matching Git tags such as `v1.1.2-rc.1` when publishing and mark GitHub
+RC releases as prereleases. `scripts/package-dmg.sh` accepts both final and
+RC versions and uses the full version in the package and artifact names.
+The README download links and `scripts/install.sh` default continue to point
+to the latest published final release; update them when that release ships.
+
 ## Design boundaries
 
 Follow the [UX design rules](docs/UX_DESIGN.md) for naming, typography, color,

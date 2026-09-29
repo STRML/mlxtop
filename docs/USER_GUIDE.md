@@ -212,22 +212,28 @@ latest prompt size, the change from the previous observed request, and freshness
 on a compact summary. At 160 columns and sufficient height, prompt load occupies
 half of the first chart row beside generation and prefill, instead of a separate
 full-width strip. It uses eight rows. Smaller terminals keep the stacked layout.
-Token labels sit above
-the bars so even small requests remain readable.
+The chart fills the panel width with one column per request. Exact selected
+tokens, observation time in UTC, age, cache reuse and the previous-request
+comparison stay above the chart; one consolidated note sits in the bottom border.
 `LIVE` requires a matching request in a fresh live sample. Once absent
 or stale it reads `LAST SEEN`; client-reported completions read `REPORTED`. Age comes from the request observation or the client timestamp, not the
 most recent redraw. The last sampled output is not assumed to be a final total.
 
 The colored bar chart reads older to newer, with the selected request marked
-`▶` on the right. When request-specific cache counts are reported, bars stack
+`▲` below the rightmost bar. Sparse UTC timestamps sit below their corresponding
+bars. Spacing represents request order, not elapsed time; the selected marker
+remains visible during jumps and overflow. When request-specific cache counts are reported, bars stack
 green cached tokens below uncached tokens (cyan for live requests, blue for
 history). Without a cache count, a solid bar represents the whole prompt and
-does not imply zero reuse. Yellow values and `!` mark a material prompt jump.
-Segments are rounded to terminal-cell resolution; exact selected values remain
-in the summary and cache line. Labels accompany color cues.
+does not imply zero reuse. `!` marks a material prompt jump; `↑` takes precedence
+on an overflowing bar. A selected jump is also named in the bottom note.
+Bar heights use eighth-cell precision and do not change with cache availability.
+Where a partial cell cannot show both segments and empty space, it uses the
+dominant segment color. Exact selected values remain in the summary and cache
+readout. Labels accompany color cues.
 
 A jump means at least 25% and 2,048 more tokens than the previous same-model
-observation. The insight area also compares against the median of up to eight
+observation. The bottom note also compares against the median of up to eight
 contiguous preceding requests from the same provider/model, after at least three
 observations. At least 1.5× that median and 2,048 extra tokens is labeled large;
 at most 0.75× is labeled smaller. These are workload comparison heuristics, not
@@ -433,8 +439,9 @@ do not establish that successive requests belong to the same tool loop.
 ### Runtime detection and endpoint references
 
 Process detection includes Python's `-m mlx_lm.server`, `KoboldCpp.py`, `local-ai`,
-LM Studio desktop/engine paths and its `llmster` daemon. If several runtimes are
-running, use `MLXTOP_PROVIDER` to choose which provider supplies telemetry.
+LM Studio desktop/engine paths, its `llmster` daemon, and the Bionic app executable
+(`Bionic.app/Contents/MacOS/Bionic`). Bionic is labeled as LM Studio. If several
+runtimes are running, use `MLXTOP_PROVIDER` to choose which provider supplies telemetry.
 Detection alone does not expose request tokens from process memory.
 
 The adapters follow the upstream [llama-server monitoring API](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
