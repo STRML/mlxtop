@@ -17,7 +17,7 @@ it, six time-series charts show generation, prefill and cache on the
 first row; GPU, memory load and paging on the second. Each series keeps its own
 unit and scale, so token rates are never visually mixed with percentages. Each
 series is rendered as a stepped trace over a fixed-width tail of the ring
-buffer: one terminal column represents one captured sample, new samples enter
+buffer: at 1×, one terminal column represents one captured sample, new samples enter
 from the right, and the oldest samples leave from the left once the viewport is
 full. The generation and prefill axes use stable scales so a new peak cannot
 move older values vertically. Rate traces use only active request telemetry,
@@ -128,9 +128,30 @@ not require provider changes, restarts or administrator access for accessible
 processes. Failed OS reads omit the process summary. This collector is macOS
 only; Linux retains its existing metrics.
 
-On Linux, GPU readings come from `nvidia-smi` when present (device name,
-utilization, VRAM used/total and temperature); renderer/tiler splits and core
-counts are Apple-only and stay unavailable. Thermals come from
+The NVIDIA dashboard is enabled only on Linux after `nvidia-smi` detects at
+least one NVIDIA GPU. macOS and Linux systems without detected NVIDIA cards
+use the standard Overview. Overview's **GPU
+DEVICES** panel lists every detected NVIDIA card with its driver index, name,
+utilization, VRAM used/total and temperature. Wide terminals add a VRAM bar
+and a textual load state. Use `[` / `]` to select a card; when the list is
+taller than the panel, the selected card scrolls into view and the footer
+shows the visible range. At 80×24, status, throughput, diagnosis, GPU readings
+and prompt history remain visible; historical charts return with more space.
+
+Cards are tracked by UUID, following [NVIDIA's guidance on stable device
+identity](https://docs.nvidia.com/deploy/nvidia-smi/), so identical model names remain distinct and a
+selection follows the same device if driver indices change. The **GPU max**
+chart and summary show the highest utilization across cards, not an average.
+If any card's utilization is unavailable, the combined reading stays
+unavailable while the other per-card readings remain visible. A failed poll
+retains known device names but clears their counters until a successful poll.
+Unsupported counters appear as `—`; idle utilization is a measured `0%`.
+
+VRAM is shown separately for each card; any **VRAM sum** in the summary is an
+inventory total, not a shared allocation pool. `--once` lists all cards and
+their UUIDs without pagination. These are physical-device readings, not
+per-process measurements or a breakdown of MIG instances. Renderer/tiler splits
+and core counts are Apple-only and stay unavailable. Thermals come from
 `/sys/class/thermal` (plus the NVIDIA temperature when available).
 
 ## Controls
@@ -142,12 +163,48 @@ counts are Apple-only and stay unavailable. Thermals come from
 | `1` / `o` | Overview |
 | `2` / `t` | MLX Top |
 | `3` / `j` | Journal |
-| `Tab` / `←` / `→` | Switch views |
+| `Ctrl-Tab` | Switch views (Tab and arrows also switch views outside Overview) |
 | `p` / `Space` | Pause or resume sampling |
 | `r` | Reset rates, charts and journal |
-| `+` / `-` | Change refresh interval |
+| `{` / `}` | Change refresh interval (1–60 seconds) |
+| `a` | Acknowledge the current critical system alarm |
 | `?` / `h` | Help |
-| `q` / `Esc` / `Ctrl-C` | Quit |
+| `q` / `Ctrl-C` | Quit (`Esc` restores an enlarged chart before quitting) |
+
+### Overview charts
+
+| Control | Action |
+| --- | --- |
+| `Tab` / `Shift-Tab` | Select next / previous chart |
+| Arrow keys | Select a neighboring chart |
+| Mouse click | Select the chart under the pointer |
+| `+` / `-` or mouse wheel | Zoom history in / out on that chart, from 1× to 8× |
+| `0` | Reset the selected chart to 1× |
+| `Enter` / `Esc` | Enlarge / restore the selected chart |
+| Right-click | Toggle enlarged view |
+| `Shift-↑` / `Shift-↓` | Inspect newer / older prompt observations |
+| `Home` / `End` | Select newest / oldest prompt |
+| `PgUp` / `PgDn` | Move through prompt history by ten requests |
+| `[` / `]` | Select an NVIDIA card on Linux |
+
+Each chart retains its own zoom. Zoom widens captured observations and shows a
+shorter history range; it does not change the sampling interval or the values.
+Expanded charts keep sampling, and Enter/Esc restores the dashboard. Hold the
+terminal's selection modifier (usually Shift) to select text with the mouse.
+
+### Critical system alarms
+
+Critical memory pressure, heavy paging, swap thrashing and page-in recovery
+ring the terminal bell once and display a banner. Enable the audible bell in
+your terminal settings to hear it. `a` dismisses the banner for the rest of
+that episode; a confirmed recovery re-arms the alarm. Missing system counters
+do not count as recovery. High GPU utilization is normal workload activity
+and never triggers this alarm by itself.
+
+Diagnostics distinguish measured throughput drops from resource usage. A busy
+GPU alone is labeled **bottleneck unconfirmed**. A measured drop shows the rate
+change, an associated signal with confidence, and a short suggested check.
+Linux temperature readings are shown as measurements, not inferred throttling.
 
 ### MLX Top
 
@@ -212,9 +269,9 @@ latest prompt size, the change from the previous observed request, and freshness
 on a compact summary. At 160 columns and sufficient height, prompt load occupies
 half of the first chart row beside generation and prefill, instead of a separate
 full-width strip. It uses eight rows. Smaller terminals keep the stacked layout.
-The chart fills the panel width with one column per request. Exact selected
+The chart fills the panel width with one column per request at 1×. Exact selected
 tokens, observation time in UTC, age, cache reuse and the previous-request
-comparison stay above the chart; one consolidated note sits in the bottom border.
+comparison stay above the chart; recent prompt-size statistics sit in the bottom border.
 `LIVE` requires a matching request in a fresh live sample. Once absent
 or stale it reads `LAST SEEN`; client-reported completions read `REPORTED`. Age comes from the request observation or the client timestamp, not the
 most recent redraw. The last sampled output is not assumed to be a final total.
@@ -225,25 +282,22 @@ bars. Spacing represents request order, not elapsed time; the selected marker
 remains visible during jumps and overflow. When request-specific cache counts are reported, bars stack
 green cached tokens below uncached tokens (cyan for live requests, blue for
 history). Without a cache count, a solid bar represents the whole prompt and
-does not imply zero reuse. `!` marks a material prompt jump; `↑` takes precedence
-on an overflowing bar. A selected jump is also named in the bottom note.
+does not imply zero reuse. `↑` marks a prompt above the display scale. Changes
+in prompt size remain numeric comparisons, without warning marks above bars.
 Bar heights use eighth-cell precision and do not change with cache availability.
 Where a partial cell cannot show both segments and empty space, it uses the
 dominant segment color. Exact selected values remain in the summary and cache
 readout. Labels accompany color cues.
 
-A jump means at least 25% and 2,048 more tokens than the previous same-model
-observation. The bottom note also compares against the median of up to eight
-contiguous preceding requests from the same provider/model, after at least three
-observations. At least 1.5× that median and 2,048 extra tokens is labeled large;
-at most 0.75× is labeled smaller. These are workload comparison heuristics, not
-context-limit or latency alarms. Historical assessments carry a **HISTORY**
-label; their suggested checks are muted when the request is no longer live.
-Cache availability is explicit, including when no request cache count was reported.
+The bottom line shows the median and range of up to eight contiguous
+observations ending at the selection, from the same provider/model. Moving
+back through history excludes later requests from those statistics. These are
+prompt sizes in tokens, not health or latency assessments. The headline keeps
+the exact selected prompt size and its observation age visible.
 
 Request cache reuse is green at 80% or more, yellow below 20% for prompts of at
 least 4,096 tokens, and cyan otherwise. Low reuse on a cold request is expected;
-the hint to inspect prefix reuse is conditional on repeating prompts.
+a low percentage by itself does not establish a cache problem.
 
 The chart uses a **fixed 0–65,536-token display scale**, independent of the visible
 maximum. `↑` marks a request above that scale; the headline always gives its
@@ -278,7 +332,7 @@ produce gaps. Queue length is a demand signal, not a latency measurement.
 scale of total system RAM. The header identifies the current PID. This RAM
 reference is not the process's configured memory limit. Missing samples and
 process-instance changes break the trace. Both new time-series charts retain
-one captured sample per column, newest at the right; resetting history clears
+one captured sample per column at 1×, newest at the right; resetting history clears
 them. The process card still shows lifetime peak and signed growth.
 
 **First token** appears only after an explicit client timing is supplied in the
@@ -290,7 +344,7 @@ existing usage JSONL envelope:
 
 Use a nonnegative integer measured from request dispatch to the first generated
 token. Add this field alongside `provider`, `request_id`, `observed_at` and
-`usage` in a complete record. The chart uses one column per observed request,
+`usage` in a complete record. The chart uses one column per observed request at 1×,
 shows missing timings as gaps, and has a fixed 0–30-second scale with overflow
 markers. Its latest measured value is labeled REPORTED with observation age.
 Repeated polls update the same request rather than adding duplicate bars.

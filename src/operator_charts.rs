@@ -61,7 +61,7 @@ impl History {
     }
 }
 
-// One column per sample, fixed scale, no connections across missing readings
+// At 1×, one column per sample; fixed scale, no connections across missing readings
 // or changed process/provider identity. Clipping never changes the scale.
 fn trace(
     frame: &mut Frame,
@@ -70,22 +70,28 @@ fn trace(
     breaks: &[bool],
     ceiling: u64,
     color: Color,
+    zoom: u16,
 ) {
     if area.is_empty() || ceiling == 0 {
         return;
     }
-    let start = values.len().saturating_sub(area.width as usize);
-    let offset = area.width as usize - (values.len() - start);
     let mut previous: Option<u16> = None;
-    for (i, value) in values.iter().enumerate().skip(start) {
-        if breaks.get(i).copied().unwrap_or(false) {
+    let mut previous_index = None;
+    for column in 0..area.width {
+        let from_right = usize::from((area.width - 1 - column) / zoom.max(1));
+        let Some(i) = values.len().checked_sub(from_right + 1) else {
+            continue;
+        };
+        let value = &values[i];
+        if previous_index != Some(i) && breaks.get(i).copied().unwrap_or(false) {
             previous = None;
         }
+        previous_index = Some(i);
         let Some(value) = value else {
             previous = None;
             continue;
         };
-        let x = area.x + (offset + i - start) as u16;
+        let x = area.x + column;
         let scaled = (u128::from((*value).min(ceiling)) * u128::from(area.height - 1))
             .div_ceil(u128::from(ceiling)) as u16;
         let y = area.bottom() - 1 - scaled;
@@ -141,7 +147,13 @@ fn panel_area(
     )
 }
 
-pub(super) fn queue(frame: &mut Frame, area: Rect, history: &History, interval: Duration) {
+pub(super) fn queue(
+    frame: &mut Frame,
+    area: Rect,
+    history: &History,
+    interval: Duration,
+    zoom: u16,
+) {
     let last = history.points.back();
     let active = last.and_then(|p| p.active);
     let waiting = last.and_then(|p| p.waiting);
@@ -156,7 +168,7 @@ pub(super) fn queue(frame: &mut Frame, area: Rect, history: &History, interval: 
                 history
                     .points
                     .len()
-                    .min(area.width.saturating_sub(5) as usize),
+                    .min(area.width.saturating_sub(5).div_ceil(zoom.max(1)) as usize),
                 interval
             )
         ),
@@ -192,7 +204,7 @@ pub(super) fn queue(frame: &mut Frame, area: Rect, history: &History, interval: 
             .set_symbol("─")
             .set_fg(DIM);
     }
-    trace(frame, graph, &active_values, &breaks, 16, CYAN);
+    trace(frame, graph, &active_values, &breaks, 16, CYAN, zoom);
     let active_cells: Vec<_> = (graph.y..graph.bottom())
         .flat_map(|y| (graph.x..graph.right()).map(move |x| (x, y)))
         .filter_map(|(x, y)| {
@@ -200,7 +212,7 @@ pub(super) fn queue(frame: &mut Frame, area: Rect, history: &History, interval: 
             (cell.fg == CYAN).then_some((x, y, cell.symbol() == "↑"))
         })
         .collect();
-    trace(frame, graph, &waiting_values, &breaks, 16, YELLOW);
+    trace(frame, graph, &waiting_values, &breaks, 16, YELLOW, zoom);
     // Preserve both series wherever their rasterized traces share a cell.
     // This includes equal values and values indistinguishable at terminal resolution.
     for (x, y, active_overflow) in active_cells {
@@ -223,7 +235,13 @@ pub(super) fn queue(frame: &mut Frame, area: Rect, history: &History, interval: 
     }
 }
 
-pub(super) fn footprint(frame: &mut Frame, area: Rect, history: &History, sample: &Sample) {
+pub(super) fn footprint(
+    frame: &mut Frame,
+    area: Rect,
+    history: &History,
+    sample: &Sample,
+    zoom: u16,
+) {
     let last = sample.process_memory.as_ref();
     let caption = last
         .map(|m| format!("{} · PID {} ", bytes(m.footprint), m.pid))
@@ -242,10 +260,10 @@ pub(super) fn footprint(frame: &mut Frame, area: Rect, history: &History, sample
         .enumerate()
         .map(|(i, p)| i > 0 && p.process != history.points[i - 1].process)
         .collect();
-    trace(frame, plot, &values, &breaks, ceiling, CYAN);
+    trace(frame, plot, &values, &breaks, ceiling, CYAN, zoom);
 }
 
-pub(super) fn latency(frame: &mut Frame, area: Rect, history: &History) {
+pub(super) fn latency(frame: &mut Frame, area: Rect, history: &History, zoom: u16) {
     let latest = history.timings.iter().rev().find(|p| p.1.is_some());
     let caption = latest
         .map(|p| format!("{} ms · REPORTED ", p.1.unwrap()))
@@ -253,17 +271,22 @@ pub(super) fn latency(frame: &mut Frame, area: Rect, history: &History) {
     let subtitle = latest
         .map(|p| {
             format!(
-                "0–30s · one column/request · ↑ overflow · {}",
+                "0–30s · {zoom}× · ↑ overflow · {}",
                 telemetry_age(Some(p.2))
             )
         })
         .unwrap_or_default();
     let plot = panel_area(frame, area, "first token", caption, subtitle);
     let values: Vec<_> = history.timings.iter().map(|p| p.1).collect();
-    // Each column is one observed request; do not connect unrelated requests.
-    for (i, value) in values.iter().rev().take(plot.width as usize).enumerate() {
-        if let Some(value) = value {
-            let x = plot.right().saturating_sub(1 + i as u16);
+    // Each bar is one observed request; zoom only widens it.
+    for column in 0..plot.width {
+        let i = usize::from(column / zoom.max(1));
+        if let Some(Some(value)) = values
+            .len()
+            .checked_sub(i + 1)
+            .and_then(|index| values.get(index))
+        {
+            let x = plot.right() - 1 - column;
             let h = if plot.height == 0 {
                 0
             } else {
@@ -354,6 +377,7 @@ mod tests {
                     &[false; 3],
                     16,
                     CYAN,
+                    1,
                 )
             })
             .unwrap();
@@ -372,7 +396,7 @@ mod tests {
         }
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(44, 10)).unwrap();
         terminal
-            .draw(|frame| queue(frame, frame.area(), &history, Duration::from_secs(1)))
+            .draw(|frame| queue(frame, frame.area(), &history, Duration::from_secs(1), 1))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(40, 8)].symbol(), "═");
@@ -392,7 +416,7 @@ mod tests {
         }
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(44, 10)).unwrap();
         terminal
-            .draw(|frame| queue(frame, frame.area(), &history, Duration::from_secs(1)))
+            .draw(|frame| queue(frame, frame.area(), &history, Duration::from_secs(1), 1))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(40, 5)].fg, CYAN);
@@ -403,7 +427,7 @@ mod tests {
             history.observe(&sample, 80);
         }
         terminal
-            .draw(|frame| queue(frame, frame.area(), &history, Duration::from_secs(1)))
+            .draw(|frame| queue(frame, frame.area(), &history, Duration::from_secs(1), 1))
             .unwrap();
         assert_eq!(terminal.backend().buffer()[(40, 8)].symbol(), "━");
         assert_eq!(terminal.backend().buffer()[(40, 8)].fg, YELLOW);
@@ -421,6 +445,7 @@ mod tests {
                     &[false, false, false, true, false],
                     16,
                     CYAN,
+                    1,
                 )
             })
             .unwrap();

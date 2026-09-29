@@ -8,11 +8,16 @@
 //! the static report. Provider-specific telemetry is optional; missing data
 //! remains explicitly unavailable instead of being inferred.
 
+mod chart_navigation;
+mod diagnosis;
+mod gpu;
+mod gpu_dashboard;
 mod operator_charts;
 mod process_memory;
 mod providers;
 mod request_dashboard;
 
+use chart_navigation::Chart;
 use std::any::Any;
 use std::backtrace::Backtrace;
 use std::collections::VecDeque;
@@ -32,7 +37,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -648,11 +656,7 @@ impl ChartMetric {
                 thresholds.memory_warn_load,
                 thresholds.memory_critical_load,
             ),
-            Self::Gpu => load_tone(
-                value,
-                thresholds.gpu_warn_load,
-                thresholds.gpu_critical_load,
-            ),
+            Self::Gpu => Tone::Blue,
             Self::Swap => load_tone(
                 value,
                 thresholds.swap_warn_rate,
@@ -993,6 +997,7 @@ struct Sample {
     gpu_util: Option<u8>,
     gpu_alloc: Option<u64>,
     gpu_in_use: Option<u64>,
+    gpus: Vec<gpu::Device>,
     metal: MetalTelemetry,
     mlx: MlxTelemetry,
     thermal: String,
@@ -1036,6 +1041,12 @@ struct Sample {
     rate_ready: bool,
 }
 
+impl Sample {
+    fn has_nvidia_gpus(&self) -> bool {
+        cfg!(target_os = "linux") && !self.gpus.is_empty()
+    }
+}
+
 impl Default for Sample {
     fn default() -> Self {
         Self {
@@ -1063,6 +1074,7 @@ impl Default for Sample {
             gpu_util: None,
             gpu_alloc: None,
             gpu_in_use: None,
+            gpus: Vec::new(),
             metal: MetalTelemetry::default(),
             mlx: MlxTelemetry::default(),
             thermal: "unavailable".into(),
@@ -1409,7 +1421,7 @@ impl Collector {
         if cfg!(target_os = "macos") {
             sample_macos_gpu_thermal(&mut sample);
         } else {
-            sample_linux_gpu_thermal(&mut sample);
+            sample_linux_gpu_thermal(&mut sample, &self.current.gpus);
         }
 
         let process_snapshot = if cfg!(target_os = "macos") {
@@ -1882,7 +1894,10 @@ impl Collector {
                 );
             }
 
-            if previous.thermal != sample.thermal && sample.thermal != "unavailable" {
+            if previous.thermal != sample.thermal
+                && sample.thermal != "unavailable"
+                && !sample.thermal.ends_with("°C measured")
+            {
                 add(
                     "THERMAL",
                     sample.thermal.clone(),
@@ -1961,18 +1976,39 @@ struct ActiveAlert {
     time: String,
 }
 
-/// Impact states the classifier reserves for disk-bound swap churn. Crossing
-/// into any of them from a quieter state is what triggers the paging alert.
-fn is_aggressive_paging(state: &str) -> bool {
+/// Critical host conditions, deliberately excluding GPU utilization.
+fn is_critical_state(state: &str) -> bool {
     matches!(
         state,
-        "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY"
+        "MEMORY BOTTLENECK" | "SWAP THRASHING" | "HEAVY PAGING" | "PAGE-IN RECOVERY"
     )
+}
+
+fn critical_state(sample: &Sample) -> Option<&str> {
+    // A reported critical memory condition is valid even if another counter
+    // is unavailable and the overall classifier says DATA LIMITED.
+    if sample.pressure == "RED" {
+        Some("MEMORY BOTTLENECK")
+    } else {
+        is_critical_state(&sample.impact).then_some(sample.impact.as_str())
+    }
+}
+
+fn critical_summary(sample: &Sample) -> String {
+    if critical_state(sample) == Some("MEMORY BOTTLENECK") {
+        format!(
+            "critical memory pressure · {} free",
+            percent_u8(sample.availability)
+        )
+    } else {
+        signal_summary(sample)
+    }
 }
 
 /// BEL passes through the alternate screen to the terminal emulator, so the
 /// user's audible/visual bell setting decides how the alert sounds. Called
 /// between frames only: writing mid-draw could interleave with the buffer.
+#[cfg(not(test))]
 fn ring_terminal_bell() {
     let mut out = stdout();
     let _ = out.write_all(b"\x07");
@@ -1992,11 +2028,14 @@ struct App {
     journal_filter: JournalFilter,
     journal_scroll: usize,
     request_scroll: usize,
+    charts: chart_navigation::Navigation,
+    gpu_selected: usize,
     help: bool,
     quit: bool,
     sampler_disconnected: bool,
     alert: Option<ActiveAlert>,
     alert_bells: usize,
+    critical_episode: bool,
     thresholds: Thresholds,
 }
 
@@ -2028,11 +2067,14 @@ impl App {
             journal_filter: JournalFilter::All,
             journal_scroll: 0,
             request_scroll: 0,
+            charts: chart_navigation::Navigation::default(),
+            gpu_selected: 0,
             help: false,
             quit: false,
             sampler_disconnected: false,
             alert: None,
             alert_bells: 0,
+            critical_episode: false,
             thresholds,
         }
     }
@@ -2041,7 +2083,22 @@ impl App {
         loop {
             match self.sampler.views.try_recv() {
                 Ok(view) => {
-                    self.track_paging_alert(&view);
+                    self.track_critical_alert(&view);
+                    self.gpu_selected = self
+                        .collector
+                        .current
+                        .gpus
+                        .get(self.gpu_selected)
+                        .and_then(|selected| {
+                            view.current
+                                .gpus
+                                .iter()
+                                .position(|gpu| gpu.uuid == selected.uuid)
+                        })
+                        .unwrap_or_else(|| {
+                            self.gpu_selected
+                                .min(view.current.gpus.len().saturating_sub(1))
+                        });
                     self.collector = view;
                     self.sampler_disconnected = false;
                 }
@@ -2061,45 +2118,44 @@ impl App {
         }
     }
 
-    /// Raise the paging alert when the classifier crosses into an
-    /// aggressive-paging state, and retire it once the episode ends. The
-    /// rising edge guards against re-ringing while paging stays aggressive;
-    /// dropping back below the aggressive states re-arms the alert. An
-    /// escalation inside the episode (say HEAVY PAGING → SWAP THRASHING)
-    /// refreshes the banner without ringing the bell again.
-    fn track_paging_alert(&mut self, view: &CollectorView) {
-        let aggressive = is_aggressive_paging(&view.current.impact);
+    /// Ring once per critical episode. Acknowledgment silences the episode;
+    /// recovery re-arms it. Escalation refreshes the banner without repeating.
+    fn track_critical_alert(&mut self, view: &CollectorView) {
+        let state = critical_state(&view.current);
+        if state.is_none() && matches!(view.current.impact.as_str(), "SAMPLING" | "DATA LIMITED") {
+            return;
+        }
+        let newly_critical = state.is_some() && !self.critical_episode;
+        self.critical_episode = state.is_some();
         if let Some(alert) = &mut self.alert {
-            if !aggressive {
+            if let Some(state) = state {
+                if alert.state != state {
+                    alert.time = view.current.updated.clone();
+                }
+                alert.state = state.into();
+                alert.summary = critical_summary(&view.current);
+            } else {
                 diagnostics_log(
                     "INFO",
-                    "paging_alert_cleared",
+                    "critical_alert_cleared",
                     format!("state={}", log_field(&alert.state)),
                 );
                 self.alert = None;
-            } else if alert.state != view.current.impact {
-                alert.state = view.current.impact.clone();
-                alert.summary = signal_summary(&view.current);
-                alert.time = view.current.updated.clone();
             }
             return;
         }
-        let previous_impact = self.collector.current.impact.clone();
-        if aggressive && !is_aggressive_paging(&previous_impact) {
-            let summary = signal_summary(&view.current);
+        if let Some(state) = state.filter(|_| newly_critical) {
+            let summary = critical_summary(&view.current);
             diagnostics_log(
                 "WARN",
-                "paging_alert_raised",
-                format!(
-                    "state={} summary={}",
-                    log_field(&view.current.impact),
-                    log_field(&summary)
-                ),
+                "critical_alert_raised",
+                format!("state={} summary={}", log_field(state), log_field(&summary)),
             );
+            #[cfg(not(test))]
             ring_terminal_bell();
             self.alert_bells += 1;
             self.alert = Some(ActiveAlert {
-                state: view.current.impact.clone(),
+                state: state.into(),
                 summary,
                 time: view.current.updated.clone(),
             });
@@ -2185,10 +2241,38 @@ impl App {
         if self.tab == 0 {
             let last = self.collector.request_history.len().saturating_sub(1);
             match key.code {
-                KeyCode::Up => self.request_scroll = self.request_scroll.saturating_sub(1),
-                KeyCode::Down => {
-                    self.request_scroll = self.request_scroll.saturating_add(1).min(last)
+                KeyCode::Char('[') => self.gpu_selected = self.gpu_selected.saturating_sub(1),
+                KeyCode::Char(']') => {
+                    self.gpu_selected = self
+                        .gpu_selected
+                        .saturating_add(1)
+                        .min(self.collector.current.gpus.len().saturating_sub(1));
                 }
+                KeyCode::Tab if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.charts.cycle(false)
+                }
+                KeyCode::BackTab => self.charts.cycle(true),
+                KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.charts.focused = Chart::Prompt;
+                    self.request_scroll = if key.code == KeyCode::Up {
+                        self.request_scroll.saturating_sub(1)
+                    } else {
+                        self.request_scroll.saturating_add(1).min(last)
+                    };
+                }
+                direction @ (KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right) => {
+                    if self.charts.expanded {
+                        self.charts
+                            .cycle(matches!(direction, KeyCode::Up | KeyCode::Left));
+                    } else {
+                        self.charts.move_focus(direction);
+                    }
+                }
+                KeyCode::Char('+') | KeyCode::Char('=') => self.charts.change_zoom(true),
+                KeyCode::Char('-') => self.charts.change_zoom(false),
+                KeyCode::Char('0') => self.charts.reset_zoom(),
+                KeyCode::Enter => self.charts.expanded = !self.charts.expanded,
+                KeyCode::Esc if self.charts.expanded => self.charts.expanded = false,
                 KeyCode::PageUp => self.request_scroll = self.request_scroll.saturating_sub(10),
                 KeyCode::PageDown => {
                     self.request_scroll = self.request_scroll.saturating_add(10).min(last)
@@ -2246,6 +2330,28 @@ impl App {
         self.handle_global_key(key);
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.help || self.tab != 0 {
+            return;
+        }
+        let Some(chart) = self.charts.at(mouse.column, mouse.row) else {
+            return;
+        };
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.charts.focused = chart,
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.charts.focused = chart;
+                self.charts.expanded = !self.charts.expanded;
+            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.charts.focused = chart;
+                self.charts
+                    .change_zoom(mouse.kind == MouseEventKind::ScrollUp);
+            }
+            _ => {}
+        }
+    }
+
     fn handle_global_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
@@ -2253,7 +2359,7 @@ impl App {
                 if let Some(alert) = self.alert.take() {
                     diagnostics_log(
                         "INFO",
-                        "paging_alert_acknowledged",
+                        "critical_alert_acknowledged",
                         format!("state={}", log_field(&alert.state)),
                     );
                 }
@@ -2266,8 +2372,11 @@ impl App {
                 self.sampler.send(SamplerCommand::Reset);
                 self.journal_scroll = 0;
                 self.request_scroll = 0;
+                self.charts = chart_navigation::Navigation::default();
+                self.gpu_selected = 0;
                 self.journal_filter = JournalFilter::All;
                 self.alert = None;
+                self.critical_episode = false;
             }
             KeyCode::Char('t') | KeyCode::Char('2') => {
                 self.tab = 1;
@@ -2281,13 +2390,13 @@ impl App {
             KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % 3,
             KeyCode::BackTab | KeyCode::Left => self.tab = (self.tab + 2) % 3,
             KeyCode::Char('?') | KeyCode::Char('h') => self.help = true,
-            KeyCode::Char('+') | KeyCode::Char('=') => {
+            KeyCode::Char('}') => {
                 let seconds = self.interval.as_secs().saturating_add(1).min(60);
                 self.interval = Duration::from_secs(seconds);
                 self.sampler
                     .send(SamplerCommand::SetInterval(self.interval));
             }
-            KeyCode::Char('-') => {
+            KeyCode::Char('{') => {
                 let seconds = self.interval.as_secs().saturating_sub(1).max(1);
                 self.interval = Duration::from_secs(seconds);
                 self.sampler
@@ -2299,6 +2408,7 @@ impl App {
 
     fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+        self.charts.regions.borrow_mut().clear();
         if area.width < 72 || area.height < 24 {
             self.draw_compact_warning(frame, area);
             return;
@@ -2317,6 +2427,24 @@ impl App {
             1 => self.draw_llm_top(frame, outer[1]),
             _ => self.draw_journal(frame, outer[1]),
         }
+        if self.tab == 0 {
+            if self.charts.expanded {
+                frame.render_widget(Clear, outer[1]);
+                let chart = Rect {
+                    height: outer[1].height.saturating_sub(1),
+                    ..outer[1]
+                };
+                self.draw_selected_chart(frame, chart);
+                frame.render_widget(
+                    Paragraph::new(
+                        " Enter/Esc restore · +/− or wheel zoom · 0 reset zoom · Tab next chart",
+                    )
+                    .style(Style::default().fg(MUTED)),
+                    Rect::new(outer[1].x, outer[1].bottom() - 1, outer[1].width, 1),
+                );
+            }
+            self.charts.decorate(frame);
+        }
         if self.alert.is_some() {
             self.draw_alert_banner(frame, outer[1]);
         }
@@ -2325,7 +2453,7 @@ impl App {
         }
     }
 
-    /// Overlay strip at the top of the tab content: aggressive paging demands
+    /// Overlay strip at the top of the tab content: a critical condition demands
     /// attention without stealing a permanent layout row from the panels.
     fn draw_alert_banner(&self, frame: &mut Frame, area: Rect) {
         let Some(alert) = &self.alert else {
@@ -2430,7 +2558,81 @@ impl App {
         self.draw_controls(frame, chunks[2]);
     }
 
+    fn draw_request_chart(&self, frame: &mut Frame, area: Rect) {
+        self.charts.register(Chart::Prompt, area);
+        request_dashboard::draw(
+            frame,
+            area,
+            &self.collector.request_history,
+            &self.collector.current,
+            self.request_scroll,
+            self.charts.zoom(Chart::Prompt),
+        );
+    }
+
+    fn draw_operator_chart(&self, frame: &mut Frame, area: Rect, chart: Chart) {
+        self.charts.register(chart, area);
+        let zoom = self.charts.zoom(chart);
+        match chart {
+            Chart::Footprint => operator_charts::footprint(
+                frame,
+                area,
+                &self.collector.operator_history,
+                &self.collector.current,
+                zoom,
+            ),
+            Chart::Queue => operator_charts::queue(
+                frame,
+                area,
+                &self.collector.operator_history,
+                self.interval,
+                zoom,
+            ),
+            Chart::Latency => {
+                operator_charts::latency(frame, area, &self.collector.operator_history, zoom)
+            }
+            _ => unreachable!("operator chart expected"),
+        }
+    }
+
+    fn draw_selected_chart(&self, frame: &mut Frame, area: Rect) {
+        match self.charts.focused {
+            Chart::Prompt => self.draw_request_chart(frame, area),
+            chart @ (Chart::Footprint | Chart::Queue | Chart::Latency) => {
+                self.draw_operator_chart(frame, area, chart)
+            }
+            chart => {
+                let (name, history, metric) = match chart {
+                    Chart::Generation => (
+                        "generation",
+                        &self.collector.generation_history,
+                        ChartMetric::Generation,
+                    ),
+                    Chart::Prefill => (
+                        "prefill",
+                        &self.collector.prefill_history,
+                        ChartMetric::Prefill,
+                    ),
+                    Chart::Cache => ("cache", &self.collector.cache_history, ChartMetric::Cache),
+                    Chart::Gpu => (
+                        self.gpu_chart_title(),
+                        &self.collector.gpu_history,
+                        ChartMetric::Gpu,
+                    ),
+                    Chart::Memory => ("memory", &self.collector.load_history, ChartMetric::Memory),
+                    Chart::Paging => ("paging", &self.collector.swap_history, ChartMetric::Swap),
+                    _ => unreachable!("indicator chart expected"),
+                };
+                self.render_indicator_chart(frame, area, name, history, metric);
+            }
+        }
+    }
+
     fn draw_overview(&self, frame: &mut Frame, area: Rect) {
+        if self.collector.current.has_nvidia_gpus() {
+            self.draw_gpu_overview(frame, area);
+            return;
+        }
         if area.width >= 160 && area.height >= 32 {
             let rows = Layout::vertical([Constraint::Length(12), Constraint::Min(20)]).split(area);
             self.draw_operations_panel(frame, rows[0]);
@@ -2455,23 +2657,52 @@ impl App {
         }
         let rows = Layout::vertical(constraints).split(area);
         self.draw_operations_panel(frame, rows[0]);
-        request_dashboard::draw(
-            frame,
-            rows[1],
-            &self.collector.request_history,
-            &self.collector.current,
-            self.request_scroll,
-        );
+        self.draw_request_chart(frame, rows[1]);
         self.draw_trend_strip(frame, rows[2]);
         if show_log {
             self.draw_signal_log(frame, rows[3]);
         }
         if self.collector.current.total_memory == 0 && self.collector.current.updated != "waiting" {
             frame.render_widget(
-                Paragraph::new(" macOS counters unavailable — run this binary on Apple silicon.")
+                Paragraph::new(" System memory counters unavailable — check platform access.")
                     .style(Style::default().fg(YELLOW)),
                 area,
             );
+        }
+    }
+
+    fn draw_gpu_overview(&self, frame: &mut Frame, area: Rect) {
+        let operations_height = if area.width < 120 { 10 } else { 12 };
+        let gpu_height = gpu_dashboard::height(
+            self.collector.current.gpus.len(),
+            area.height.saturating_sub(operations_height + 7).max(4),
+        );
+        let rows = Layout::vertical([
+            Constraint::Length(operations_height),
+            Constraint::Length(gpu_height),
+            Constraint::Min(7),
+        ])
+        .split(area);
+        self.draw_operations_panel(frame, rows[0]);
+        gpu_dashboard::draw(
+            frame,
+            rows[1],
+            &self.collector.current.gpus,
+            self.gpu_selected,
+            self.thresholds,
+        );
+        let remaining = rows[2];
+        if area.width >= 160 && remaining.height >= 20 {
+            self.draw_operator_grid(frame, remaining);
+        } else if remaining.height >= 13 {
+            let detail =
+                Layout::vertical([Constraint::Length(7), Constraint::Min(6)]).split(remaining);
+            self.draw_request_chart(frame, detail[0]);
+            self.draw_trend_strip(frame, detail[1]);
+        } else {
+            // At 80×24 keep serving status, diagnosis, GPU readings and request
+            // history readable; historical charts return when height permits.
+            self.draw_request_chart(frame, remaining);
         }
     }
 
@@ -2488,13 +2719,7 @@ impl App {
             Constraint::Percentage(25),
         ])
         .split(rows[0]);
-        request_dashboard::draw(
-            frame,
-            top[0],
-            &self.collector.request_history,
-            &self.collector.current,
-            self.request_scroll,
-        );
+        self.draw_request_chart(frame, top[0]);
         self.render_indicator_chart(
             frame,
             top[1],
@@ -2509,29 +2734,27 @@ impl App {
             &self.collector.prefill_history,
             ChartMetric::Prefill,
         );
-        let middle = Layout::horizontal([Constraint::Fill(1); 4]).split(rows[1]);
-        operator_charts::footprint(
-            frame,
-            middle[0],
-            &self.collector.operator_history,
-            &self.collector.current,
-        );
-        operator_charts::queue(
-            frame,
-            middle[1],
-            &self.collector.operator_history,
-            self.interval,
-        );
+        let show_footprint = self.show_process_footprint();
+        let middle = Layout::horizontal(vec![
+            Constraint::Fill(1);
+            if show_footprint { 4 } else { 3 }
+        ])
+        .split(rows[1]);
+        if show_footprint {
+            self.draw_operator_chart(frame, middle[0], Chart::Footprint);
+        }
+        let start = usize::from(show_footprint);
+        self.draw_operator_chart(frame, middle[start], Chart::Queue);
         self.render_indicator_chart(
             frame,
-            middle[2],
-            "GPU",
+            middle[start + 1],
+            self.gpu_chart_title(),
             &self.collector.gpu_history,
             ChartMetric::Gpu,
         );
         self.render_indicator_chart(
             frame,
-            middle[3],
+            middle[start + 2],
             "system memory",
             &self.collector.load_history,
             ChartMetric::Memory,
@@ -2557,7 +2780,7 @@ impl App {
             ChartMetric::Cache,
         );
         if self.collector.operator_history.has_latency() {
-            operator_charts::latency(frame, bottom[2], &self.collector.operator_history);
+            self.draw_operator_chart(frame, bottom[2], Chart::Latency);
         } else {
             self.draw_signal_log(frame, bottom[2]);
         }
@@ -2773,60 +2996,7 @@ impl App {
             Tone::Cyan,
         );
 
-        let action_width = top[2].width.saturating_sub(4) as usize;
-        render_card(
-            frame,
-            top[2],
-            Line::from(vec![
-                Span::styled(
-                    format!(" {} ", s.impact_tone.icon()),
-                    Style::default()
-                        .fg(s.impact_tone.color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "DIAGNOSIS",
-                    Style::default()
-                        .fg(s.impact_tone.color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            vec![
-                Line::from(vec![
-                    tone_badge(s.impact_tone, &s.guidance_badge),
-                    Span::styled(
-                        format!(
-                            "  {}",
-                            compact_label(&s.impact, action_width.saturating_sub(8))
-                        ),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(Span::styled(
-                    format!(
-                        "CAUSE  {}",
-                        correlation_display(s, action_width.saturating_sub(7)).unwrap_or_else(
-                            || { compact_label(&hero_impact(s), action_width.saturating_sub(7)) }
-                        )
-                    ),
-                    Style::default().fg(CYAN),
-                )),
-                Line::from(Span::styled(
-                    compact_label(&diagnostic_signal_line(s), action_width),
-                    Style::default().fg(MUTED),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        "ACTION  {}",
-                        compact_label(&s.guidance_action, action_width.saturating_sub(8))
-                    ),
-                    Style::default().fg(s.impact_tone.color()),
-                )),
-            ],
-            s.impact_tone,
-        );
+        diagnosis::draw(frame, top[2], s);
 
         render_metric_card(
             frame,
@@ -2948,7 +3118,16 @@ impl App {
             Line::from(vec![
                 Span::styled(
                     s.gpu_util
-                        .map(|value| format!("{value}% busy"))
+                        .map(|value| {
+                            format!(
+                                "{value}% {}",
+                                if s.has_nvidia_gpus() && s.gpus.len() > 1 {
+                                    "max"
+                                } else {
+                                    "busy"
+                                }
+                            )
+                        })
                         .unwrap_or_else(|| "— busy".into()),
                     Style::default()
                         .fg(Color::White)
@@ -3028,14 +3207,15 @@ impl App {
         let paging_rate = sample.swap_in.saturating_add(sample.swap_out);
         let generation = llm_generation_rate_label(sample);
         let prefill = llm_prefill_rate_label(sample);
-        let diagnosis = correlation_display(sample, width.saturating_sub(11))
-            .unwrap_or_else(|| compact_label(&hero_impact(sample), width.saturating_sub(11)));
+        let finding = diagnosis::assess(sample);
+        let diagnosis = format!("{} · {}", finding.title, finding.evidence);
         let signals = format!(
-            "MEM {} load · GPU {} · PAGE {} · PRESSURE {}",
+            "MEM {} load · {} {} · PAGE {} · PRESSURE {}",
             sample
                 .availability
                 .map(|value| format!("{}%", 100_u8.saturating_sub(value)))
                 .unwrap_or_else(|| "—".into()),
+            self.gpu_chart_title(),
             percent_u8(sample.gpu_util),
             if sample.rate_ready {
                 rate(paging_rate)
@@ -3099,16 +3279,20 @@ impl App {
                 Span::styled(
                     compact_label(&diagnosis, width.saturating_sub(9)),
                     Style::default()
-                        .fg(sample.correlation.tone().color())
+                        .fg(finding.tone.color())
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled(" ACTION  ", Style::default().fg(MUTED)),
                 Span::styled(
-                    compact_label(&sample.guidance_action, width.saturating_sub(9)),
-                    Style::default().fg(sample.impact_tone.color()),
+                    if finding.actionable {
+                        " CHECK   "
+                    } else {
+                        " NOTE    "
+                    },
+                    Style::default().fg(MUTED),
                 ),
+                Span::styled(finding.next, Style::default().fg(finding.tone.color())),
             ]),
             Line::from(vec![
                 Span::styled(" SIGNAL  ", Style::default().fg(MUTED)),
@@ -3137,6 +3321,18 @@ impl App {
         self.render_indicator_charts(frame, area);
     }
 
+    fn gpu_chart_title(&self) -> &'static str {
+        if self.collector.current.has_nvidia_gpus() && self.collector.current.gpus.len() > 1 {
+            "GPU max"
+        } else {
+            "GPU"
+        }
+    }
+
+    fn show_process_footprint(&self) -> bool {
+        !self.collector.current.has_nvidia_gpus() || self.collector.current.process_memory.is_some()
+    }
+
     fn render_indicator_charts(&self, frame: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -3157,7 +3353,11 @@ impl App {
                 ("cache", &self.collector.cache_history, ChartMetric::Cache),
             ],
             [
-                ("GPU", &self.collector.gpu_history, ChartMetric::Gpu),
+                (
+                    self.gpu_chart_title(),
+                    &self.collector.gpu_history,
+                    ChartMetric::Gpu,
+                ),
                 ("memory", &self.collector.load_history, ChartMetric::Memory),
                 ("paging", &self.collector.swap_history, ChartMetric::Swap),
             ],
@@ -3174,26 +3374,21 @@ impl App {
                 self.render_indicator_chart(frame, *column, name, history, metric);
             }
         }
-        let extra = Layout::horizontal(if self.collector.operator_history.has_latency() {
-            vec![Constraint::Fill(1); 3]
-        } else {
-            vec![Constraint::Fill(1); 2]
-        })
+        let show_footprint = self.show_process_footprint();
+        let has_latency = self.collector.operator_history.has_latency();
+        let extra = Layout::horizontal(vec![
+            Constraint::Fill(1);
+            1 + usize::from(show_footprint)
+                + usize::from(has_latency)
+        ])
         .split(rows[2]);
-        operator_charts::footprint(
-            frame,
-            extra[0],
-            &self.collector.operator_history,
-            &self.collector.current,
-        );
-        operator_charts::queue(
-            frame,
-            extra[1],
-            &self.collector.operator_history,
-            self.interval,
-        );
-        if extra.len() == 3 {
-            operator_charts::latency(frame, extra[2], &self.collector.operator_history);
+        if show_footprint {
+            self.draw_operator_chart(frame, extra[0], Chart::Footprint);
+        }
+        let start = usize::from(show_footprint);
+        self.draw_operator_chart(frame, extra[start], Chart::Queue);
+        if has_latency {
+            self.draw_operator_chart(frame, extra[start + 1], Chart::Latency);
         }
     }
 
@@ -3205,6 +3400,8 @@ impl App {
         history: &VecDeque<ChartPoint>,
         metric: ChartMetric,
     ) {
+        self.charts.register(Chart::from(metric), area);
+        let zoom = usize::from(self.charts.zoom(Chart::from(metric)));
         let current = history.back().and_then(|point| point.value);
         let current_label = match metric {
             ChartMetric::Generation | ChartMetric::Prefill => current
@@ -3240,8 +3437,12 @@ impl App {
             .clamp(3, 6)
             .min(area.width.saturating_sub(2) as usize);
         let plot_width = (area.width.saturating_sub(2) as usize).saturating_sub(label_width);
-        let (average, peak) = chart_stats_for_width(history, metric, plot_width);
-        let window = chart_window_label(history.len().min(plot_width), self.interval);
+        let visible_count = plot_width.div_ceil(zoom);
+        let (average, peak) = chart_stats_for_width(history, metric, visible_count);
+        let window = format!(
+            "{} · {zoom}×",
+            chart_window_label(history.len().min(visible_count), self.interval)
+        );
         let stats = if area.width >= 68 {
             format!(
                 "  · avg {} · peak {} · {} · {} · older → now",
@@ -3306,7 +3507,12 @@ impl App {
         // sample: smoothing uses only the causal prefix and the current chart
         // resolution; no re-bucketing, future-sample smoothing, recoloring,
         // or rescaling can rewrite history while the chart is scrolling.
-        let visible_points = chart_columns_for_plot(history, plot_width, metric, plot_height);
+        let points = chart_columns_for_plot(history, visible_count, metric, plot_height);
+        let visible_points: Vec<_> = points
+            .into_iter()
+            .flat_map(|point| std::iter::repeat_n(point, zoom))
+            .skip(visible_count * zoom - plot_width)
+            .collect();
         let mut cells = vec![
             vec![
                 TraceCell {
@@ -3700,58 +3906,7 @@ impl App {
                 ],
                 Tone::Cyan,
             );
-            render_card(
-                frame,
-                columns[2],
-                Line::from(vec![
-                    Span::styled(
-                        " ◇ ",
-                        Style::default()
-                            .fg(sample.impact_tone.color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "DIAGNOSIS",
-                        Style::default()
-                            .fg(sample.impact_tone.color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                vec![
-                    Line::from(vec![
-                        tone_badge(sample.impact_tone, &sample.guidance_badge),
-                        Span::styled(
-                            format!("  {}", compact_label(&sample.impact, 18)),
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(Span::styled(
-                        format!(
-                            "CAUSE  {}",
-                            correlation_display(sample, summary_width.saturating_sub(7))
-                                .unwrap_or_else(|| compact_label(
-                                    &hero_impact(sample),
-                                    summary_width.saturating_sub(7),
-                                ))
-                        ),
-                        Style::default().fg(sample.correlation.tone().color()),
-                    )),
-                    Line::from(Span::styled(
-                        compact_label(&diagnostic_signal_line(sample), summary_width),
-                        Style::default().fg(MUTED),
-                    )),
-                    Line::from(Span::styled(
-                        format!(
-                            "ACTION  {}",
-                            compact_label(&sample.guidance_action, summary_width.saturating_sub(8))
-                        ),
-                        Style::default().fg(sample.impact_tone.color()),
-                    )),
-                ],
-                sample.impact_tone,
-            );
+            diagnosis::draw(frame, columns[2], sample);
         }
 
         let selected = if filtered.is_empty() {
@@ -3926,8 +4081,8 @@ impl App {
         let sample = &self.collector.current;
         let width = area.width.saturating_sub(4) as usize;
         let status_tone = llm_status_tone(&sample.llm_status);
-        let diagnosis = correlation_display(sample, width.saturating_sub(8))
-            .unwrap_or_else(|| compact_label(&hero_impact(sample), width.saturating_sub(8)));
+        let finding = diagnosis::assess(sample);
+        let diagnosis = format!("{} · {}", finding.title, finding.evidence);
         render_card(
             frame,
             area,
@@ -3994,7 +4149,7 @@ impl App {
                     Span::styled(
                         diagnosis,
                         Style::default()
-                            .fg(sample.correlation.tone().color())
+                            .fg(finding.tone.color())
                             .add_modifier(Modifier::BOLD),
                     ),
                 ]),
@@ -4131,7 +4286,14 @@ impl App {
         let compact = area.width < 60;
         let hints = match (self.tab, compact) {
             (1, true) => vec![("↑↓", "select"), ("/", "filter"), ("q", "quit")],
-            (0, _) => vec![("p", "pause"), ("↑↓", "history"), ("q", "quit")],
+            (0, true) => vec![("Tab", "chart"), ("+/−", "zoom"), ("?", "help")],
+            (0, false) => vec![
+                ("Tab/↑↓←→", "chart"),
+                ("+/−", "zoom"),
+                ("Enter", "expand"),
+                ("p", "pause"),
+                ("q", "quit"),
+            ],
             (2, true) => vec![("↑↓", "scroll"), ("f", "filter"), ("q", "quit")],
             (_, true) => vec![("p", "pause"), ("?", "help"), ("q", "quit")],
             (1, false) => vec![
@@ -4154,7 +4316,7 @@ impl App {
                 ("p", if self.paused { "resume" } else { "pause" }),
                 ("r", "reset"),
                 ("tab", "view"),
-                ("+/−", "interval"),
+                ("{ / }", "interval"),
                 ("?", "help"),
                 ("q", "quit"),
             ],
@@ -4190,41 +4352,50 @@ impl App {
             centered_rect(60, 58, area)
         };
         frame.render_widget(Clear, popup);
-        let text = vec![
+        let mut text = vec![
             Line::from(Span::styled(
-                "KEYBOARD",
+                "CONTROLS",
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )),
+            Line::from("1 / 2 / 3       Overview / MLX Top / Journal"),
+            Line::from("p / Space       pause or resume; r resets history"),
+            Line::from("{ / }           change refresh interval (1–60s)"),
+            Line::from("a               acknowledge critical system alarm"),
+            Line::from("q / Ctrl-C      quit; ? / h closes help"),
             Line::from(""),
-            Line::from("q / Esc / Ctrl-C   quit"),
-            Line::from("p / Space          pause or resume sampling"),
-            Line::from("r                  reset rates, charts, and journal"),
-            Line::from("a                  acknowledge the active paging alert"),
-            Line::from(
-                "Alerts             aggressive paging rings the terminal bell and shows a banner",
-            ),
-            Line::from("Tab / ← →          cycle Overview, MLX Top, and Journal"),
-            Line::from("1 / 2 / 3          Overview / MLX Top / Journal"),
-            Line::from(
-                "MLX Top            live process/resource monitor: PID, CPU, MEM%, RSS, PAGEIN/s, state, model",
-            ),
-            Line::from("↑ / ↓ / PgUp/PgDn  select a process; Home/End jump to first/last"),
-            Line::from("s                  cycle sort: RSS, CPU, PID, NAME"),
-            Line::from("f or /             filter processes; c clears the filter"),
-            Line::from("Journal            historical transitions only: what changed and why"),
-            Line::from("↑ / PgUp / Home newer; ↓ / PgDn / End older in the Journal"),
-            Line::from("f / [ / ]          cycle Journal event filters"),
-            Line::from("Overview: ↑↓ request history; Home newest; End oldest"),
-            Line::from("+ / -              change refresh interval (1–60s)"),
-            Line::from("? / h              close this help"),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Every panel is framed around what the current machine state does to local LLM latency, headroom, or throughput.",
-                Style::default().fg(MUTED),
-            )),
         ];
+        text.extend(match self.tab {
+            0 => vec![
+                Line::from("Tab / Shift-Tab next / previous chart"),
+                Line::from("Arrow keys      select a neighboring chart"),
+                Line::from("+ / - / wheel   zoom chart history; 0 resets zoom"),
+                Line::from("Enter / Esc     enlarge / restore chart"),
+                Line::from("Mouse click     select chart; right-click enlarge"),
+                Line::from("Shift-↑↓        newer / older prompt"),
+                Line::from("Home / End      newest / oldest prompt"),
+                Line::from("PgUp / PgDn     move by ten requests"),
+                Line::from(if self.collector.current.has_nvidia_gpus() {
+                    "[ / ] GPUs      select previous / next NVIDIA card"
+                } else {
+                    ""
+                }),
+            ],
+            1 => vec![
+                Line::from("↑↓ / PgUp/PgDn  select process / move ten rows"),
+                Line::from("Home / End      first / last process"),
+                Line::from("s               cycle RSS / CPU / PID / name sort"),
+                Line::from("f or /          filter processes; c clears filter"),
+                Line::from("Tab / ← →       switch views"),
+            ],
+            _ => vec![
+                Line::from("↑↓ / PgUp/PgDn  newer / older events"),
+                Line::from("Home / End      newest / oldest event"),
+                Line::from("f / [ / ]       cycle event filters"),
+                Line::from("Tab / ← →       switch views"),
+            ],
+        });
         frame.render_widget(
             Paragraph::new(text).wrap(Wrap { trim: true }).block(
                 Block::default()
@@ -4382,7 +4553,7 @@ fn classify(sample: &mut Sample, previous: Option<&Sample>, thresholds: Threshol
             "light paging",
         )
     } else if gpu_busy {
-        ("GPU BUSY", Tone::Cyan, Some(90), "GOOD", "GPU compute")
+        ("GPU BUSY", Tone::Cyan, Some(100), "HEALTHY", "GPU activity")
     } else if llm {
         ("LLM READY", Tone::Green, Some(100), "HEALTHY", "none")
     } else {
@@ -4406,7 +4577,8 @@ fn classify(sample: &mut Sample, previous: Option<&Sample>, thresholds: Threshol
             "Run on supported macOS hardware and verify system command access.".into();
     } else if sample.pressure == "RED" {
         sample.guidance_badge = "ACT NOW".into();
-        sample.guidance_cause = "Critical pressure — macOS cannot reclaim RAM fast enough.".into();
+        sample.guidance_cause =
+            "Critical pressure — the system cannot reclaim RAM fast enough.".into();
         sample.guidance_action = if llm {
             "Stop unused models/requests; reduce context or concurrency.".into()
         } else {
@@ -4469,9 +4641,10 @@ fn classify(sample: &mut Sample, previous: Option<&Sample>, thresholds: Threshol
             "Reduce batch/concurrency or pause until the warning clears.".into();
     } else if gpu_busy {
         sample.guidance_badge = "GPU".into();
-        sample.guidance_cause = "GPU saturated — inference is compute-bound.".into();
+        sample.guidance_cause =
+            "GPU busy; utilization alone does not establish a bottleneck.".into();
         sample.guidance_action =
-            "For lower latency, reduce work or use a smaller/faster model.".into();
+            "Compare throughput at the same prompt size and concurrency.".into();
     } else {
         sample.guidance_badge = "OK".into();
         sample.guidance_cause =
@@ -4525,84 +4698,6 @@ fn llm_is_observed(sample: &Sample) -> bool {
         || sample.llm_source == TelemetrySource::Live
         || sample.llm_generation_tps.is_some()
         || sample.llm_model != "not detected"
-}
-
-fn hero_impact(sample: &Sample) -> String {
-    if sample.impact == "DATA LIMITED" {
-        return "Native counters are incomplete; current LLM impact cannot be classified safely."
-            .into();
-    }
-    if !llm_is_observed(sample) {
-        return "No local LLM process detected; this score describes machine capacity.".into();
-    }
-    if !sample.correlation.summary.is_empty() {
-        return sample.correlation.summary.clone();
-    }
-    if sample.pressure == "RED" {
-        return "Memory pressure can evict model pages and increase prefill/decode latency.".into();
-    }
-    let paging = sample.swap_in.saturating_add(sample.swap_out);
-    if paging > 0 {
-        return format!(
-            "Live paging ({}) can stall model prefill or decode.",
-            rate(paging)
-        );
-    }
-    if sample.gpu_util.unwrap_or(0) >= 80 {
-        return "GPU is carrying the workload; throughput is compute-bound.".into();
-    }
-    let headroom = sample
-        .availability
-        .map(|value| format!("{value}% system free"))
-        .unwrap_or_else(|| "unknown system headroom".into());
-    format!(
-        "{} RSS · {headroom} · no active latency stall.",
-        bytes(sample.llm_rss)
-    )
-}
-
-/// Keep the card diagnosis readable while retaining the full evidence in the
-/// journal and static report. A card has one `WHY` row; putting every byte
-/// counter in that row makes the actual cause disappear behind an ellipsis.
-fn correlation_display(sample: &Sample, max_chars: usize) -> Option<String> {
-    if sample.correlation.summary.is_empty() || max_chars == 0 {
-        return None;
-    }
-
-    let rate_prefix = sample
-        .correlation
-        .summary
-        .split(" · correlated:")
-        .next()
-        .unwrap_or(sample.correlation.summary.as_str());
-    let rate_label = rate_prefix
-        .split(" · no matching system signal")
-        .next()
-        .unwrap_or(rate_prefix);
-    let rate = rate_label
-        .split_once(" (")
-        .map(|(value, _)| value)
-        .unwrap_or(rate_label);
-    let evidence = correlation_evidence_label(sample);
-    let full = if evidence.is_empty() {
-        rate.to_owned()
-    } else {
-        format!("{rate} · {evidence}")
-    };
-    if full.chars().count() <= max_chars {
-        Some(full)
-    } else {
-        let compact_rate = sample
-            .llm_generation_tps
-            .map(|_| llm_generation_rate_label(sample))
-            .unwrap_or_else(|| "GEN —".into());
-        let compact = if evidence.is_empty() {
-            compact_rate
-        } else {
-            format!("{compact_rate} · {evidence}")
-        };
-        Some(compact_label(&compact, max_chars))
-    }
 }
 
 fn correlation_evidence_label(sample: &Sample) -> String {
@@ -5127,31 +5222,13 @@ fn gpu_load_label(value: Option<u8>, thresholds: Thresholds) -> &'static str {
     }
 }
 
-fn diagnostic_signal_line(sample: &Sample) -> String {
-    let gpu = sample
-        .gpu_util
-        .map(|value| format!("GPU {value}%"))
-        .unwrap_or_else(|| "GPU —".into());
-    let paging = if sample.swap_available && sample.vm_available && sample.rate_ready {
-        format!(
-            "I/O {}",
-            rate(sample.swap_in.saturating_add(sample.swap_out))
-        )
-    } else {
-        "I/O sampling".into()
-    };
-    let confidence = if sample.correlation.summary.is_empty() {
-        String::new()
-    } else {
-        format!(" · {} confidence", sample.correlation.confidence_label())
-    };
-    format!(
-        "{gpu} · {paging} · PRESSURE {}{confidence}",
-        pressure_state_label(sample)
-    )
-}
-
 fn metal_signal_line(sample: &Sample, gpu_memory: &str) -> String {
+    if sample.has_nvidia_gpus() {
+        let memory = gpu::memory_totals(&sample.gpus)
+            .map(|(used, total)| format!("{} / {}", bytes(used), bytes(total)))
+            .unwrap_or_else(|| "—".into());
+        return format!("{} GPUs · VRAM sum {memory}", sample.gpus.len());
+    }
     let mut parts = Vec::new();
     if let Some(device) = sample.metal.device_name.as_deref() {
         parts.push(compact_label(device, 14));
@@ -5821,70 +5898,11 @@ fn linux_cpu_architecture() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-#[derive(Default)]
-struct LinuxGpuInfo {
-    name: Option<String>,
-    util_percent: Option<u8>,
-    used_bytes: Option<u64>,
-    total_bytes: Option<u64>,
-    temp_celsius: Option<u64>,
-}
-
-/// Parse one `nvidia-smi --query-gpu` CSV row:
-/// `name, utilization.gpu [%], memory.used [MiB], memory.total [MiB],
-/// temperature.gpu [C]` with `--format=csv,noheader,nounits`.
-fn parse_nvidia_smi_csv(text: &str) -> Option<LinuxGpuInfo> {
-    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
-    let mut parts: Vec<&str> = line.split(',').map(str::trim).collect();
-    if parts.len() < 4 {
-        return None;
-    }
-    // Some driver versions append "(C)" style units even with `nounits`;
-    // keep only leading digits for the numeric fields.
-    let numeric = |value: &str| {
-        value
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect::<String>()
-            .parse::<u64>()
-            .ok()
-    };
-    let name = parts.remove(0).to_owned();
-    let util = parts.first().and_then(|value| numeric(value));
-    let used_mib = parts.get(1).and_then(|value| numeric(value));
-    let total_mib = parts.get(2).and_then(|value| numeric(value));
-    let temp = parts.get(3).and_then(|value| numeric(value));
-    Some(LinuxGpuInfo {
-        name: (!name.is_empty()).then_some(name),
-        util_percent: util.and_then(|value| u8::try_from(value.min(100)).ok()),
-        used_bytes: used_mib.map(|value| value.saturating_mul(1024 * 1024)),
-        total_bytes: total_mib.map(|value| value.saturating_mul(1024 * 1024)),
-        temp_celsius: temp,
-    })
-}
-
-fn linux_nvidia_info() -> Option<LinuxGpuInfo> {
-    let output = command_text(
-        "nvidia-smi",
-        &[
-            "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
-            "--format=csv,noheader,nounits",
-        ],
-    )?;
-    parse_nvidia_smi_csv(&output)
-}
-
 fn linux_metal_init() -> MetalTelemetry {
-    let mut metal = MetalTelemetry {
+    MetalTelemetry {
         architecture: linux_cpu_architecture(),
         ..MetalTelemetry::default()
-    };
-    if let Some(gpu) = linux_nvidia_info() {
-        metal.device_name = gpu.name;
-        // Expose VRAM size where the UI expects a device memory limit.
-        metal.resource_limit = gpu.total_bytes;
     }
-    metal
 }
 
 fn linux_thermal_celsius(nvidia_temp: Option<u64>) -> Option<u64> {
@@ -5906,12 +5924,9 @@ fn linux_thermal_celsius(nvidia_temp: Option<u64>) -> Option<u64> {
 }
 
 fn linux_thermal_label(hottest: Option<u64>) -> String {
-    match hottest {
-        Some(value) if value >= 90 => format!("limited {value}C"),
-        Some(value) if value >= 80 => "warning reported".into(),
-        Some(_) => "no warning".into(),
-        None => "unavailable".into(),
-    }
+    hottest
+        .map(|value| format!("{value}°C measured"))
+        .unwrap_or_else(|| "unavailable".into())
 }
 
 fn linux_counters_for_rates() -> VmCounters {
@@ -5970,27 +5985,17 @@ fn sample_linux_memory(sample: &mut Sample, _page_size: u64, total_memory: u64) 
     sample.swap_available = info.swap_total_kb > 0;
 }
 
-fn sample_linux_gpu_thermal(sample: &mut Sample) {
-    let gpu = linux_nvidia_info();
-    if let Some(gpu) = &gpu {
-        sample.gpu_util = gpu.util_percent;
-        sample.gpu_in_use = gpu.used_bytes;
-        sample.gpu_alloc = gpu.total_bytes;
-        if sample.metal.device_name.is_none() {
-            sample.metal.device_name = gpu.name.clone();
-        }
-        if sample.metal.resource_limit.is_none() {
-            sample.metal.resource_limit = gpu.total_bytes;
-        }
-    } else {
-        sample.gpu_util = None;
-        sample.gpu_alloc = None;
-        sample.gpu_in_use = None;
-    }
+fn sample_linux_gpu_thermal(sample: &mut Sample, previous: &[gpu::Device]) {
+    sample.gpus = gpu::collect(previous);
+    sample.gpu_util = gpu::peak_utilization(&sample.gpus);
+    // VRAM remains per-card. A sum would falsely suggest a single allocation
+    // pool and feed NVIDIA memory into the Apple Metal correlation rules.
+    sample.gpu_in_use = None;
+    sample.gpu_alloc = None;
     sample.metal.renderer_util = None;
     sample.metal.tiler_util = None;
-    let hottest = linux_thermal_celsius(gpu.and_then(|info| info.temp_celsius));
-    sample.thermal = linux_thermal_label(hottest);
+    let hottest_gpu = sample.gpus.iter().filter_map(|gpu| gpu.temperature).max();
+    sample.thermal = linux_thermal_label(linux_thermal_celsius(hottest_gpu));
 }
 
 fn parse_vm_stat(text: &str, page_size: u64) -> VmCounters {
@@ -7573,8 +7578,10 @@ fn render_metric_card<'a>(
 fn llm_status_tone(status: &str) -> Tone {
     match status.to_ascii_lowercase().as_str() {
         "ready" | "idle" => Tone::Green,
-        "waiting" | "busy" | "generating" | "stale" | "last result" => Tone::Yellow,
-        "offline" | "error" => Tone::Red,
+        "waiting" | "busy" | "generating" => Tone::Cyan,
+        "stale" => Tone::Yellow,
+        "last result" | "offline" => Tone::Muted,
+        "error" => Tone::Red,
         _ => Tone::Cyan,
     }
 }
@@ -7611,7 +7618,7 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn print_static(sample: &Sample, interval: u64) {
+fn print_static(sample: &Sample, interval: u64, thresholds: Thresholds) {
     println!("mlxtop · static report ({interval}s sample)\n");
     println!("SIGNAL       {} · {}", sample.impact, sample.grade);
     println!("PRESSURE     {}", pressure_state_label(sample));
@@ -7644,21 +7651,29 @@ fn print_static(sample: &Sample, interval: u64) {
     } else {
         println!("PAGING       —");
     }
-    println!(
-        "METAL        {} · {} cores · GPU {} · renderer {} · tiler {}",
-        sample.metal.device_name.as_deref().unwrap_or("unavailable"),
-        sample
-            .metal
-            .gpu_cores
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "—".into()),
-        sample
-            .gpu_util
-            .map(|v| format!("{v}%"))
-            .unwrap_or_else(|| "—".into()),
-        percent_u8(sample.metal.renderer_util),
-        percent_u8(sample.metal.tiler_util)
-    );
+    if sample.has_nvidia_gpus() {
+        for line in gpu_dashboard::static_lines(&sample.gpus, thresholds) {
+            println!("{line}");
+        }
+    } else if cfg!(target_os = "macos") {
+        println!(
+            "METAL        {} · {} cores · GPU {} · renderer {} · tiler {}",
+            sample.metal.device_name.as_deref().unwrap_or("unavailable"),
+            sample
+                .metal
+                .gpu_cores
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "—".into()),
+            sample
+                .gpu_util
+                .map(|v| format!("{v}%"))
+                .unwrap_or_else(|| "—".into()),
+            percent_u8(sample.metal.renderer_util),
+            percent_u8(sample.metal.tiler_util)
+        );
+    } else {
+        println!("GPU          NVIDIA counters unavailable");
+    }
     println!(
         "RUNTIME      thermal {} · LLM {} · footprint {} · Metal limit {}",
         sample.thermal,
@@ -7719,9 +7734,13 @@ fn print_static(sample: &Sample, interval: u64) {
             sample.correlation.confidence_label()
         );
     }
+    let finding = diagnosis::assess(sample);
+    println!("DIAGNOSIS    {}", finding.title);
+    println!("EVIDENCE     {} · {}", finding.evidence, finding.context);
     println!(
-        "NEXT         {} — {}",
-        sample.guidance_badge, sample.guidance_action
+        "{}         {}",
+        if finding.actionable { "CHECK" } else { "NOTE " },
+        finding.next
     );
 }
 
@@ -7744,7 +7763,12 @@ impl Drop for TerminalGuard {
         if self.active {
             let _ = disable_raw_mode();
             let mut out = stdout();
-            let _ = execute!(out, crossterm::cursor::Show, LeaveAlternateScreen);
+            let _ = execute!(
+                out,
+                crossterm::cursor::Show,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
         }
     }
 }
@@ -7819,6 +7843,7 @@ fn run_app(
         if input_ready {
             match event::read() {
                 Ok(Event::Key(key)) => app.handle_key(key),
+                Ok(Event::Mouse(mouse)) => app.handle_mouse(mouse),
                 Ok(_) => {}
                 Err(error) => {
                     diagnostics_log(
@@ -7904,7 +7929,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                      -h, --help         show help\n\
                      Config file: ~/.config/mlxtop/config.json\n\
                      Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
-                     Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · +/- interval · ? help",
+                     Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab/arrows charts · +/- zoom · enter expand · {{/}} interval · ? help",
                     diagnostics_default_hint()
                 );
                 return Ok(());
@@ -7936,7 +7961,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         collector.sample();
         thread::sleep(Duration::from_secs(interval));
         let sample = collector.sample();
-        print_static(&sample, interval);
+        print_static(&sample, interval, collector.thresholds);
         return Ok(());
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -7946,7 +7971,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut terminal_guard = TerminalGuard::new();
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, crossterm::cursor::Hide)?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        crossterm::cursor::Hide
+    )?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::new(interval, history, config);
@@ -7955,6 +7985,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     execute!(
         terminal.backend_mut(),
         crossterm::cursor::Show,
+        DisableMouseCapture,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
@@ -8031,11 +8062,14 @@ mod tests {
             journal_filter: JournalFilter::All,
             journal_scroll: 0,
             request_scroll: 0,
+            charts: chart_navigation::Navigation::default(),
+            gpu_selected: 0,
             help: false,
             quit: false,
             sampler_disconnected: false,
             alert: None,
             alert_bells: 0,
+            critical_episode: false,
             thresholds: Thresholds::default(),
         };
         (app, view_sender)
@@ -8061,11 +8095,22 @@ mod tests {
     }
 
     fn render_app(app: &App, width: u16, height: u16) -> String {
+        render_view(width, height, |frame| app.draw(frame))
+    }
+
+    // Exercise the NVIDIA layout on development hosts too; production routing
+    // is covered separately and must never enable it on a non-Linux target.
+    fn render_nvidia_overview(app: &App, width: u16, height: u16) -> String {
+        render_view(width, height, |frame| {
+            app.draw_header(frame, Rect::new(0, 0, width, 2));
+            app.draw_gpu_overview(frame, Rect::new(0, 2, width, height - 2));
+        })
+    }
+
+    fn render_view(width: u16, height: u16, draw: impl FnOnce(&mut Frame)) -> String {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-        terminal
-            .draw(|frame| app.draw(frame))
-            .expect("application should render");
+        terminal.draw(draw).expect("application should render");
         let mut rendered = String::new();
         for y in 0..height {
             for x in 0..width {
@@ -8147,23 +8192,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_nvidia_smi_csv_row() {
-        let info = parse_nvidia_smi_csv("NVIDIA GeForce GTX 1660 SUPER, 23, 974, 6144, 40\n")
-            .expect("csv row should parse");
-        assert_eq!(info.name.as_deref(), Some("NVIDIA GeForce GTX 1660 SUPER"));
-        assert_eq!(info.util_percent, Some(23));
-        assert_eq!(info.used_bytes, Some(974 * 1024 * 1024));
-        assert_eq!(info.total_bytes, Some(6144 * 1024 * 1024));
-        assert_eq!(info.temp_celsius, Some(40));
-    }
-
-    #[test]
-    fn linux_thermal_labels_match_mac_semantics() {
-        // `classify` treats "limited*" and "warning reported" as thermal
-        // causes, so Linux labels must reuse those exact strings.
-        assert!(linux_thermal_label(Some(95)).starts_with("limited"));
-        assert_eq!(linux_thermal_label(Some(85)), "warning reported");
-        assert_eq!(linux_thermal_label(Some(40)), "no warning");
+    fn linux_temperature_does_not_invent_a_throttling_signal() {
+        assert_eq!(linux_thermal_label(Some(95)), "95°C measured");
+        assert_eq!(linux_thermal_label(Some(85)), "85°C measured");
+        assert_eq!(linux_thermal_label(Some(40)), "40°C measured");
         assert_eq!(linux_thermal_label(None), "unavailable");
     }
 
@@ -8268,16 +8300,279 @@ mod tests {
         assert!(!rendered.contains("LLM READY  HEALTHY"));
     }
 
+    fn nvidia_app(count: usize) -> App {
+        let mut app = test_app(0);
+        let csv = (0..count)
+            .map(|i| {
+                format!(
+                    "{i}, GPU-fixture-{i}, NVIDIA RTX 4090 #{i}, {}, {}, 24564, {}",
+                    [97, 62, 0, 85][i % 4],
+                    [22100, 16800, 1024, 19700][i % 4],
+                    [76, 63, 35, 71][i % 4]
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.collector.current = Sample {
+            updated: "12:30:00".into(),
+            gpus: gpu::parse(&csv),
+            gpu_util: Some(97),
+            total_memory: 128 * 1024 * MIB,
+            availability: Some(62),
+            pressure: "GREEN".into(),
+            pressure_meaning: "normal".into(),
+            pressure_tone: Tone::Green,
+            vm_available: true,
+            swap_available: true,
+            rate_ready: true,
+            thermal: "no warning".into(),
+            llm_provider: "llama.cpp".into(),
+            llm_model: "local-model-70B".into(),
+            llm_status: "generating".into(),
+            llm_source: TelemetrySource::Live,
+            llm_observed_at: Some(SystemTime::now()),
+            llm_count: 1,
+            llm_generation_tps: Some(42.5),
+            llm_generation_tps_live: true,
+            llm_prefill_tps: Some(980.0),
+            llm_active_requests: Some(1),
+            llm_waiting_requests: Some(0),
+            llm_rss: 38 * 1024 * MIB,
+            llm_cpu: 128.0,
+            ..Sample::default()
+        };
+        classify(&mut app.collector.current, None, defaults());
+        for i in 0..80 {
+            app.collector
+                .generation_history
+                .push_back(ChartPoint::new(Some(350 + i % 9 * 10), Tone::Cyan));
+            app.collector
+                .load_history
+                .push_back(ChartPoint::new(Some(38), Tone::Green));
+            app.collector
+                .gpu_history
+                .push_back(ChartPoint::new(Some(88 + i % 10), Tone::Blue));
+            app.collector
+                .swap_history
+                .push_back(ChartPoint::new(Some(0), Tone::Green));
+            app.collector
+                .operator_history
+                .observe(&app.collector.current, 100);
+        }
+        app
+    }
+
     #[test]
-    fn aggressive_paging_impact_states_drive_the_alert() {
-        assert!(is_aggressive_paging("SWAP THRASHING"));
-        assert!(is_aggressive_paging("HEAVY PAGING"));
-        assert!(is_aggressive_paging("PAGE-IN RECOVERY"));
-        assert!(!is_aggressive_paging("PAGING ACTIVE"));
-        assert!(!is_aggressive_paging("WATCH PAGING"));
-        assert!(!is_aggressive_paging("MEMORY BOTTLENECK"));
-        assert!(!is_aggressive_paging("LLM READY"));
-        assert!(!is_aggressive_paging(""));
+    fn nvidia_overview_keeps_primary_values_and_every_card_reachable() {
+        for count in [1, 2, 4, 8, 16] {
+            for (width, height) in [(80, 24), (100, 32), (120, 40), (180, 50)] {
+                let mut app = nvidia_app(count);
+                assert_eq!(app.collector.current.health, Some(100));
+                assert_eq!(llm_status_tone("generating"), Tone::Cyan);
+                let screen = render_nvidia_overview(&app, width, height);
+                for label in [
+                    "GPU DEVICES",
+                    "UTILIZATION",
+                    "VRAM USED / TOTAL",
+                    "TEMP",
+                    "97%",
+                    "76°C",
+                    "21.6/24.0 GiB",
+                ] {
+                    assert!(
+                        screen.contains(label),
+                        "missing {label} at {width}x{height}, {count} cards\n{screen}"
+                    );
+                }
+                assert!(screen.contains("NOTE"));
+                assert!(screen.contains("42.5"));
+                assert!(screen.contains("prompt load"));
+                for _ in 1..count {
+                    app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
+                }
+                assert_eq!(app.gpu_selected, count - 1);
+                let last = render_nvidia_overview(&app, width, height);
+                assert!(
+                    last.contains(&format!("▸ {}", count - 1)),
+                    "last GPU inaccessible at {width}x{height}\n{last}"
+                );
+                assert_eq!(app.request_scroll, 0);
+                if count > 1 {
+                    app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+                    assert_eq!(app.gpu_selected, count - 2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nvidia_selection_follows_uuid_and_missing_utilization_remains_visible() {
+        let (mut app, views) = test_app_with_sender(0);
+        app.collector = nvidia_app(2).collector.clone();
+        app.gpu_selected = 1;
+        let mut next = app.collector.clone();
+        next.current.gpus.swap(0, 1);
+        next.current.gpus[0].index = 0;
+        next.current.gpus[1].index = 1;
+        next.current.gpus[0].utilization = None;
+        next.current.gpus[0].used = None;
+        next.current.gpus[0].temperature = None;
+        next.current.gpu_util = gpu::peak_utilization(&next.current.gpus);
+        views.send(next).unwrap();
+        app.tick();
+        assert_eq!(app.gpu_selected, 0);
+        assert_eq!(
+            app.collector.current.gpus[app.gpu_selected].uuid,
+            "GPU-fixture-1"
+        );
+        let screen = render_nvidia_overview(&app, 180, 50);
+        assert!(screen.contains("unavailable"));
+        assert!(screen.contains("— / 24.0 GiB"));
+        assert!(!render_app(&test_app(0), 80, 24).contains("GPU DEVICES"));
+    }
+
+    #[test]
+    fn nvidia_dashboard_requires_linux_and_detected_cards() {
+        for count in [0, 2] {
+            let mut app = nvidia_app(count);
+            let expected = cfg!(target_os = "linux") && count > 0;
+            assert_eq!(app.collector.current.has_nvidia_gpus(), expected);
+            for (width, height) in [(80, 24), (180, 50)] {
+                let screen = render_app(&app, width, height);
+                assert_eq!(screen.contains("GPU DEVICES"), expected);
+                assert_eq!(screen.contains("VRAM USED / TOTAL"), expected);
+            }
+            assert_eq!(
+                app.gpu_chart_title(),
+                if expected { "GPU max" } else { "GPU" }
+            );
+            assert_eq!(app.show_process_footprint(), !expected);
+            app.help = true;
+            assert_eq!(render_app(&app, 100, 40).contains("[ / ] GPUs"), expected);
+        }
+    }
+
+    #[test]
+    fn critical_host_conditions_drive_alerts_but_gpu_usage_does_not() {
+        assert!(is_critical_state("SWAP THRASHING"));
+        assert!(is_critical_state("HEAVY PAGING"));
+        assert!(is_critical_state("PAGE-IN RECOVERY"));
+        assert!(!is_critical_state("PAGING ACTIVE"));
+        assert!(!is_critical_state("WATCH PAGING"));
+        assert!(is_critical_state("MEMORY BOTTLENECK"));
+        assert!(!is_critical_state("GPU BUSY"));
+        assert!(!is_critical_state("THERMAL LIMIT"));
+        assert!(!is_critical_state("LLM READY"));
+        assert!(!is_critical_state(""));
+    }
+
+    #[test]
+    fn critical_memory_alarm_survives_missing_counters_and_acknowledgment() {
+        let (mut app, views) = test_app_with_sender(0);
+        for utilization in [80, 99, 100] {
+            let mut view = view_with_impact("GPU BUSY", "12:00:00");
+            view.current.gpu_util = Some(utilization);
+            views.send(view).unwrap();
+            app.tick();
+        }
+        assert_eq!(app.alert_bells, 0);
+        let mut critical = view_with_impact("DATA LIMITED", "12:00:01");
+        critical.current.pressure = "RED".into();
+        views.send(critical.clone()).unwrap();
+        app.tick();
+        assert_eq!(app.alert_bells, 1);
+        assert_eq!(app.alert.as_ref().unwrap().state, "MEMORY BOTTLENECK");
+        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        views
+            .send(view_with_impact("DATA LIMITED", "12:00:02"))
+            .unwrap();
+        views.send(critical.clone()).unwrap();
+        app.tick();
+        assert_eq!(app.alert_bells, 1);
+        assert!(app.alert.is_none());
+        views
+            .send(view_with_impact("GPU BUSY", "12:00:03"))
+            .unwrap();
+        views.send(critical).unwrap();
+        app.tick();
+        assert_eq!(app.alert_bells, 2);
+    }
+
+    #[test]
+    fn chart_controls_focus_zoom_and_expand_without_changing_sampling() {
+        let mut app = test_app(0);
+        render_app(&app, 180, 50);
+        let original_interval = app.interval;
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.charts.focused, Chart::Generation);
+        app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+        assert_eq!(app.charts.zoom(Chart::Generation), 2);
+        assert_eq!(app.charts.zoom(Chart::Prompt), 1);
+        assert_eq!(app.interval, original_interval);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.charts.focused, Chart::Prefill);
+        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        assert_eq!(app.charts.focused, Chart::Generation);
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let screen = render_app(&app, 80, 24);
+        assert!(screen.contains("generation"));
+        assert!(screen.contains("Enter/Esc restore"));
+        assert!(!screen.contains("LLM OPERATIONS"));
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.charts.expanded);
+        assert!(!app.quit);
+        assert_eq!(app.charts.zoom(Chart::Generation), 2);
+        app.handle_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
+        assert_eq!(app.charts.zoom(Chart::Generation), 1);
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+        assert_eq!(app.tab, 1);
+    }
+
+    #[test]
+    fn mouse_targets_visible_charts_and_resize_replaces_hit_regions() {
+        let mut app = test_app(0);
+        render_app(&app, 180, 50);
+        let area = app
+            .charts
+            .regions
+            .borrow()
+            .iter()
+            .find(|(chart, _)| *chart == Chart::Queue)
+            .unwrap()
+            .1;
+        let mouse = |kind| MouseEvent {
+            kind,
+            column: area.x + 1,
+            row: area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left)));
+        assert_eq!(app.charts.focused, Chart::Queue);
+        for _ in 0..10 {
+            app.handle_mouse(mouse(MouseEventKind::ScrollUp));
+        }
+        assert_eq!(app.charts.zoom(Chart::Queue), 8);
+        assert_eq!(app.charts.zoom(Chart::Gpu), 1);
+        for _ in 0..10 {
+            app.handle_mouse(mouse(MouseEventKind::ScrollDown));
+        }
+        assert_eq!(app.charts.zoom(Chart::Queue), 1);
+        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right)));
+        assert!(app.charts.expanded);
+        app.help = true;
+        app.handle_mouse(mouse(MouseEventKind::ScrollUp));
+        assert_eq!(app.charts.zoom(Chart::Queue), 1);
+        app.help = false;
+        app.charts.expanded = false;
+        render_app(&app, 80, 24);
+        assert!(app
+            .charts
+            .regions
+            .borrow()
+            .iter()
+            .all(|(_, area)| area.right() <= 80 && area.bottom() <= 24));
+        render_app(&app, 60, 20);
+        assert!(app.charts.regions.borrow().is_empty());
     }
 
     #[test]
@@ -8557,6 +8852,9 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         assert_eq!(app.request_scroll, 0);
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.tab, 0);
+        assert_ne!(app.charts.focused, Chart::Prompt);
+        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
         assert_eq!(app.tab, 1);
         app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
         assert_eq!(app.tab, 1);
@@ -8664,7 +8962,12 @@ mod tests {
         let mut app = test_app(0);
         app.help = true;
         let rendered = render_app(&app, 80, 24);
-        for label in ["KEYBOARD", "cycle Overview", "change refresh interval"] {
+        for label in [
+            "CONTROLS",
+            "next / previous chart",
+            "change refresh interval",
+            "newest / oldest prompt",
+        ] {
             assert!(
                 rendered.contains(label),
                 "missing narrow help label: {label}"
@@ -8917,7 +9220,7 @@ mod tests {
             0,
             6,
             TraceStyle {
-                metric: ChartMetric::Gpu,
+                metric: ChartMetric::Memory,
                 previous_tone: Tone::Red,
                 tone: Tone::Green,
                 thresholds: defaults(),
@@ -8937,7 +9240,7 @@ mod tests {
             6,
             0,
             TraceStyle {
-                metric: ChartMetric::Gpu,
+                metric: ChartMetric::Memory,
                 previous_tone: Tone::Green,
                 tone: Tone::Yellow,
                 thresholds: defaults(),
@@ -9398,33 +9701,6 @@ mod tests {
     }
 
     #[test]
-    fn correlation_card_prefers_a_readable_primary_signal() {
-        let sample = Sample {
-            llm_generation_tps: Some(23.9),
-            gpu_in_use: Some(96),
-            gpu_alloc: Some(100),
-            correlation: CorrelationInsight {
-                cause: CorrelationCause::MetalMemory,
-                summary: "GEN 23.9 tok/s · correlated: Metal MEM 96% (21.0 GiB / 21.7 GiB)".into(),
-                ..CorrelationInsight::default()
-            },
-            ..Sample::default()
-        };
-
-        assert_eq!(
-            correlation_display(&sample, 48).as_deref(),
-            Some("GEN 23.9 tok/s · Metal mem 96%")
-        );
-        assert!(
-            correlation_display(&sample, 22)
-                .expect("compact diagnosis should be present")
-                .chars()
-                .count()
-                <= 22
-        );
-    }
-
-    #[test]
     fn provider_telemetry_counts_as_an_observed_llm_without_a_matching_process() {
         let sample = Sample {
             llm_provider: "oMLX".into(),
@@ -9436,7 +9712,6 @@ mod tests {
         };
 
         assert!(llm_is_observed(&sample));
-        assert!(!hero_impact(&sample).contains("No local LLM process detected"));
     }
 
     #[test]

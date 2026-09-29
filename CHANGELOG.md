@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- Select Overview charts with Tab, arrows or the mouse; zoom each history
+  independently with +/− or the wheel, and enlarge/restore with Enter/Esc.
+  Move sampling interval controls to { / }.
+- Replace prompt-growth warning marks and advice with actual token counts,
+  recent median and size range.
+- Show measured slowdowns and concise evidence in Diagnostics; high GPU usage
+  stays neutral and does not establish a compute bottleneck.
+- Sound the terminal bell for critical memory pressure as well as severe paging,
+  once per episode. Acknowledgment persists through unavailable samples.
+- Report Linux temperatures without inferring throttling from a fixed threshold.
+
+- On Linux, collect every NVIDIA GPU, with UUID-based identity, per-card utilization,
+  VRAM and temperature. Keep unavailable readings distinct from zero.
+- Add a responsive GPU device panel to Overview; use `[` / `]` to select
+  cards and reveal additional rows on smaller terminals. GPU summaries and
+  history use the explicitly labeled maximum utilization across cards.
+- Include every NVIDIA device in `--once` reports and run Rust CI on Linux
+  as well as macOS.
+
 ## 1.1.2 — 2026-09-29
 
 - Publish static Linux binaries for x86_64 and aarch64; the terminal installer
