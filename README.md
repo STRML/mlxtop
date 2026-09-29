@@ -1,10 +1,11 @@
 # mlxtop
 
-**A `top` for your local LLM on Mac.**
+**A `top` for your local LLM on Mac and Linux.**
 
-See which models are running, how much memory they use, and how busy your Mac’s
-GPU is. With oMLX, you can also follow generation speed and request activity as
-your model responds.
+See which models are running, how much memory they use, and how busy your
+GPUs are. Linux NVIDIA systems show each card's utilization, VRAM and temperature
+in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, you can
+also follow generation speed and request activity as your model responds.
 
 ![mlxtop Overview showing per-request prompt load, generation and prefill rates, process memory, queue activity, GPU use, and recent events](docs/screenshots/overview.png)
 
@@ -79,8 +80,8 @@ and anything you leave out keeps its built-in default.
 | `omx.port` | integer | 8080 | oMLX server port |
 | `memory_warn_load` | integer | 70 | Memory load (%) that turns the memory indicator yellow |
 | `memory_critical_load` | integer | 85 | Memory load (%) that turns it red |
-| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "loaded" and shown yellow |
-| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated", shown red, and correlated as GPU saturation |
+| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "loaded"; utilization stays neutral blue |
+| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and considered in slowdown correlation; never an alarm by itself |
 | `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
 | `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
 | `swap_critical_rate` | integer | 16 MiB/s | Swap churn that counts as thrashing |
@@ -167,9 +168,13 @@ aren’t benchmarks.
 | Key | Action |
 | --- | --- |
 | `1` / `2` / `3` | Open Overview / MLX Top / Journal |
-| `Tab` | Switch views |
+| `Tab` / arrows / click | Select a chart in Overview |
 | `p` / `Space` | Pause or resume sampling |
-| `+` / `-` | Change refresh interval |
+| `+` / `-` / mouse wheel | Zoom the selected chart’s history |
+| `Enter` / `Esc` | Enlarge / restore a chart |
+| `{` / `}` | Change refresh interval |
+| `a` | Acknowledge a critical system alarm |
+| `[` / `]` | Select an NVIDIA GPU in Overview and reveal additional cards |
 | `?` | Show help |
 | `q` | Quit |
 
@@ -216,9 +221,11 @@ build from source with `cargo install --path . --locked`.
 | MLX-LM, Ollama, LM Studio, LocalAI | Process detection (including Python entrypoints, LM Studio's `llmster`, and the Bionic app); completed request counts through an optional client-written usage file |
 
 Overview integrates prompt load with generation and prefill on wide terminals.
-It shows the latest count, change from the previous observed request, freshness,
-and cached/uncached segments when reported. Queue and OS process-footprint
-charts complement the system metrics. First-token latency appears only when
+**Prompt load means prompt size in input tokens, including cached tokens.**
+The headline gives the selected request's exact size; each bar represents one
+observed request. The panel also shows the change from the previous observed
+request, freshness, and cached/uncached segments when reported. Queue and OS
+process-footprint charts complement the system metrics. First-token latency appears only when
 explicitly measured client timings are supplied. See the
 [operator charts](docs/USER_GUIDE.md#operator-charts) for scales and data sources.
 Prompt counts also appear in the static report. Journal records each

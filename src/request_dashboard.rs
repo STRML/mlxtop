@@ -112,94 +112,44 @@ fn comparable(a: &providers::RequestUsage, b: &providers::RequestUsage) -> bool 
     a.provider == b.provider && a.model == b.model
 }
 
-fn material_jump(current: &providers::RequestUsage, previous: Option<&Entry>) -> bool {
-    previous.is_some_and(|old| {
-        comparable(current, &old.usage)
-            && current.prompt.saturating_sub(old.usage.prompt) >= 2048
-            && old.usage.prompt > 0
-            && current.prompt as u128 * 100 >= old.usage.prompt as u128 * 125
-    })
-}
-
-struct Insight {
-    title: String,
-    detail: String,
-    action: String,
-    tone: Tone,
-}
-
-fn insight(history: &History, index: usize) -> Insight {
+fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
     let current = &history.entries[index].usage;
-    let mut baseline: Vec<_> = history
+    let mut sizes: Vec<_> = history
         .entries
         .iter()
-        .take(index)
+        .take(index + 1)
         .rev()
-        .take_while(|old| comparable(current, &old.usage))
+        .take_while(|entry| comparable(current, &entry.usage))
         .take(8)
-        .map(|old| old.usage.prompt)
+        .map(|entry| entry.usage.prompt)
         .collect();
-    baseline.sort_unstable();
-    let typical = if baseline.len() >= 3 {
-        Some(baseline[baseline.len() / 2])
-    } else {
-        None
-    };
-    let detail = typical
-        .map(|n| {
-            format!(
-                "Recent median {} · {} prior requests",
-                exact(n),
-                baseline.len()
-            )
-        })
-        .unwrap_or_else(|| "Building a same-model baseline".into());
-    if material_jump(
-        current,
-        index.checked_sub(1).and_then(|i| history.entries.get(i)),
-    ) {
-        return Insight {
-            title: "PROMPT JUMP · input increased".into(),
-            detail,
-            action: "Inspect context/tool results.".into(),
-            tone: Tone::Yellow,
-        };
+    sizes.sort_unstable();
+    let mut line = Line::from(Span::styled(
+        format!(" RECENT {}", sizes.len()),
+        Style::default().fg(MUTED),
+    ));
+    let middle = sizes.len() / 2;
+    let sum = u128::from(sizes[middle]) + u128::from(sizes[(sizes.len() - 1) / 2]);
+    let median = format!(
+        "{}{}",
+        exact((sum / 2) as u64),
+        if sum % 2 == 0 { "" } else { ".5" }
+    );
+    append_detail(&mut line, format!("MEDIAN {median} tokens"), MUTED, width);
+    append_detail(
+        &mut line,
+        format!(
+            "RANGE {}–{}",
+            exact(sizes[0]),
+            exact(sizes[sizes.len() - 1])
+        ),
+        MUTED,
+        width,
+    );
+    if line.width() < usize::from(width) {
+        line.spans.push(Span::raw(" "));
     }
-    if let Some(median) = typical.filter(|median| *median > 0) {
-        if current.prompt as u128 * 2 >= median as u128 * 3
-            && current.prompt.saturating_sub(median) >= 2048
-        {
-            return Insight {
-                title: format!(
-                    "LARGE VS RECENT · {:.1}× median",
-                    current.prompt as f64 / median as f64
-                ),
-                detail,
-                action: "Inspect context/tool results.".into(),
-                tone: Tone::Yellow,
-            };
-        }
-        if current.prompt as u128 * 4 <= median as u128 * 3 {
-            return Insight {
-                title: "SMALLER INPUT · below recent median".into(),
-                detail,
-                action: "Compare prefill time.".into(),
-                tone: Tone::Cyan,
-            };
-        }
-        return Insight {
-            title: "TYPICAL INPUT · near recent median".into(),
-            detail,
-            action: "If slow, check prefill/queue/GPU.".into(),
-            tone: Tone::Cyan,
-        };
-    }
-    Insight {
-        title: "BASELINE SAMPLING".into(),
-        detail,
-        action: "Collect more requests.".into(),
-        tone: Tone::Muted,
-    }
+    line
 }
 
 fn is_live(entry: &Entry, sample: &Sample, now: SystemTime) -> bool {
@@ -226,50 +176,7 @@ fn append_detail(line: &mut Line<'static>, text: String, color: Color, width: u1
     }
 }
 
-fn assessment_line(
-    mut assessment: Insight,
-    low_cache: bool,
-    live: bool,
-    width: u16,
-) -> Line<'static> {
-    // One actionable note owns the footer; baseline detail is optional.
-    if low_cache {
-        assessment.action = "Repeating input? Check prefix reuse.".into();
-    }
-    let title = assessment.title.split(" · ").next().unwrap_or("");
-    let mut line = Line::from(Span::styled(
-        format!(
-            " {}{}{}",
-            if live { "" } else { "HISTORY · " },
-            if assessment.tone == Tone::Yellow {
-                "! "
-            } else {
-                ""
-            },
-            title
-        ),
-        Style::default().fg(if live { assessment.tone.color() } else { MUTED }),
-    ));
-    append_detail(
-        &mut line,
-        assessment.action,
-        if live { Color::White } else { MUTED },
-        width,
-    );
-    append_detail(&mut line, assessment.detail, MUTED, width);
-    if line.width() < usize::from(width) {
-        line.spans.push(Span::raw(" "));
-    }
-    line
-}
-
-fn draw_bar(
-    frame: &mut Frame,
-    area: Rect,
-    usage: &providers::RequestUsage,
-    color: Color,
-    jump: bool,
-) {
+fn draw_bar(frame: &mut Frame, area: Rect, usage: &providers::RequestUsage, color: Color) {
     if area.is_empty() {
         return;
     }
@@ -321,11 +228,6 @@ fn draw_bar(
         frame.buffer_mut()[(area.x, area.y)]
             .set_symbol("↑")
             .set_fg(color);
-    } else if jump {
-        let top = area.bottom().saturating_sub(total.div_ceil(8) as u16);
-        frame.buffer_mut()[(area.x, top.saturating_sub(1).max(area.y))]
-            .set_symbol("!")
-            .set_fg(YELLOW);
     }
 }
 
@@ -335,6 +237,7 @@ pub(super) fn draw(
     history: &History,
     sample: &Sample,
     scroll: usize,
+    zoom: u16,
 ) {
     let selected = history
         .len()
@@ -359,13 +262,13 @@ pub(super) fn draw(
     ]);
     append_detail(
         &mut title,
-        "1 bar/request".into(),
+        format!("1 bar/request · {zoom}×"),
         MUTED,
         area.width.saturating_sub(2),
     );
     append_detail(
         &mut title,
-        "↑↓ history / Home latest".into(),
+        "Shift+↑↓ history / Home latest".into(),
         MUTED,
         area.width.saturating_sub(2),
     );
@@ -376,12 +279,7 @@ pub(super) fn draw(
         .border_style(Style::default().fg(DIM))
         .style(Style::default().bg(PANEL));
     if let Some(index) = selected {
-        block = block.title_bottom(assessment_line(
-            insight(history, index),
-            low_cache,
-            live,
-            area.width.saturating_sub(2),
-        ));
+        block = block.title_bottom(size_summary(history, index, area.width.saturating_sub(2)));
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -469,11 +367,7 @@ pub(super) fn draw(
     }
     let mut details = Line::from(Span::styled(
         compact_comparison(&entry.usage, previous),
-        Style::default().fg(if live && material_jump(&entry.usage, previous) {
-            YELLOW
-        } else {
-            MUTED
-        }),
+        Style::default().fg(MUTED),
     ));
     if !cache_in_header {
         append_detail(
@@ -508,25 +402,28 @@ pub(super) fn draw(
     // Use every remaining column for history; new requests enter on the right.
     // The axis is ordinal (one bar/request), with timestamps anchored to bars.
     let plot = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 3);
-    let visible = (index + 1).min(usize::from(plot.width));
+    let zoom = zoom.max(1).min(plot.width);
+    let visible = (index + 1).min(usize::from(plot.width / zoom));
     let start = index + 1 - visible;
-    let first_x = plot.right() - visible as u16;
+    let first_x = plot.right() - visible as u16 * zoom;
     for (offset, old) in history.entries.iter().skip(start).take(visible).enumerate() {
-        let i = start + offset;
-        draw_bar(
-            frame,
-            Rect::new(first_x + offset as u16, plot.y, 1, plot.height),
-            &old.usage,
-            if is_live(old, sample, now) {
-                CYAN
-            } else {
-                BLUE
-            },
-            material_jump(
+        for column in 0..zoom {
+            draw_bar(
+                frame,
+                Rect::new(
+                    first_x + offset as u16 * zoom + column,
+                    plot.y,
+                    1,
+                    plot.height,
+                ),
                 &old.usage,
-                i.checked_sub(1).and_then(|n| history.entries.get(n)),
-            ),
-        );
+                if is_live(old, sample, now) {
+                    CYAN
+                } else {
+                    BLUE
+                },
+            );
+        }
     }
 
     let axis_y = plot.bottom();
@@ -540,9 +437,9 @@ pub(super) fn draw(
             Paragraph::new(clock_stamp(entry.last_seen)).style(Style::default().fg(color)),
             Rect::new(last_label_x, axis_y, 8, 1),
         );
-        let step = visible.div_ceil(4).max(12);
+        let step = visible.div_ceil(4).max(12_u16.div_ceil(zoom) as usize);
         for offset in (0..visible).step_by(step) {
-            let x = first_x + offset as u16;
+            let x = first_x + offset as u16 * zoom;
             if x + 9 > last_label_x {
                 break;
             }
@@ -660,23 +557,23 @@ mod tests {
         );
     }
     #[test]
-    fn operator_insights_need_evidence_and_keep_model_boundaries() {
+    fn recent_sizes_keep_model_boundaries_and_ignore_future_requests() {
         let mut history = History::default();
-        for (i, prompt) in [20000, 21000, 20500, 20055].into_iter().enumerate() {
+        for (i, prompt) in [20000, 21000, 20500, 20055, 40000].into_iter().enumerate() {
             history.observe(&[usage(&i.to_string(), prompt)]);
         }
-        assert!(insight(&history, 3).title.starts_with("TYPICAL INPUT"));
-        history.observe(&[usage("jump", 40000)]);
-        assert!(insight(&history, 4).title.starts_with("PROMPT JUMP"));
-        assert_eq!(insight(&history, 4).tone, Tone::Yellow);
+        let summary = size_summary(&history, 3, 100).to_string();
+        assert!(summary.contains("RECENT 4"));
+        assert!(summary.contains("MEDIAN 20,277.5 tokens"));
+        assert!(summary.contains("RANGE 20,000–21,000"));
+        assert!(!summary.contains("40,000"));
         let mut other = usage("other", 100000);
         other.model = "different".into();
         history.observe(&[other]);
-        assert_eq!(insight(&history, 5).title, "BASELINE SAMPLING");
-        assert!(!material_jump(
-            &usage("small", 1000),
-            Some(&history.entries[0])
-        ));
+        assert_eq!(
+            size_summary(&history, 5, 100).to_string(),
+            " RECENT 1 · MEDIAN 100,000 tokens · RANGE 100,000–100,000 "
+        );
     }
 
     #[test]
@@ -688,7 +585,7 @@ mod tests {
         history.observe(&[unknown, cached]);
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(90, 8)).unwrap();
         terminal
-            .draw(|frame| draw(frame, frame.area(), &history, &Sample::default(), 0))
+            .draw(|frame| draw(frame, frame.area(), &history, &Sample::default(), 0, 1))
             .unwrap();
         let buffer = terminal.backend().buffer();
         // Two equal prompts must have identical geometry even if one reports
@@ -715,7 +612,7 @@ mod tests {
             let mut terminal =
                 Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
             terminal
-                .draw(|f| draw(f, f.area(), &history, &Sample::default(), 0))
+                .draw(|f| draw(f, f.area(), &history, &Sample::default(), 0, 1))
                 .unwrap();
             let buffer = terminal.backend().buffer();
             let visible_bars = (1..width - 1)
@@ -738,7 +635,7 @@ mod tests {
                 assert!(text.contains(label), "missing {label} at {width}x{height}");
             }
             terminal
-                .draw(|f| draw(f, f.area(), &history, &Sample::default(), usize::MAX))
+                .draw(|f| draw(f, f.area(), &history, &Sample::default(), usize::MAX, 1))
                 .unwrap();
             let text: String = terminal
                 .backend()
@@ -763,7 +660,7 @@ mod tests {
         ]);
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 8)).unwrap();
         terminal
-            .draw(|f| draw(f, f.area(), &history, &Sample::default(), 0))
+            .draw(|f| draw(f, f.area(), &history, &Sample::default(), 0, 1))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(78, 3)].symbol(), "↑");
@@ -771,8 +668,8 @@ mod tests {
         assert_eq!(buffer[(76, 5)].symbol(), "·");
         let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
         assert!(text.contains("100,000 tokens"));
-        assert!(text.contains("HISTORY · ! PROMPT JUMP"));
-        assert!(text.contains("Inspect context/tool results."));
+        assert!(text.contains("MEDIAN 12,000 tokens"));
+        assert!(!text.contains('!'));
     }
 
     #[test]
@@ -781,7 +678,7 @@ mod tests {
         request.cached = Some(TREND_CEILING * 3 / 4);
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(1, 3)).unwrap();
         terminal
-            .draw(|f| draw_bar(f, f.area(), &request, BLUE, false))
+            .draw(|f| draw_bar(f, f.area(), &request, BLUE))
             .unwrap();
         let buffer = terminal.backend().buffer();
         assert_eq!(buffer[(0, 0)].fg, GREEN);
@@ -802,7 +699,7 @@ mod tests {
     }
 
     #[test]
-    fn colored_chart_and_operator_insights_render_together() {
+    fn prompt_sizes_and_cache_render_without_growth_warnings() {
         let now = SystemTime::now();
         let mut history = History::default();
         for (i, prompt) in [10000, 12000, 20000, 21000].into_iter().enumerate() {
@@ -822,10 +719,10 @@ mod tests {
         let backend = ratatui::backend::TestBackend::new(180, 7);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| draw(frame, frame.area(), &history, &sample, 0))
+            .draw(|frame| draw(frame, frame.area(), &history, &sample, 0, 1))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        for color in [BLUE, CYAN, YELLOW, GREEN] {
+        for color in [BLUE, CYAN, GREEN] {
             assert!(
                 buffer.content.iter().any(|cell| cell.fg == color),
                 "missing semantic color {color:?}"
@@ -835,12 +732,43 @@ mod tests {
         for label in [
             "LIVE",
             "OBSERVED",
-            "PROMPT JUMP",
+            "40,000 tokens",
             "CACHE 90%",
-            "Recent median",
-            "Inspect context/tool results.",
+            "4,000 uncached",
+            "MEDIAN 20,000 tokens",
+            "RANGE 10,000–40,000",
         ] {
-            assert!(text.contains(label), "missing operator insight: {label}");
+            assert!(text.contains(label), "missing prompt measurement: {label}");
+        }
+        assert!(!text.contains('!'));
+        assert!(!text.contains("PROMPT JUMP"));
+        assert!(!buffer.content.iter().any(|cell| cell.fg == YELLOW));
+    }
+
+    #[test]
+    fn zoom_changes_history_range_without_changing_selected_prompt_size() {
+        let mut history = History::default();
+        for index in 0..120 {
+            let mut request = usage(&index.to_string(), 12_000 + index * 128);
+            request.observed_at =
+                Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + index));
+            history.observe(&[request]);
+        }
+        for (zoom, first) in [(1, 42), (4, 101)] {
+            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 8)).unwrap();
+            terminal
+                .draw(|frame| draw(frame, frame.area(), &history, &Sample::default(), 0, zoom))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("27,232 tokens"));
+            assert!(text.contains(&clock_stamp(history.entries[first].last_seen)));
+            assert_eq!(terminal.backend().buffer()[(78, 6)].symbol(), "▲");
         }
     }
 }
