@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 1.2.0 — 2026-09-30
+
+- Release the Linux multi-GPU dashboard, interactive chart controls, exact
+  prompt-size readings and critical memory/paging alerts described below as
+  stable. There are no functional changes from 1.2.0-rc.2.
+
+## 1.2.0-rc.2 — 2026-09-30
+
+- Advance the release candidate version and rebuild the distribution. There are
+  no functional changes from the locally built 1.2.0-rc.1 candidate.
+
+## 1.2.0-rc.1 — 2026-09-29
+
 - Clarify that prompt load shows each request's exact input-token count,
   including cached tokens, and document the selected request's freshness.
 - Select Overview charts with Tab, arrows or the mouse; zoom each history
@@ -14,7 +27,6 @@
 - Sound the terminal bell for critical memory pressure as well as severe paging,
   once per episode. Acknowledgment persists through unavailable samples.
 - Report Linux temperatures without inferring throttling from a fixed threshold.
-
 - On Linux, collect every NVIDIA GPU, with UUID-based identity, per-card utilization,
   VRAM and temperature. Keep unavailable readings distinct from zero.
 - Add a responsive GPU device panel to Overview; use `[` / `]` to select

@@ -12,6 +12,7 @@ mkdir -p "$2"
 output="$(cd -- "$2" && pwd -P)"
 version="$("$payload/mlxtop" --version)"
 version="${version#mlxtop }"
+tested_macos="$(sw_vers -productVersion)"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[1-9][0-9]*)?$ ]] || {
     printf 'Unsupported version: %s (expected X.Y.Z or X.Y.Z-rc.N).\n' "$version" >&2
     exit 1
@@ -74,7 +75,7 @@ Documentation and licenses go in /usr/local/share/mlxtop/$version.
 If your terminal cannot find mlxtop, run /usr/local/bin/mlxtop directly.
 You can eject this disk image after installation.
 
-Requires Apple Silicon and macOS 11 or later. Tested on macOS 26.5.1.
+Requires Apple Silicon and macOS 11 or later. Tested on macOS $tested_macos.
 The package is unsigned and not Apple notarized.
 
 Project and installation help: https://github.com/maximpri/mlxtop
