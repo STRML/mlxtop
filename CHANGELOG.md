@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.0-rc.1 — 2026-10-02
+## 2.0.0 — 2026-10-02
 
 - Expand native monitoring to eleven local LLM runtimes. Add Ollama loaded
   models, resident VRAM and context capacity, and LM Studio loaded instances

@@ -4,19 +4,42 @@
 
 See which models are running, how much memory they use, and how busy your
 GPUs are. Linux NVIDIA systems show each card's utilization, VRAM and temperature
-in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, vLLM or SGLang, you can
-also follow generation speed and request activity as your model responds.
+in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, vLLM or
+SGLang, you can also follow generation speed and request activity as your model
+responds.
 
 ![mlxtop Overview prioritizing memory pressure and paging, with token rates and a readable recent Journal](docs/screenshots/overview.png)
 
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
 
-The current source version is **2.0.0-rc.1**, the first candidate for the 2.0
-major release, developed on `release/2.0`.
-The stable installer follows the latest published release. Use the
-[private RC workflow](docs/USER_GUIDE.md#private-rc-testing-over-ssh) to test
-this checkout on a compatible remote host.
+**mlxtop 2.0.0** is the stable major release for Apple Silicon macOS and Linux
+(x86_64 and ARM64). [Download 2.0.0](https://github.com/maximpri/mlxtop/releases/tag/v2.0.0)
+or use the installer below.
+
+## What's new in 2.0
+
+- **Eleven runtimes:** oMLX, Ollama, LM Studio, llama.cpp, KoboldCpp, MLX-LM,
+  LocalAI, vLLM, SGLang, Jan and GPT4All. The [runtime table](#runtime-support-and-limitations)
+  distinguishes live metrics, model inventory and client-reported usage.
+- **Remote monitoring:** configured HTTP/HTTPS endpoints and bearer authentication,
+  with verified HTTPS certificates and explicit opt-in for remote credentials.
+- **Clearer charts:** synchronized rolling windows, linked time-series zoom,
+  readable queue crossings and explicit `window 34s` labels. Resident memory
+  stays cyan; pressure severity has its own label. Process-memory readings live
+  in Top and text reports.
+- **Accurate request history:** the counters-only recorder preserves native
+  output speeds, cached tokens and explicit first-token timing. Completed
+  results remain separate from live serving metrics.
+
+### Upgrading from 1.x
+
+Run the installer again and restart any open mlxtop session. Existing
+`~/.config/mlxtop/config.json`, oMLX settings and usage JSONL files remain
+compatible. The dashboard monitors one selected server per session; use
+`MLXTOP_PROVIDER` to choose it. New runtimes need their monitoring APIs enabled,
+and some require the [client usage recorder](docs/USER_GUIDE.md#client-reported-usage-file)
+for request statistics.
 
 ## Try it
 
@@ -50,7 +73,7 @@ Linux downloads are static binaries with no runtime dependencies. Then run:
 
 Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
-example `curl -fsSL … | MLXTOP_VERSION=1.1.2 sh`.
+example `curl -fsSL … | MLXTOP_VERSION=2.0.0 sh`.
 
 ## Configuration
 
@@ -168,8 +191,8 @@ Here’s the Journal during an oMLX session:
 
 ![mlxtop Journal showing timestamped model requests, queue changes, and GPU events](docs/screenshots/journal.jpg)
 
-Both screenshots show oMLX workloads. The numbers illustrate the display and
-aren’t benchmarks.
+The Overview screenshot uses an illustrative oMLX fixture; the Journal shows
+an oMLX session. These numbers illustrate the display and aren’t benchmarks.
 
 | Key | Action |
 | --- | --- |
@@ -248,7 +271,8 @@ observed request and shows its own compact size label, such as `12.0k` for
 12,000 tokens. The panel also shows the change from the previous observed
 request, freshness, and cached/uncached segments when reported. Selected prompts
 also show output counts and request-specific decode speed: `LIVE`, a completed
-request's `AVG`, or the retained `LAST` sample. Queue charts complement the system metrics; OS process-memory details live in Top. First-token latency appears only when
+request's `AVG`, or the retained `LAST` sample. Queue charts complement the system
+metrics; OS process-memory details live in Top. First-token latency appears only when
 explicitly measured client timings are supplied. See the
 [operator charts](docs/USER_GUIDE.md#operator-charts) for scales and data sources.
 Prompt counts also appear in the static report. Journal records each
