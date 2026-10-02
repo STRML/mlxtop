@@ -8,24 +8,71 @@ Detailed controls, runtime setup, and explanations of the dashboard readings.
 
 | View | Question answered | Key information |
 | --- | --- | --- |
-| Overview | Is inference healthy, and how large is each request? | Per-request prompt chart and counts, generation/prefill rate, diagnosis, cache/queue, memory, paging/compression and GPU |
-| MLX Top | Which process owns the workload? | PID, command, model, CPU, memory %, RSS, page-ins and serving state |
+| Overview | Is memory or paging limiting inference? | Memory pressure, process footprint and paging first; supporting throughput, GPU, prompt history, cache, queue and recent events |
+| MLX Top | Which process owns the workload? | PID, command, CPU, memory %, RSS, page-ins, OS state and selected runtime details |
 | Journal | What changed during this session? | Request lifecycle, provider/model changes, paging, pressure, compression, GPU, thermal and recovery events |
 
-Overview embeds the compact prompt-load panel below its operational cards. Beneath
-it, six time-series charts show generation, prefill and cache on the
-first row; GPU, memory load and paging on the second. Each series keeps its own
-unit and scale, so token rates are never visually mixed with percentages. Each
-series is rendered as a stepped trace over a fixed-width tail of the ring
-buffer: at 1×, one terminal column represents one captured sample, new samples enter
-from the right, and the oldest samples leave from the left once the viewport is
-full. The generation and prefill axes use stable scales so a new peak cannot
-move older values vertically. Rate traces use only active request telemetry,
-and cache traces use the current sample's counter delta; cumulative session
-averages are kept in the headline cards, not drawn as realtime samples.
-Missing, stale, idle, or completion-log-only rate samples remain gaps, and the
-chart title identifies the other active phase when a request is prefilling or
-decoding.
+Overview starts with a dense full-width **SYSINFO** strip. The largest history
+row shows **memory / pressure**, **process memory** and **paging**. Below it,
+**generation**, **prefill** and **GPU** share a supporting row capped at six rows;
+prefill gets 30% of its width. Select a chart and press Enter for its full view.
+System memory shows **resident** physical RAM, its byte count/total, and
+**Includes file cache**. This is occupied RAM, including reclaimable cache.
+On macOS it is total RAM minus free and speculative pages; on Linux it is
+`MemTotal - MemFree`. It is independent of **PRESSURE**, which retains OS severity.
+Its reading, trace and compact gauge use the pressure state captured with each
+sample: green for normal, yellow for watch, red for critical, muted for unknown.
+A full cache alone does not establish memory pressure. Linux derives pressure
+from unavailable memory (`MemTotal - MemAvailable`) and full PSI stalls;
+`memory_warn_load` and `memory_critical_load` configure those Linux bands.
+macOS uses native pressure rather than percentage thresholds. macOS `memory_pressure -Q` includes pageable
+application pages in its reported percentage and is not used as RAM usage.
+
+A compact row holds **prompt load**, **Cache** and **Queue**. The bottom **recent
+Journal** shows timestamped changes, newest first. At 170×42 the resource row is
+thirteen rows high and the Journal has eight event rows, with long messages
+wrapping to a second line. Press `3` for the full Journal.
+
+Prompt load stays within eight rows in Overview. Each panel keeps its place
+when requests arrive or the model becomes idle. Each chart has one border and
+independent selection, zoom and expansion controls. Hardware, RAM, CPU/RSS,
+thermal and GPU allocation live in SYSINFO alongside model and telemetry age.
+The top bar holds view navigation and sampling state; the bottom bar shows
+controls for the current view and selected chart. Detailed chart statistics
+appear in expanded views.
+
+**SWAP** is a horizontal used/total capacity bar inside paging / I/O. Its
+percentage describes occupied capacity; the separate B/s history describes
+paging traffic. A measured all-zero window says **No paging traffic** and keeps
+its zero trace without inventing a 1 B/s ceiling. Missing samples remain gaps.
+On short terminals, percentage panels show a capacity bar and
+exact reading; Enter opens the full history. If only aggregate cache reuse is
+available, Cache shows an explicitly labeled TOTAL bar and no interval trace.
+Idle models can show the latest observed prompt with its age. Selected prompt
+history identifies a different provider/model when browsing retained requests.
+
+Only percentage charts use a 0–100 axis. Numeric charts automatically fit the
+visible observations in their actual units: tok/s, tokens, bytes, bytes/s,
+requests or milliseconds. Generation and prefill have independent ranges, so
+a model running at 35 tok/s is not forced onto a 100 tok/s ceiling. Zooming the
+history recalculates these ranges. The current axis is labeled; its limits are
+display ranges, not hardware or model limits. See the
+[chart specification](CHART_SPEC.md) for the rules shared by every chart.
+
+Each time series is a stepped trace: at 1×, one column represents one captured
+sample, newest at the right. Rate traces contain only active-request
+telemetry. Server averages and retained results stay explicitly labeled
+`AVG` or `LAST`; they are never plotted as live samples. Missing, stale, idle
+and completion-log-only rate samples leave gaps. A provider/model change
+starts a new throughput history.
+An isolated observation appears as a dot. When recent samples are missing, the
+chart labels the last visible reading and its age. `window avg` summarizes the
+visible captured samples; `SERVER AVG` is the separate provider average, which may predate mlxtop.
+Cache labels interval samples independently from its cumulative `TOTAL` reuse.
+oMLX's initial prefill speed placeholder leaves a gap until a measured rate is
+available. A short prefill can finish between polls without producing a live
+rate sample; its server average remains visible. Short Queue panels show exact
+counts; Enter expands their history with a readable request scale.
 A trace keeps the severity tone recorded with its sample, so a later refresh
 cannot recolor or rewrite history. For readability, the plotted position uses
 a causal deadband derived from the chart's drawable row resolution: movement of
@@ -37,7 +84,7 @@ visual cue:
 visible labels use meaningful states such as `normal`,
 `watch`, `critical`, `loaded` and `saturated` rather than asking users to
 interpret color names. On narrower terminals, the detailed cards collapse
-into an operational strip instead of truncating critical data. Journal records
+by keeping numeric readings when a secondary trace cannot fit. Journal records
 transitions rather than duplicating the live process table.
 
 ## Throughput correlation
@@ -48,16 +95,16 @@ then ranks signals observed in the same sample: paging, macOS memory pressure,
 compression churn, thermal limiting, GPU saturation, Metal memory occupancy,
 queue depth, model-memory growth and context/KV growth.
 
-The Overview and MLX Top diagnosis cards keep the strongest evidence beside
-the affected throughput, for example:
+The Journal records the strongest evidence with the affected throughput,
+for example:
 
 ```text
 GEN ↓16.7% (30.0→25.0 tok/s) · correlated: GPU 99% busy + context +11.7k → 32.2k
 ```
 
 This is correlation, not a claim that one counter proves causation. If no
-tracked system signal moved with the rate, the dashboard says so and points to
-workload or runtime scheduling as the remaining explanation. A throughput
+tracked system signal moved with the rate, the Journal finding says so and identifies workload or runtime scheduling
+as a possible explanation. Diagnostics cards have been removed. A throughput
 diagnosis is recorded once per change in the Journal, rather than once per
 refresh.
 
@@ -109,10 +156,13 @@ report retains `—` for missing fields. RSS, GPU load and model memory are neve
 substituted for allocator readings. mlxtop reads existing provider interfaces
 and operating-system metrics; it does not patch or restart serving runtimes.
 
-On macOS, the throughput card also shows **PROCESS <PID> · footprint**, followed
-by **peak · growth · OS**. These values come directly from `proc_pid_rusage` for
-the detected LLM process with the largest RSS. They describe that one process,
-not the sum of all model servers; the PID identifies the scope.
+On macOS, **process memory** puts the current OS footprint above its trace,
+with **OS · PID**, labeled byte ticks and a fitted range. Its footer shows
+lifetime **peak** and adds signed **growth** when it fits; expand the panel for
+all details. These values come
+directly from `proc_pid_rusage` for the detected LLM process with the largest
+RSS. They describe that one process, not the sum of all model servers; the PID
+identifies the scope.
 
 - **Footprint** is the current OS-accounted physical footprint.
 - **Peak** is the OS-reported lifetime maximum footprint, including activity
@@ -135,7 +185,7 @@ DEVICES** panel lists every detected NVIDIA card with its driver index, name,
 utilization, VRAM used/total and temperature. Wide terminals add a VRAM bar
 and a textual load state. Use `[` / `]` to select a card; when the list is
 taller than the panel, the selected card scrolls into view and the footer
-shows the visible range. At 80×24, status, throughput, diagnosis, GPU readings
+shows the visible range. At 80×24, status, throughput, prompt sizes, GPU readings
 and prompt history remain visible; historical charts return with more space.
 
 Cards are tracked by UUID, following [NVIDIA's guidance on stable device
@@ -147,10 +197,10 @@ unavailable while the other per-card readings remain visible. A failed poll
 retains known device names but clears their counters until a successful poll.
 Unsupported counters appear as `—`; idle utilization is a measured `0%`.
 
-The example below uses simulated readings for four NVIDIA cards. It shows the
-per-card comparison, prompt sizes and chart controls in a wide terminal.
+The v1.2 example below uses simulated readings for four NVIDIA cards. It shows
+the per-card fields; the current Overview layout is described above.
 
-![Overview with four simulated NVIDIA cards, per-card utilization and VRAM, and prompt-size history](screenshots/nvidia-multi-gpu.png)
+![v1.2 Overview example with four simulated NVIDIA cards and per-card utilization and VRAM](screenshots/nvidia-multi-gpu.png)
 
 VRAM is shown separately for each card; any **VRAM sum** in the summary is an
 inventory total, not a shared allocation pool. `--once` lists all cards and
@@ -168,7 +218,7 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 | `1` / `o` | Overview |
 | `2` / `t` | MLX Top |
 | `3` / `j` | Journal |
-| `Ctrl-Tab` | Switch views (Tab and arrows also switch views outside Overview) |
+| `Tab` / `Shift-Tab` | Next / previous view, including while filtering processes |
 | `p` / `Space` | Pause or resume sampling |
 | `r` | Reset rates, charts and journal |
 | `{` / `}` | Change refresh interval (1–60 seconds) |
@@ -180,7 +230,6 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 
 | Control | Action |
 | --- | --- |
-| `Tab` / `Shift-Tab` | Select next / previous chart |
 | Arrow keys | Select a neighboring chart |
 | Mouse click | Select the chart under the pointer |
 | `+` / `-` or mouse wheel | Zoom history in / out on that chart, from 1× to 8× |
@@ -212,6 +261,13 @@ change, an associated signal with confidence, and a short suggested check.
 Linux temperature readings are shown as measurements, not inferred throttling.
 
 ### MLX Top
+
+The process table fills the view, with aggregate CPU/RSS for the current filter.
+Select a row to see its full command, OS state, CPU, RAM share, RSS and page-ins
+per second. OS footprint/peak/growth appear only for their measured PID.
+Provider-wide model/state telemetry is labeled **RUNTIME** in the details;
+it is never assigned to every process row. Remote telemetry does not imply
+that a corresponding process exists on the machine running mlxtop.
 
 | Key | Action |
 | --- | --- |
@@ -277,10 +333,15 @@ observed request, and selecting an older request updates the headline to that
 request's size.
 
 The summary also shows the change from the previous observed request and the
-observation's freshness. At 160 columns and sufficient height, prompt load
-occupies half of the first chart row beside generation and prefill, instead of a separate
-full-width strip. It uses eight rows. Smaller terminals keep the stacked layout.
-The chart fills the panel width with one column per request at 1×. Exact selected
+observation's freshness. Prompt load uses half the width of a compact row,
+beside Cache and Queue. It is eight rows high, or seven on short macOS terminals
+and six with a compact NVIDIA device table. Enter expands it for a larger view.
+Newest requests stay at the right with fixed spacing, including a single bar.
+Every visible bar has a size label beneath it,
+such as `12.0k` for 12,000 tokens (`k` means thousands, `M` means millions;
+these are token counts, not kilobytes). Each request gets enough horizontal
+space to keep its label readable, including at 1×. Older requests remain
+available with Shift+↑↓ and Home/End. Exact selected
 tokens, observation time in UTC, age, cache reuse and the previous-request
 comparison stay above the chart; recent prompt-size statistics sit in the
 bottom border.
@@ -289,9 +350,32 @@ an incomplete request reads `LAST SEEN`; completed request counts read `REPORTED
 Age comes from the request observation or the client timestamp, not the most
 recent redraw. The last sampled output is not assumed to be a final total.
 
+Each selected prompt also shows its output count and output speed, for example
+**OUT 346 · LAST 40.0 tok/s**. `LIVE` is the active request's reported decode
+speed; `AVG` is a completed request's reported average; `LAST` is its last
+measured rate when no final timing is available. Use Shift+↑↓ to compare speeds
+for earlier prompts. Missing request timing shows `SPEED —`; the server average,
+prefill rate and other concurrent requests are never used as substitutes.
+A later observation without timing retains the previous speed and its original
+age, labeled `LAST`. Request speed uses the existing prompt metadata rows;
+small panels prioritize it over the UTC clock and optional comparison details.
+
+Prompt counts, output-speed observations, chart samples and Journal events are
+kept in memory for this mlxtop session. After a restart, the prompt panel waits
+for new requests; the server's aggregate averages may still be available.
+
+For oMLX this is each generating row's `tokens_per_second`, or distributed
+per-request `decode_tps`. These rates cover output generation. Once an oMLX
+request disappears between polls, the retained sample is not a final average.
+KoboldCpp supplies `last_eval_speed`. A completed Ollama usage record can supply
+`eval_count` and `eval_duration` (nanoseconds); their ratio yields output tok/s.
+Total request duration and prompt-evaluation duration are not decode timing.
+
+
 The colored bar chart reads older to newer, with the selected request marked
-`▲` below the rightmost bar. Sparse UTC timestamps sit below their corresponding
-bars. Spacing represents request order, not elapsed time; the selected marker
+`▲` beside the size label below the rightmost bar. A single request starts at
+the right edge; fixed spacing keeps it there as more requests arrive. Its UTC timestamp stays in
+the headline. Spacing represents request order, not elapsed time; the selected marker
 remains visible during jumps and overflow. When request-specific cache counts are reported, bars stack
 green cached tokens below uncached tokens (cyan for live requests, blue for
 history). Without a cache count, a solid bar represents the whole prompt and
@@ -312,9 +396,11 @@ Request cache reuse is green at 80% or more, yellow below 20% for prompts of at
 least 4,096 tokens, and cyan otherwise. Low reuse on a cold request is expected;
 a low percentage by itself does not establish a cache problem.
 
-The chart uses a **fixed 0–65,536-token display scale**, independent of the visible
-maximum. `↑` marks a request above that scale; the headline always gives its
-exact size. This is a display scale, not a context limit or pressure threshold.
+The chart uses an **automatic zero-based token scale** derived from the visible
+requests. A history of roughly 800-token prompts therefore fills a useful
+range near 1,000 tokens. Larger prompts and history zoom update that range;
+the headline always gives the selected request's exact count. This is a display
+range, not a context limit or pressure threshold.
 Cache counts appear only when reported for the selected request. Aggregate cache
 statistics and prefill rates are never substituted for request-specific data.
 
@@ -329,44 +415,61 @@ observation, and past requests stay available. Use **Shift-↑ / Shift-↓** or
 
 ## Operator charts
 
-On wide terminals, the second chart row contains **process memory**, **queue**,
-**GPU** and **system memory**. Paging and aggregate cache remain below. This
-keeps process footprint separate from overall system load and retains the
-existing throughput and hardware charts.
+**Memory** shows system memory percentage. **Process memory** has its own byte
+scale when space permits; compact layouts keep the process footprint as a
+reading. **GPU** shows utilization history, with hardware and allocation
+details in SYSINFO. **Paging / I/O** shows actual byte rates with a matching
+automatic axis, separate input/output rates, and a SWAP used/total capacity
+bar. **Cache** and **Queue** are separate charts with independent selection and
+zoom. Smaller panels keep exact readings when there is insufficient room for
+history.
+
+GPU and paging traces retain green/yellow/red value bands. System-memory
+traces retain the pressure color captured with each sample.
+GPU defaults are green below 75%, yellow from 75% and red from 90%; these are
+load bands, not proof of a bottleneck. Configured thresholds apply consistently
+to numeric readings, traces and device meters. Percentage axes stay at 0–100;
+all other axes use the real measured unit and fit the visible data.
 
 **Queue** plots active requests in cyan and waiting requests in yellow on one
 shared, labeled zero baseline. A white `═` marks overlapping trace cells,
 including equal values and values that coincide at terminal resolution. Exact
-counts remain in the header. Both series use a fixed scale of 0–16 requests,
-with `↑` for overflow. Idle zeros are valid; stale, missing and client-reported values
+counts remain visible in the panel. Both series share an automatic request-count scale based on their visible
+maximum. Idle zeros are valid; stale, missing and client-reported values
 produce gaps. Queue length is a demand signal, not a latency measurement.
 
-**Process memory** plots the OS physical footprint against a fixed display
-scale of total system RAM. The header identifies the current PID. This RAM
-reference is not the process's configured memory limit. Missing samples and
-process-instance changes break the trace. Both new time-series charts retain
-one captured sample per column at 1×, newest at the right; resetting history clears
-them. The process card still shows lifetime peak and signed growth.
+**Process memory** plots the OS physical footprint against an automatic
+byte scale based on visible samples. The current byte reading and PID appear
+above the plot, with labeled upper, middle and lower ticks. The axis can start
+above zero to show changes clearly; its range is not the process's configured
+memory limit. Missing samples and
+process-instance changes break the trace. Both time-series charts retain one
+captured sample per column at 1×, newest at the right; resetting history clears
+them. The process-memory footer shows lifetime peak and signed growth.
 
 **First token** appears only after an explicit client timing is supplied in the
 existing usage JSONL envelope:
 
 ```json
-"timings": {"time_to_first_token_ms": 1250}
+"timings": {"time_to_first_token_ms": 1250, "output_tokens_per_second": 40.0}
 ```
+
+`output_tokens_per_second` is an optional finite, nonnegative completed-request
+output average. It does not change the live generation chart.
 
 Use a nonnegative integer measured from request dispatch to the first generated
 token. Add this field alongside `provider`, `request_id`, `observed_at` and
 `usage` in a complete record. The chart uses one column per observed request at 1×,
-shows missing timings as gaps, and has a fixed 0–30-second scale with overflow
-markers. Its latest measured value is labeled REPORTED with observation age.
+shows missing timings as gaps, and automatically scales its millisecond axis
+to the visible requests. Its latest measured value is labeled REPORTED with observation age.
 Repeated polls update the same request rather than adding duplicate bars.
 Prompt-evaluation duration, generation speed and polling intervals are never
 used to estimate first-token latency. No provider changes are required.
 
-When first-token data is available, that chart occupies the wide grid's recent
-Journal preview space; the full Journal remains accessible in its tab. Without
-timing data the preview remains, so no empty latency panel consumes space.
+When first-token data is available and the terminal is at least 120 columns
+wide, its chart sits beside the recent Journal. The Journal keeps 70% of that
+row, and remains available in full through its tab. Without measured timing,
+the preview uses the full row and no empty latency panel consumes space.
 
 
 Overview shows `PROMPT` for the selected request, alongside the provider and
@@ -547,8 +650,14 @@ Run the same checks used by CI:
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
+python3 -m unittest discover -s scripts -p 'test_*.py'
 cargo build --release --locked
 ```
+
+CI also enforces at least 90% production Rust line coverage on macOS and Linux.
+Run `scripts/coverage.sh` after installing cargo-llvm-cov and the matching LLVM
+tools. The [coverage instructions](../CONTRIBUTING.md#coverage-gate) explain
+setup, the test-file exclusion, reports and the HTML view.
 
 For UI changes, test both the interactive dashboard and `mlxtop --once` and
 include a terminal screenshot with the pull request. See
@@ -557,6 +666,59 @@ licensing. The longer-term provider and architecture plan is documented in
 [OPEN_SOURCE_ROADMAP.md](https://github.com/maximpri/mlxtop/blob/main/OPEN_SOURCE_ROADMAP.md).
 
 ## Deployment helper
+
+### Private RC testing over SSH
+
+Use Python 3.8+ and an SSH alias or `user@host`. To build on the oMLX server
+and download the result to this Mac, run this in the server's RC checkout:
+
+```sh
+python3 scripts/rc.py build --stage-for-fetch
+```
+
+Then on this Mac:
+
+```sh
+python3 scripts/rc.py fetch omlx-server
+python3 scripts/rc.py run
+```
+
+You can also build this Mac's working tree and test it on the server:
+
+```sh
+# Build the current working tree and stage it separately on the oMLX server.
+python3 scripts/rc.py push omlx-server
+
+# Test the server's staged RC in an SSH terminal (q exits).
+python3 scripts/rc.py run omlx-server
+python3 scripts/rc.py run omlx-server --once
+
+# Download a staged server RC to this Mac and test it locally.
+python3 scripts/rc.py fetch omlx-server
+python3 scripts/rc.py run
+```
+
+Replace `omlx-server` with your SSH host alias. `push`, `fetch` and remote `run`
+accept `--port`, `--identity` and `--dry-run`. To test only on this Mac, run
+`python3 scripts/rc.py build` followed by `python3 scripts/rc.py run`.
+
+The build includes uncommitted changes and requires Rust plus the native build
+tools. On macOS it selects the SDK belonging to the active Xcode toolchain.
+The other host only needs Python 3 and a compatible OS/CPU architecture. A
+Mac binary cannot run on Linux; build on a matching host before transferring.
+Running locally measures this Mac; remote `run` measures the oMLX server.
+
+Each artifact records the RC version, revision, dirty state, platform and a
+unique build ID. Transfers verify SHA-256, reject incompatible platforms, and
+check the executable's version before switching the separate RC symlink.
+Local artifacts live in `target/private-rc/releases`; the local test command
+uses `target/private-rc/current/mlxtop`. Remote RCs live in
+`~/.local/share/mlxtop/rc/releases`, with `current/mlxtop` pointing to the tested
+candidate. Failed verification leaves the previous RC active. Earlier builds
+are retained. Neither stable `mlxtop` installations nor oMLX services are changed.
+This workflow creates no Git tag, push, GitHub release or public download.
+
+### Versioned deployment
 
 The optional deployment script creates versioned remote releases and
 updates a `current` symlink. A binary-only deployment sends only the locally

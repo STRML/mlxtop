@@ -9,4 +9,5 @@ substantial UI changes, with private workload data removed.
 
 - [ ] Formatting, Clippy, tests, and release build pass (see CONTRIBUTING.md).
 - [ ] Documentation reflects any changed behavior.
+- [ ] Chart changes follow docs/CHART_SPEC.md (units, auto ranges, colors, consolidation).
 - [ ] I have the right to contribute this work under the MIT License.

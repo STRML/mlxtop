@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: MIT
+use super::*;
+
+fn live_sample() -> Sample {
+    Sample {
+        llm_provider: "oMLX".into(),
+        llm_model: "Qwen3.8-27B-oQ4e-mtp".into(),
+        llm_status: "generating".into(),
+        llm_source: TelemetrySource::Live,
+        llm_observed_at: Some(SystemTime::now()),
+        llm_prompt_tokens: Some(32_768),
+        llm_output_tokens: Some(256),
+        llm_count: 1,
+        llm_cpu: 0.8,
+        llm_rss: 16 * 1024_u64.pow(3),
+        total_memory: 32 * 1024_u64.pow(3),
+        gpu_in_use: Some(8 * 1024_u64.pow(3)),
+        gpu_alloc: Some(16 * 1024_u64.pow(3)),
+        thermal: "no warning".into(),
+        metal: MetalTelemetry {
+            device_name: Some("Apple M4 Max".into()),
+            gpu_cores: Some(32),
+            ..MetalTelemetry::default()
+        },
+        ..Sample::default()
+    }
+}
+
+fn render(
+    sample: &Sample,
+    history: &request_dashboard::History,
+    width: u16,
+    height: u16,
+) -> String {
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| draw(frame, frame.area(), sample, history))
+        .unwrap();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+                + "\n"
+        })
+        .collect()
+}
+
+#[test]
+fn dense_sysinfo_preserves_state_work_and_hardware_at_supported_sizes() {
+    let sample = live_sample();
+    let history = request_dashboard::History::default();
+    for (width, height) in [(80, 3), (80, 5), (100, 5), (180, 5)] {
+        let screen = render(&sample, &history, width, height);
+        for label in [
+            "SYSINFO",
+            "Qwen3.8-27B-oQ4e-mtp",
+            "GENERATING",
+            "LIVE",
+            "0s old",
+            "PROMPT 32.8k",
+            "OUT 256",
+            "Apple M4 Max",
+            "RAM 32.0 GiB",
+            "THERMAL no warning",
+        ] {
+            assert!(
+                screen.contains(label),
+                "missing {label} at {width}x{height}\n{screen}"
+            );
+        }
+        if height >= 5 {
+            for label in [
+                "32 GPU cores",
+                "CPU 0.8%",
+                "LLM RSS 16.0 GiB",
+                "GPU mem 8.0 GiB / 16.0 GiB",
+            ] {
+                assert!(
+                    screen.contains(label),
+                    "missing {label} at {width}x{height}\n{screen}"
+                );
+            }
+        }
+        assert_eq!(
+            screen.matches('┌').count(),
+            1,
+            "SYSINFO should use one border\n{screen}"
+        );
+    }
+}
+
+#[test]
+fn long_model_never_hides_stale_state_or_source_age() {
+    let mut sample = live_sample();
+    sample.llm_model = "a-very-long-model-name-".repeat(8);
+    sample.llm_status = "stale".into();
+    sample.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(3_600));
+    for height in [3, 5] {
+        let screen = render(&sample, &request_dashboard::History::default(), 80, height);
+        for label in ["STALE", "LIVE", "1h old", "PROMPT 32.8k"] {
+            assert!(screen.contains(label), "missing {label}\n{screen}");
+        }
+        assert!(screen.contains('…'));
+    }
+}
+
+#[test]
+fn last_prompt_stays_scoped_to_runtime_and_unknown_os_values_stay_unknown() {
+    let mut sample = live_sample();
+    sample.llm_prompt_tokens = None;
+    sample.llm_output_tokens = None;
+    sample.llm_active_requests = Some(0);
+    sample.llm_status = "idle".into();
+    let mut history = request_dashboard::History::default();
+    let mut request = providers::RequestUsage {
+        provider: "oMLX".into(),
+        model: "previous-model".into(),
+        id: "request-1".into(),
+        prompt: 12_000,
+        cached: None,
+        output: Some(80),
+        completed: true,
+        ttft_ms: None,
+        output_tps: None,
+        observed_at: Some(SystemTime::now() - Duration::from_secs(120)),
+    };
+    history.observe(&[request.clone()]);
+    assert!(!render(&sample, &history, 180, 5).contains("LAST PROMPT"));
+    request.model = sample.llm_model.clone();
+    history.observe(&[request]);
+    for height in [3, 5] {
+        let screen = render(&sample, &history, 80, height);
+        assert!(screen.contains("LAST PROMPT 12.0k"), "{screen}");
+        assert!(screen.contains("2m old"), "{screen}");
+    }
+    sample.llm_provider = "Ollama".into();
+    assert!(!render(&sample, &history, 180, 5).contains("LAST PROMPT"));
+
+    let screen = render(&Sample::default(), &history, 100, 5);
+    for label in ["RAM —", "CPU —", "LLM RSS —", "SOURCE —", "age —"] {
+        assert!(screen.contains(label), "missing {label}\n{screen}");
+    }
+    assert!(!screen.contains("CPU 0.0%"));
+    assert!(!screen.contains("RAM 0 B"));
+}

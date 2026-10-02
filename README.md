@@ -7,10 +7,15 @@ GPUs are. Linux NVIDIA systems show each card's utilization, VRAM and temperatur
 in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, you can
 also follow generation speed and request activity as your model responds.
 
-![mlxtop Overview showing per-request prompt load, generation and prefill rates, process memory, queue activity, GPU use, and recent events](docs/screenshots/overview.png)
+![mlxtop Overview prioritizing memory pressure, process footprint and paging, with compact token rates and a readable recent Journal](docs/screenshots/overview.png)
 
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
+
+The current source version is **1.2.1-rc.8**, a fix candidate for the 1.2 series.
+The stable installer follows the latest published release. Use the
+[private RC workflow](docs/USER_GUIDE.md#private-rc-testing-over-ssh) to test
+this checkout on a compatible remote host.
 
 ## Try it
 
@@ -78,9 +83,9 @@ and anything you leave out keeps its built-in default.
 | `history` | integer | 300 | Chart/journal history size (20–3600) |
 | `omx.host` | string | "127.0.0.1" | oMLX server host |
 | `omx.port` | integer | 8080 | oMLX server port |
-| `memory_warn_load` | integer | 70 | Memory load (%) that turns the memory indicator yellow |
-| `memory_critical_load` | integer | 85 | Memory load (%) that turns it red |
-| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "loaded"; utilization stays neutral blue |
+| `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
+| `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
+| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "loaded" and shown in yellow |
 | `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and considered in slowdown correlation; never an alarm by itself |
 | `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
 | `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
@@ -154,7 +159,7 @@ larger model or work through a longer conversation.
 
 | View | What it shows |
 | --- | --- |
-| Overview | Model status, per-request prompt load, generation and prefill rates when available, process memory, queue activity, and GPU use |
+| Overview | Memory pressure, process footprint and paging, with model status, compact token rates, prompt history, GPU, queue activity and recent events |
 | MLX Top | Running model processes and the resources they use |
 | Journal | Request activity and changes in resource use during the session |
 
@@ -168,7 +173,8 @@ aren’t benchmarks.
 | Key | Action |
 | --- | --- |
 | `1` / `2` / `3` | Open Overview / MLX Top / Journal |
-| `Tab` / arrows / click | Select a chart in Overview |
+| `Tab` / `Shift-Tab` | Next / previous view |
+| Arrows / click | Select a chart in Overview |
 | `p` / `Space` | Pause or resume sampling |
 | `+` / `-` / mouse wheel | Zoom the selected chart’s history |
 | `Enter` / `Esc` | Enlarge / restore a chart |
@@ -220,11 +226,20 @@ build from source with `cargo install --path . --locked`.
 | KoboldCpp | Last reported input/output counts and rates through `/api/extra/perf` |
 | MLX-LM, Ollama, LM Studio, LocalAI | Process detection (including Python entrypoints, LM Studio's `llmster`, and the Bionic app); completed request counts through an optional client-written usage file |
 
-Overview integrates prompt load with generation and prefill on wide terminals.
+Overview uses flat charts with one border each. SYSINFO holds model/state and
+hardware details; generation, prefill, memory, GPU, paging, Cache and Queue
+have independent plots. SWAP usage is a horizontal capacity bar. Numeric axes
+fit visible measurements in their actual units; only percentages use 0–100.
+GPU and paging retain their captured severity colors. RAM readings and history
+use the captured OS pressure state; resident occupancy includes reclaimable
+file cache and does not establish a warning by itself.
 **Prompt load means prompt size in input tokens, including cached tokens.**
 The headline gives the selected request's exact size; each bar represents one
-observed request. The panel also shows the change from the previous observed
-request, freshness, and cached/uncached segments when reported. Queue and OS
+observed request and shows its own compact size label, such as `12.0k` for
+12,000 tokens. The panel also shows the change from the previous observed
+request, freshness, and cached/uncached segments when reported. Selected prompts
+also show output counts and request-specific decode speed: `LIVE`, a completed
+request's `AVG`, or the retained `LAST` sample. Queue and OS
 process-footprint charts complement the system metrics. First-token latency appears only when
 explicitly measured client timings are supplied. See the
 [operator charts](docs/USER_GUIDE.md#operator-charts) for scales and data sources.
@@ -235,6 +250,11 @@ See [request telemetry setup](docs/USER_GUIDE.md#request-token-telemetry) for
 provider selection, custom ports and response-only integrations. The optional
 [Python client helper](scripts/record_usage.py) extracts counters from completed
 responses and appends them to the usage file without storing response content.
+
+To test unpublished RCs between this checkout and an oMLX server, use
+`python3 scripts/rc.py push SSH_HOST`, then `python3 scripts/rc.py run SSH_HOST`.
+Use `fetch SSH_HOST` to download the staged RC back to a compatible Mac.
+See [private RC testing](docs/USER_GUIDE.md#private-rc-testing-over-ssh).
 
 The oMLX connection defaults to `127.0.0.1:8080` and reads settings from
 `~/.config/omlx-coding/server.env`. If you’re missing live readings, check the
@@ -247,7 +267,8 @@ is unavailable, it may use recent completion logs and show how old those reading
 are.
 
 The dashboard can help you spot a slowdown and the conditions around it, but
-it can’t prove what caused it. The Journal only covers the current session.
+it can’t prove what caused it. Charts, prompt history and the Journal cover
+the current session; restarting mlxtop begins a new history.
 
 ## Privacy and local access
 
@@ -280,6 +301,9 @@ Use [SECURITY.md](SECURITY.md) to report a vulnerability.
 Documentation fixes, bug reports, and provider adapters are welcome. If a setup
 step tripped you up, improving it is a useful place to start. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and design guidelines.
+CI enforces at least 90% production Rust line coverage on macOS and Linux.
+See the [coverage workflow](CONTRIBUTING.md#coverage-gate) to reproduce the
+reports locally.
 For larger changes, open an issue first so we can discuss the approach.
 
 ## Acknowledgments

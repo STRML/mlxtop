@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "mlxtop"
-version = "1.2.0"
+version = "1.2.1-rc.8"
 dependencies = [
  "crossterm",
  "libproc",

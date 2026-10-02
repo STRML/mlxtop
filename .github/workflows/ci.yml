@@ -30,6 +30,26 @@ jobs:
       - name: Build release
         run: cargo build --release --locked
 
+  coverage:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Production line coverage gate
+        run: scripts/coverage.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-${{ matrix.os }}
+          path: target/coverage/
+
   shell:
     runs-on: ubuntu-latest
     steps:
@@ -37,7 +57,7 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install --yes shellcheck
       - name: Check shell scripts
-        run: shellcheck scripts/cicd.sh scripts/install.sh scripts/package-dmg.sh
+        run: shellcheck scripts/cicd.sh scripts/coverage.sh scripts/install.sh scripts/package-dmg.sh
 
   licenses:
     runs-on: ubuntu-latest

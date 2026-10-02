@@ -30,6 +30,23 @@ impl From<ChartMetric> for Chart {
     }
 }
 
+impl Chart {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt load",
+            Self::Generation => "generation",
+            Self::Prefill => "prefill",
+            Self::Cache => "cache",
+            Self::Gpu => "GPU",
+            Self::Memory => "memory",
+            Self::Paging => "paging",
+            Self::Footprint => "process memory",
+            Self::Queue => "queue",
+            Self::Latency => "first token",
+        }
+    }
+}
+
 pub(super) struct Navigation {
     pub focused: Chart,
     pub expanded: bool,
@@ -56,6 +73,8 @@ impl Navigation {
                 region.1 = area;
             } else {
                 regions.push((chart, area));
+                // Keep keyboard order stable when responsive layouts move charts.
+                regions.sort_by_key(|(chart, _)| *chart as usize);
             }
         }
     }
@@ -131,10 +150,18 @@ impl Navigation {
             })
             .min_by_key(|(_, area)| {
                 let (x, y) = center(*area);
-                // Favor charts aligned with the movement axis before diagonals.
+                // Choose a directly aligned neighbor before a diagonal one.
+                // Full-width prompt history must not steal Left/Right from
+                // the adjacent generation and prefill charts above it.
                 match key {
-                    KeyCode::Left | KeyCode::Right => (y - cy).abs() * 4 + (x - cx).abs(),
-                    _ => (x - cx).abs() * 4 + (y - cy).abs(),
+                    KeyCode::Left | KeyCode::Right => (
+                        !(area.y < current.bottom() && current.y < area.bottom()),
+                        (y - cy).abs() * 4 + (x - cx).abs(),
+                    ),
+                    _ => (
+                        !(area.x < current.right() && current.x < area.right()),
+                        (x - cx).abs() * 4 + (y - cy).abs(),
+                    ),
                 }
             })
         {

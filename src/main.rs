@@ -9,15 +9,20 @@
 //! remains explicitly unavailable instead of being inferred.
 
 mod chart_navigation;
+mod chart_scale;
 mod diagnosis;
 mod gpu;
 mod gpu_dashboard;
+mod host;
+mod model_dashboard;
 mod operator_charts;
 mod process_memory;
 mod providers;
 mod request_dashboard;
+mod swap_usage;
 
 use chart_navigation::Chart;
+use host::{Host, Platform};
 use std::any::Any;
 use std::backtrace::Backtrace;
 use std::collections::VecDeque;
@@ -45,7 +50,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
-    backend::CrosstermBackend,
+    backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -67,8 +72,6 @@ const PANEL: Color = Color::Rgb(18, 24, 34);
 const PANEL_RAISED: Color = Color::Rgb(24, 32, 46);
 const EDGE: Color = Color::Rgb(54, 68, 88);
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const MIN_CHART_HEIGHT: u16 = 4;
-const CHART_GRID_ROWS: u16 = 2;
 const MIB: u64 = 1024 * 1024;
 const MEMORY_WARN_LOAD: u64 = 70;
 const MEMORY_CRITICAL_LOAD: u64 = 85;
@@ -87,14 +90,7 @@ const GPU_WARN_EXIT: u64 = 70;
 const CORRELATION_HISTORY_LIMIT: usize = 16;
 const THROUGHPUT_CHANGE_MIN_TPS: f64 = 2.0;
 const THROUGHPUT_CHANGE_RATIO: f64 = 0.10;
-const GENERATION_CHART_SCALE_MAX: u64 = 1000;
-const PREFILL_CHART_SCALE_MAX: u64 = 2000;
 const CHART_VISUAL_DEADBAND_FRACTION: f64 = 0.25;
-// Paging bursts span KiB/s to far beyond the critical rate, so the chart
-// plots them on a log curve that tops out at the critical rate; the anchor
-// keeps sub-anchor churn at zero instead of a solid bottom-row wall.
-const SWAP_CHART_SCALE: u64 = SWAP_CRITICAL_RATE;
-const SWAP_CHART_LOG_ANCHOR: u64 = 64 * 1024;
 const CONTEXT_GROWTH_TOKENS: u64 = 1024;
 const MODEL_MEMORY_GROWTH: u64 = 256 * MIB;
 const MAX_HTTP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
@@ -128,8 +124,11 @@ struct OmxConfig {
 }
 
 fn load_config() -> Config {
-    let config_path = config_path();
-    match fs::read_to_string(&config_path) {
+    load_config_from(&config_path())
+}
+
+fn load_config_from(config_path: &Path) -> Config {
+    match fs::read_to_string(config_path) {
         Ok(text) => match serde_json::from_str::<Config>(&text) {
             Ok(config) => {
                 diagnostics_log(
@@ -188,8 +187,12 @@ fn config_history(config: &Config) -> (usize, bool) {
 }
 
 fn config_path() -> PathBuf {
-    if let Some(home) = env::var_os("HOME") {
-        Path::new(&home).join(".config/mlxtop/config.json")
+    config_path_in(env::var_os("HOME").map(PathBuf::from))
+}
+
+fn config_path_in(home: Option<PathBuf>) -> PathBuf {
+    if let Some(home) = home {
+        home.join(".config/mlxtop/config.json")
     } else {
         PathBuf::from("config.json")
     }
@@ -297,15 +300,35 @@ static DIAGNOSTICS: OnceLock<Diagnostics> = OnceLock::new();
 struct Diagnostics {
     path: PathBuf,
     file: Mutex<File>,
+    max_bytes: u64,
 }
 
 impl Diagnostics {
+    fn open(path: PathBuf, max_bytes: u64) -> Option<Self> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).ok()?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok()?;
+        Some(Self {
+            path,
+            file: Mutex::new(file),
+            max_bytes,
+        })
+    }
+
     fn log(&self, level: &str, event: &str, details: &str) {
         let details = details.replace(['\r', '\n'], "\\n");
         if let Ok(mut file) = self.file.lock() {
             if file
                 .metadata()
-                .map(|metadata| metadata.len() >= DIAGNOSTICS_MAX_BYTES)
+                .map(|metadata| metadata.len() >= self.max_bytes)
                 .unwrap_or(false)
             {
                 let rotated = self.path.with_extension("log.1");
@@ -336,23 +359,14 @@ impl Diagnostics {
 }
 
 fn init_diagnostics() -> Option<&'static Diagnostics> {
+    install_diagnostics(diagnostics_path()?)
+}
+
+/// Open the process-wide log at `path` unless one is already open, then
+/// record the session start in whichever log is active.
+fn install_diagnostics(path: PathBuf) -> Option<&'static Diagnostics> {
     if DIAGNOSTICS.get().is_none() {
-        let path = diagnostics_path()?;
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent).ok()?;
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .ok()?;
-        let _ = DIAGNOSTICS.set(Diagnostics {
-            path,
-            file: Mutex::new(file),
-        });
+        let _ = DIAGNOSTICS.set(Diagnostics::open(path, DIAGNOSTICS_MAX_BYTES)?);
     }
     let diagnostics = DIAGNOSTICS.get()?;
     diagnostics.log(
@@ -369,32 +383,43 @@ fn init_diagnostics() -> Option<&'static Diagnostics> {
 }
 
 fn diagnostics_path() -> Option<PathBuf> {
-    if let Ok(path) = env::var(DIAGNOSTICS_LOG_ENV) {
+    diagnostics_path_from(
+        env::var(DIAGNOSTICS_LOG_ENV).ok(),
+        env::var("XDG_STATE_HOME").ok(),
+        env::var_os("HOME").map(PathBuf::from),
+        Platform::current(),
+    )
+}
+
+fn diagnostics_path_from(
+    log_path: Option<String>,
+    state_home: Option<String>,
+    home: Option<PathBuf>,
+    platform: Platform,
+) -> Option<PathBuf> {
+    if let Some(path) = log_path {
         let path = path.trim();
         if !path.is_empty() {
             return Some(PathBuf::from(path));
         }
     }
-    if cfg!(target_os = "linux") {
-        if let Ok(state_home) = env::var("XDG_STATE_HOME") {
+    if platform == Platform::Linux {
+        if let Some(state_home) = state_home {
             let state_home = state_home.trim();
             if !state_home.is_empty() {
                 return Some(PathBuf::from(state_home).join("mlxtop/mlxtop.log"));
             }
         }
-        return env::var_os("HOME")
-            .map(PathBuf::from)
+        return home
             .map(|home| home.join(".local/state/mlxtop/mlxtop.log"))
             .or_else(|| Some(PathBuf::from("mlxtop.log")));
     }
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library/Logs/mlxtop/mlxtop.log"))
+    home.map(|home| home.join("Library/Logs/mlxtop/mlxtop.log"))
         .or_else(|| Some(PathBuf::from("mlxtop.log")))
 }
 
-fn diagnostics_default_hint() -> &'static str {
-    if cfg!(target_os = "linux") {
+fn diagnostics_default_hint(platform: Platform) -> &'static str {
+    if platform == Platform::Linux {
         "~/.local/state/mlxtop/mlxtop.log"
     } else {
         "~/Library/Logs/mlxtop/mlxtop.log"
@@ -616,16 +641,6 @@ impl Tone {
             Self::Muted => MUTED,
         }
     }
-
-    fn icon(self) -> &'static str {
-        match self {
-            Self::Green => "✓",
-            Self::Yellow => "!",
-            Self::Red => "×",
-            Self::Cyan | Self::Blue => "•",
-            Self::Muted => "·",
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -651,12 +666,19 @@ impl ChartMetric {
     fn tone(self, value: u64, thresholds: Thresholds) -> Tone {
         match self {
             Self::Generation | Self::Prefill | Self::Cache => Tone::Cyan,
+            // Linux derives pressure from unavailable memory (MemAvailable),
+            // using these bands. Resident RAM history records pressure from
+            // the sample instead; occupied file cache is not a pressure signal.
             Self::Memory => load_tone(
                 value,
                 thresholds.memory_warn_load,
                 thresholds.memory_critical_load,
             ),
-            Self::Gpu => Tone::Blue,
+            Self::Gpu => load_tone(
+                value,
+                thresholds.gpu_warn_load,
+                thresholds.gpu_critical_load,
+            ),
             Self::Swap => load_tone(
                 value,
                 thresholds.swap_warn_rate,
@@ -670,13 +692,7 @@ impl ChartMetric {
 struct ChartPoint {
     value: Option<u64>,
     tone: Tone,
-}
-
-#[cfg(test)]
-impl ChartPoint {
-    fn new(value: Option<u64>, tone: Tone) -> Self {
-        Self { value, tone }
-    }
+    observed_at: SystemTime,
 }
 
 #[derive(Clone, Copy)]
@@ -960,6 +976,7 @@ struct LlmTelemetry {
 
 struct LlmTelemetryClient {
     provider_adapter: providers::Adapter,
+    home: Option<PathBuf>,
     host: String,
     port: u16,
     session_cookie: Option<String>,
@@ -978,6 +995,9 @@ struct Sample {
     pressure_meaning: String,
     pressure_tone: Tone,
     availability: Option<u8>,
+    // Physical RAM occupied, including file cache. Separate from macOS's
+    // memorystatus level, which includes pageable application memory.
+    resident_memory: Option<u64>,
     total_memory: u64,
     wired: u64,
     compressor: u64,
@@ -1055,6 +1075,7 @@ impl Default for Sample {
             pressure_meaning: "unavailable".into(),
             pressure_tone: Tone::Muted,
             availability: None,
+            resident_memory: None,
             total_memory: 0,
             wired: 0,
             compressor: 0,
@@ -1146,6 +1167,8 @@ struct CollectorView {
 
 #[derive(Default)]
 struct VmCounters {
+    free: Option<u64>,
+    speculative: Option<u64>,
     wired: u64,
     compressor: u64,
     compressed_logical: u64,
@@ -1158,13 +1181,17 @@ struct VmCounters {
     reactivations: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct CacheCounters {
+    provider: Option<String>,
     prompt_tokens: u64,
     cached_tokens: u64,
 }
 
 struct Collector {
+    host: Box<dyn Host>,
+    platform: Platform,
+    home: Option<PathBuf>,
     page_size: u64,
     total_memory: u64,
     metal: MetalTelemetry,
@@ -1210,10 +1237,16 @@ impl Sampler {
                 interval.as_secs()
             ),
         );
+        Self::start(interval, move || Collector::new(history_limit, config))
+    }
+
+    /// Run `build`'s collector on the sampling thread. The collector is built
+    /// there because its first host reads may block on slow commands.
+    fn start(interval: Duration, build: impl FnOnce() -> Collector + Send + 'static) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let (view_tx, view_rx) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let mut collector = Collector::new(history_limit, config);
+            let mut collector = build();
             let mut interval = interval;
             let mut paused = false;
             let mut next_sample = Instant::now();
@@ -1308,33 +1341,63 @@ impl Drop for Sampler {
 
 impl Collector {
     fn new(history_limit: usize, config: Config) -> Self {
-        let (total_memory, page_size, metal) = if cfg!(target_os = "macos") {
-            let total_memory = command_u64("/usr/sbin/sysctl", &["-n", "hw.memsize"]).unwrap_or(0);
-            let mut metal = parse_metal_hardware(
-                &command_text(
-                    "/usr/sbin/ioreg",
-                    &["-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"],
-                )
-                .unwrap_or_default(),
-            );
-            metal.architecture = command_text("/usr/sbin/sysctl", &["-n", "hw.machine"])
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty());
-            metal.resource_limit = command_u64("/usr/sbin/sysctl", &["-n", "iogpu.wired_limit_mb"])
-                .filter(|value| *value > 0)
-                .map(|value| value.saturating_mul(MIB));
-            let page_size =
-                command_u64("/usr/sbin/sysctl", &["-n", "hw.pagesize"]).unwrap_or(16_384);
-            (total_memory, page_size, metal)
-        } else {
+        Self::with_host(
+            history_limit,
+            config,
+            Box::new(host::System),
+            Platform::current(),
+            env::var_os("HOME").map(PathBuf::from),
+        )
+    }
+
+    fn with_host(
+        history_limit: usize,
+        config: Config,
+        host: Box<dyn Host>,
+        platform: Platform,
+        home: Option<PathBuf>,
+    ) -> Self {
+        let (total_memory, page_size, metal) = match platform {
+            Platform::MacOs => {
+                let total_memory = host
+                    .command_u64("/usr/sbin/sysctl", &["-n", "hw.memsize"])
+                    .unwrap_or(0);
+                let mut metal = parse_metal_hardware(
+                    &host
+                        .command(
+                            "/usr/sbin/ioreg",
+                            &["-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"],
+                        )
+                        .unwrap_or_default(),
+                );
+                metal.architecture = host
+                    .command("/usr/sbin/sysctl", &["-n", "hw.machine"])
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty());
+                metal.resource_limit = host
+                    .command_u64("/usr/sbin/sysctl", &["-n", "iogpu.wired_limit_mb"])
+                    .filter(|value| *value > 0)
+                    .map(|value| value.saturating_mul(MIB));
+                let page_size = host
+                    .command_u64("/usr/sbin/sysctl", &["-n", "hw.pagesize"])
+                    .unwrap_or(16_384);
+                (total_memory, page_size, metal)
+            }
             // Linux (and other non-macOS targets): read from /proc and /sys.
-            (linux_total_memory(), linux_page_size(), linux_metal_init())
+            Platform::Linux => (
+                linux_total_memory(host.as_ref()),
+                linux_page_size(host.as_ref()),
+                linux_metal_init(host.as_ref()),
+            ),
         };
         Self {
+            llm_client: LlmTelemetryClient::from_config(&config, home.clone()),
+            host,
+            platform,
+            home,
             page_size,
             total_memory,
             metal,
-            llm_client: LlmTelemetryClient::from_config(&config),
             seen_requests: VecDeque::new(),
             correlation: CorrelationEngine::default(),
             previous: None,
@@ -1363,15 +1426,20 @@ impl Collector {
             ..Sample::default()
         };
 
-        if cfg!(target_os = "macos") {
-            sample_macos_memory(&mut sample, self.page_size);
-        } else {
-            sample_linux_memory(&mut sample, self.page_size, self.total_memory);
+        let host = self.host.as_ref();
+        match self.platform {
+            Platform::MacOs => sample_macos_memory(host, &mut sample, self.page_size),
+            Platform::Linux => sample_linux_memory(
+                host,
+                &mut sample,
+                self.page_size,
+                self.total_memory,
+                self.thresholds,
+            ),
         }
-        let counters = if cfg!(target_os = "macos") {
-            macos_counters_for_rates(self.page_size)
-        } else {
-            linux_counters_for_rates()
+        let counters = match self.platform {
+            Platform::MacOs => macos_counters_for_rates(host, self.page_size),
+            Platform::Linux => linux_counters_for_rates(host),
         };
         let process_elapsed = self
             .previous
@@ -1418,30 +1486,30 @@ impl Collector {
             swap_used: sample.swap_used,
         });
 
-        if cfg!(target_os = "macos") {
-            sample_macos_gpu_thermal(&mut sample);
-        } else {
-            sample_linux_gpu_thermal(&mut sample, &self.current.gpus);
+        match self.platform {
+            Platform::MacOs => sample_macos_gpu_thermal(host, &mut sample),
+            Platform::Linux => sample_linux_gpu_thermal(host, &mut sample, &self.current.gpus),
         }
 
-        let process_snapshot = if cfg!(target_os = "macos") {
-            parse_processes(
-                &command_text(
-                    "/bin/ps",
-                    &["-axo", "pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args="],
-                )
-                .unwrap_or_default(),
-            )
-        } else {
+        let process_snapshot = match self.platform {
+            Platform::MacOs => parse_processes(
+                &host
+                    .command(
+                        "/bin/ps",
+                        &["-axo", "pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args="],
+                    )
+                    .unwrap_or_default(),
+            ),
             // Linux `ps` has no `pagein` column; `maj_flt` (major faults)
             // keeps the same positional layout for the shared parser.
-            parse_processes(
-                &command_text(
-                    "ps",
-                    &["-axo", "pid=,rss=,%cpu=,%mem=,stat=,maj_flt=,comm=,args="],
-                )
-                .unwrap_or_default(),
-            )
+            Platform::Linux => parse_processes(
+                &host
+                    .command(
+                        "ps",
+                        &["-axo", "pid=,rss=,%cpu=,%mem=,stat=,maj_flt=,comm=,args="],
+                    )
+                    .unwrap_or_default(),
+            ),
         };
         sample.llm_count = process_snapshot.llm_count;
         sample.llm_rss = process_snapshot.llm_rss;
@@ -1478,7 +1546,7 @@ impl Collector {
                 .map(|provider| provider == "oMLX")
                 .unwrap_or(true);
         let log_stats = if should_read_log {
-            read_llm_stats()
+            read_llm_stats(self.home.as_deref())
         } else {
             LlmLogStats::default()
         };
@@ -1589,7 +1657,7 @@ impl Collector {
         sample.llm_waiting_requests = llm_stats.and_then(|stats| stats.waiting_requests);
         sample.llm_model_memory = llm_stats.and_then(|stats| stats.model_memory);
         sample.llm_model_memory_max = llm_stats.and_then(|stats| stats.model_memory_max);
-        sample.updated = now_clock();
+        sample.updated = now_clock(self.host.as_ref());
         let previous = if self.current.updated == "waiting" {
             None
         } else {
@@ -1597,6 +1665,13 @@ impl Collector {
         };
         sample.correlation = self.correlation.observe(&sample, self.thresholds);
         classify(&mut sample, previous.as_ref(), self.thresholds);
+
+        if previous.as_ref().is_some_and(|old| {
+            old.llm_provider != sample.llm_provider || old.llm_model != sample.llm_model
+        }) {
+            self.generation_history.clear();
+            self.prefill_history.clear();
+        }
 
         push_history(
             &mut self.generation_history,
@@ -1631,12 +1706,11 @@ impl Collector {
                 Tone::Cyan
             };
         }
-        push_history(
+        push_history_with_tone(
             &mut self.load_history,
-            sample.availability.map(|v| 100_u8.saturating_sub(v) as u64),
-            ChartMetric::Memory,
+            resident_memory_percent(&sample),
+            sample.pressure_tone,
             self.history_limit,
-            self.thresholds,
         );
         push_history(
             &mut self.swap_history,
@@ -1659,7 +1733,7 @@ impl Collector {
             "INFO",
             "sample",
             format!(
-                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} memory_load={} free={} paging_in={} paging_out={} compress={} decompress={}",
+                "duration_ms={} status={} provider={} model={} source={} gen_live={} gen_tps={} prefill_live={} prefill_tps={} cache={} active={} waiting={} gpu={} renderer={} tiler={} ram_resident_percent={} vm_availability={} paging_in={} paging_out={} compress={} decompress={}",
                 sample_started.elapsed().as_millis(),
                 log_field(&sample.llm_status),
                 log_field(&sample.llm_provider),
@@ -1675,7 +1749,7 @@ impl Collector {
                 log_optional_u8(sample.gpu_util),
                 log_optional_u8(sample.metal.renderer_util),
                 log_optional_u8(sample.metal.tiler_util),
-                log_optional_u8(sample.availability.map(|free| 100_u8.saturating_sub(free))),
+                log_optional_u64(resident_memory_percent(&sample)),
                 log_optional_u8(sample.availability),
                 sample.swap_in,
                 sample.swap_out,
@@ -1850,48 +1924,10 @@ impl Collector {
                 );
             }
 
-            // GPU utilization is sampled every second. Logging every 75↔74%
-            // threshold crossing creates noise without explaining LLM impact.
-            // Journal only meaningful busy/critical transitions; the chart
-            // still retains the full per-sample color history.
-            let previous_gpu = previous.gpu_util.unwrap_or(0);
-            let gpu = sample.gpu_util.unwrap_or(0);
-            let previous_gpu_busy = previous_gpu >= 80;
-            let gpu_busy = gpu >= 80;
-            let previous_gpu_critical = previous_gpu >= 90;
-            let gpu_critical = gpu >= 90;
-            if previous_gpu_critical != gpu_critical {
-                add(
-                    "GPU",
-                    format!(
-                        "{} GPU load · {}% busy",
-                        if gpu_critical {
-                            "critical"
-                        } else {
-                            "critical cleared"
-                        },
-                        gpu
-                    ),
-                    if gpu_critical {
-                        Tone::Red
-                    } else {
-                        Tone::Yellow
-                    },
-                );
-            } else if previous_gpu_busy != gpu_busy {
-                add(
-                    "GPU",
-                    format!(
-                        "{} · {}% busy",
-                        if gpu_busy {
-                            "busy burst started"
-                        } else {
-                            "busy burst cleared"
-                        },
-                        gpu
-                    ),
-                    if gpu_busy { Tone::Yellow } else { Tone::Green },
-                );
+            if let Some((summary, tone)) =
+                gpu_journal_transition(previous.gpu_util, sample.gpu_util, self.thresholds)
+            {
+                add("GPU", summary, tone);
             }
 
             if previous.thermal != sample.thermal
@@ -1912,10 +1948,10 @@ impl Collector {
             add(
                 "SYSTEM",
                 format!(
-                    "journal started · {} free · pressure {}",
+                    "journal started · RAM resident {} · pressure {}",
                     sample
-                        .availability
-                        .map(|value| format!("{value}%"))
+                        .resident_memory
+                        .map(bytes)
                         .unwrap_or_else(|| "—".into()),
                     pressure_state_label(sample)
                 ),
@@ -1997,8 +2033,11 @@ fn critical_state(sample: &Sample) -> Option<&str> {
 fn critical_summary(sample: &Sample) -> String {
     if critical_state(sample) == Some("MEMORY BOTTLENECK") {
         format!(
-            "critical memory pressure · {} free",
-            percent_u8(sample.availability)
+            "critical memory pressure · RAM resident {}",
+            sample
+                .resident_memory
+                .map(bytes)
+                .unwrap_or_else(|| "—".into())
         )
     } else {
         signal_summary(sample)
@@ -2008,9 +2047,11 @@ fn critical_summary(sample: &Sample) -> String {
 /// BEL passes through the alternate screen to the terminal emulator, so the
 /// user's audible/visual bell setting decides how the alert sounds. Called
 /// between frames only: writing mid-draw could interleave with the buffer.
-#[cfg(not(test))]
 fn ring_terminal_bell() {
-    let mut out = stdout();
+    write_terminal_bell(&mut stdout());
+}
+
+fn write_terminal_bell(out: &mut impl Write) {
     let _ = out.write_all(b"\x07");
     let _ = out.flush();
 }
@@ -2035,12 +2076,19 @@ struct App {
     sampler_disconnected: bool,
     alert: Option<ActiveAlert>,
     alert_bells: usize,
+    /// Rings the terminal bell; replaced in tests so no BEL reaches stdout.
+    bell: fn(),
     critical_episode: bool,
     thresholds: Thresholds,
 }
 
 impl App {
     fn new(interval: u64, history: usize, config: Config) -> Self {
+        let sampler = Sampler::spawn(Duration::from_secs(interval), history, config.clone());
+        Self::with_sampler(interval, history, config, sampler)
+    }
+
+    fn with_sampler(interval: u64, _history: usize, config: Config, sampler: Sampler) -> Self {
         let interval = Duration::from_secs(interval);
         let thresholds = Thresholds::from_config(&config);
         Self {
@@ -2056,7 +2104,7 @@ impl App {
                 request_history: request_dashboard::History::default(),
                 operator_history: operator_charts::History::default(),
             },
-            sampler: Sampler::spawn(interval, history, config),
+            sampler,
             interval,
             paused: false,
             tab: 0,
@@ -2074,6 +2122,7 @@ impl App {
             sampler_disconnected: false,
             alert: None,
             alert_bells: 0,
+            bell: ring_terminal_bell,
             critical_episode: false,
             thresholds,
         }
@@ -2151,8 +2200,7 @@ impl App {
                 "critical_alert_raised",
                 format!("state={} summary={}", log_field(state), log_field(&summary)),
             );
-            #[cfg(not(test))]
-            ring_terminal_bell();
+            (self.bell)();
             self.alert_bells += 1;
             self.alert = Some(ActiveAlert {
                 state: state.into(),
@@ -2177,6 +2225,13 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit = true;
+            return;
+        }
+        // View navigation stays global, including while editing a process filter.
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            self.top_filtering = false;
+            self.charts.expanded = false;
+            self.handle_global_key(key);
             return;
         }
         if self.top_filtering {
@@ -2248,10 +2303,6 @@ impl App {
                         .saturating_add(1)
                         .min(self.collector.current.gpus.len().saturating_sub(1));
                 }
-                KeyCode::Tab if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.charts.cycle(false)
-                }
-                KeyCode::BackTab => self.charts.cycle(true),
                 KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
                     self.charts.focused = Chart::Prompt;
                     self.request_scroll = if key.code == KeyCode::Up {
@@ -2419,9 +2470,14 @@ impl App {
         );
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(2), Constraint::Min(5)])
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(5),
+                Constraint::Length(1),
+            ])
             .split(area);
         self.draw_header(frame, outer[0]);
+        self.draw_controls(frame, outer[2]);
         match self.tab {
             0 => self.draw_overview(frame, outer[1]),
             1 => self.draw_llm_top(frame, outer[1]),
@@ -2430,18 +2486,7 @@ impl App {
         if self.tab == 0 {
             if self.charts.expanded {
                 frame.render_widget(Clear, outer[1]);
-                let chart = Rect {
-                    height: outer[1].height.saturating_sub(1),
-                    ..outer[1]
-                };
-                self.draw_selected_chart(frame, chart);
-                frame.render_widget(
-                    Paragraph::new(
-                        " Enter/Esc restore · +/− or wheel zoom · 0 reset zoom · Tab next chart",
-                    )
-                    .style(Style::default().fg(MUTED)),
-                    Rect::new(outer[1].x, outer[1].bottom() - 1, outer[1].width, 1),
-                );
+                self.draw_selected_chart(frame, outer[1]);
             }
             self.charts.decorate(frame);
         }
@@ -2498,7 +2543,7 @@ impl App {
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let compact_tabs = area.width < 140;
+        let compact_tabs = area.width < 96;
         let tab_labels = if compact_tabs {
             vec![
                 Line::from("1 OVR"),
@@ -2507,17 +2552,17 @@ impl App {
             ]
         } else {
             vec![
-                Line::from("◉ Overview"),
-                Line::from("▥ MLX Top"),
-                Line::from("▤ Journal"),
+                Line::from("1 Overview"),
+                Line::from("2 MLX Top"),
+                Line::from("3 Journal"),
             ]
         };
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Min(if compact_tabs { 17 } else { 25 }),
-                Constraint::Length(if compact_tabs { 30 } else { 40 }),
-                Constraint::Min(if compact_tabs { 18 } else { 40 }),
+                Constraint::Length(24),
+                Constraint::Length(if compact_tabs { 30 } else { 42 }),
+                Constraint::Fill(1),
             ])
             .split(area);
         let title = Paragraph::new(Line::from(vec![
@@ -2531,12 +2576,7 @@ impl App {
                 format!("v{VERSION}"),
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ),
-        ]))
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(Style::default().fg(DIM)),
-        );
+        ]));
         frame.render_widget(title, chunks[0]);
 
         let tabs = Tabs::new(tab_labels)
@@ -2548,14 +2588,18 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )
             .style(Style::default().fg(MUTED))
-            .divider(Span::styled(" · ", Style::default().fg(DIM)))
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(DIM)),
-            );
+            .divider(Span::styled(" · ", Style::default().fg(DIM)));
         frame.render_widget(tabs, chunks[1]);
-        self.draw_controls(frame, chunks[2]);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{} · {}s ",
+                if self.paused { "PAUSED" } else { "SAMPLING" },
+                self.interval.as_secs()
+            ))
+            .alignment(Alignment::Right)
+            .style(Style::default().fg(if self.paused { YELLOW } else { MUTED })),
+            chunks[2],
+        );
     }
 
     fn draw_request_chart(&self, frame: &mut Frame, area: Rect) {
@@ -2631,694 +2675,166 @@ impl App {
     fn draw_overview(&self, frame: &mut Frame, area: Rect) {
         if self.collector.current.has_nvidia_gpus() {
             self.draw_gpu_overview(frame, area);
-            return;
-        }
-        if area.width >= 160 && area.height >= 32 {
-            let rows = Layout::vertical([Constraint::Length(12), Constraint::Min(20)]).split(area);
-            self.draw_operations_panel(frame, rows[0]);
-            self.draw_operator_grid(frame, rows[1]);
-            return;
-        }
-        let operations_height = if area.width < 120 { 10 } else { 12 };
-        let request_height = if area.width < 120 { 8 } else { 7 };
-        let chart_minimum = if area.height < 28 {
-            6
         } else {
-            MIN_CHART_HEIGHT * CHART_GRID_ROWS
-        };
-        let show_log = area.height >= operations_height + request_height + chart_minimum + 4;
-        let mut constraints = vec![
-            Constraint::Length(operations_height),
-            Constraint::Length(request_height),
-            Constraint::Min(chart_minimum),
-        ];
-        if show_log {
-            constraints.push(Constraint::Length(4));
-        }
-        let rows = Layout::vertical(constraints).split(area);
-        self.draw_operations_panel(frame, rows[0]);
-        self.draw_request_chart(frame, rows[1]);
-        self.draw_trend_strip(frame, rows[2]);
-        if show_log {
-            self.draw_signal_log(frame, rows[3]);
-        }
-        if self.collector.current.total_memory == 0 && self.collector.current.updated != "waiting" {
-            frame.render_widget(
-                Paragraph::new(" System memory counters unavailable — check platform access.")
-                    .style(Style::default().fg(YELLOW)),
-                area,
-            );
+            self.draw_overview_layout(frame, area, false);
         }
     }
 
     fn draw_gpu_overview(&self, frame: &mut Frame, area: Rect) {
-        let operations_height = if area.width < 120 { 10 } else { 12 };
-        let gpu_height = gpu_dashboard::height(
-            self.collector.current.gpus.len(),
-            area.height.saturating_sub(operations_height + 7).max(4),
-        );
+        self.draw_overview_layout(frame, area, true);
+    }
+
+    fn draw_overview_layout(&self, frame: &mut Frame, area: Rect, devices: bool) {
+        let compact = area.height < 30;
+        let info_height = 3;
+        let device_height = if devices {
+            gpu_dashboard::height(
+                self.collector.current.gpus.len(),
+                if compact { 4 } else { 6 },
+            )
+        } else {
+            0
+        };
+        // Memory pressure and paging lead the view. Give resources at least
+        // twice the rate-row height; supporting rates never exceed six rows.
+        // Request and Journal budgets stay stable across workload changes.
+        let journal_height = if compact && devices {
+            0
+        } else if compact {
+            3
+        } else {
+            (area.height / 4).clamp(7, 12)
+        };
+        let request_height = if compact {
+            if devices {
+                6
+            } else {
+                7
+            }
+        } else {
+            8
+        };
+        let remaining = area
+            .height
+            .saturating_sub(info_height + device_height + journal_height + request_height);
+        let rates_height = (remaining / 3).clamp(3, 6).min(remaining);
         let rows = Layout::vertical([
-            Constraint::Length(operations_height),
-            Constraint::Length(gpu_height),
-            Constraint::Min(7),
+            Constraint::Length(info_height),
+            Constraint::Length(device_height),
+            Constraint::Length(remaining.saturating_sub(rates_height)),
+            Constraint::Length(rates_height),
+            Constraint::Length(request_height),
+            Constraint::Length(journal_height),
         ])
         .split(area);
-        self.draw_operations_panel(frame, rows[0]);
-        gpu_dashboard::draw(
+        model_dashboard::draw(
             frame,
-            rows[1],
-            &self.collector.current.gpus,
-            self.gpu_selected,
-            self.thresholds,
+            rows[0],
+            &self.collector.current,
+            &self.collector.request_history,
         );
-        let remaining = rows[2];
-        if area.width >= 160 && remaining.height >= 20 {
-            self.draw_operator_grid(frame, remaining);
-        } else if remaining.height >= 13 {
-            let detail =
-                Layout::vertical([Constraint::Length(7), Constraint::Min(6)]).split(remaining);
-            self.draw_request_chart(frame, detail[0]);
-            self.draw_trend_strip(frame, detail[1]);
-        } else {
-            // At 80×24 keep serving status, diagnosis, GPU readings and request
-            // history readable; historical charts return when height permits.
-            self.draw_request_chart(frame, remaining);
+        if devices {
+            gpu_dashboard::draw(
+                frame,
+                rows[1],
+                &self.collector.current.gpus,
+                self.gpu_selected,
+                self.thresholds,
+            );
+        }
+        self.draw_resource_charts(frame, rows[2]);
+        self.draw_workload_charts(frame, rows[3]);
+        self.draw_supporting_charts(frame, rows[4]);
+        if rows[5].height > 0 {
+            if self.collector.operator_history.has_latency() && area.width >= 120 {
+                let columns =
+                    Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
+                        .split(rows[5]);
+                self.draw_signal_log(frame, columns[0]);
+                self.draw_operator_chart(frame, columns[1], Chart::Latency);
+            } else {
+                self.draw_signal_log(frame, rows[5]);
+            }
         }
     }
 
-    fn draw_operator_grid(&self, frame: &mut Frame, area: Rect) {
-        let rows = Layout::vertical([
-            Constraint::Length(8),
-            Constraint::Fill(1),
-            Constraint::Fill(1),
-        ])
-        .split(area);
-        let top = Layout::horizontal([
+    fn draw_resource_charts(&self, frame: &mut Frame, area: Rect) {
+        let footprint = self.show_process_footprint();
+        let widths = if footprint {
+            vec![
+                Constraint::Percentage(30),
+                Constraint::Percentage(30),
+                Constraint::Percentage(40),
+            ]
+        } else {
+            vec![Constraint::Percentage(40), Constraint::Percentage(60)]
+        };
+        let columns = Layout::horizontal(widths).split(area);
+        self.render_indicator_chart(
+            frame,
+            columns[0],
+            "memory",
+            &self.collector.load_history,
+            ChartMetric::Memory,
+        );
+        if footprint {
+            self.draw_operator_chart(frame, columns[1], Chart::Footprint);
+        }
+        self.render_indicator_chart(
+            frame,
+            columns[if footprint { 2 } else { 1 }],
+            "paging / I/O",
+            &self.collector.swap_history,
+            ChartMetric::Swap,
+        );
+    }
+
+    fn draw_supporting_charts(&self, frame: &mut Frame, area: Rect) {
+        let columns = Layout::horizontal([
             Constraint::Percentage(50),
             Constraint::Percentage(25),
             Constraint::Percentage(25),
         ])
-        .split(rows[0]);
-        self.draw_request_chart(frame, top[0]);
+        .split(area);
+        self.draw_request_chart(frame, columns[0]);
         self.render_indicator_chart(
             frame,
-            top[1],
+            columns[1],
+            "cache",
+            &self.collector.cache_history,
+            ChartMetric::Cache,
+        );
+        self.draw_operator_chart(frame, columns[2], Chart::Queue);
+    }
+
+    fn draw_workload_charts(&self, frame: &mut Frame, area: Rect) {
+        let columns = Layout::horizontal([
+            Constraint::Percentage(50),
+            Constraint::Percentage(30),
+            Constraint::Percentage(20),
+        ])
+        .split(area);
+        self.render_indicator_chart(
+            frame,
+            columns[0],
             "generation",
             &self.collector.generation_history,
             ChartMetric::Generation,
         );
         self.render_indicator_chart(
             frame,
-            top[2],
+            columns[1],
             "prefill",
             &self.collector.prefill_history,
             ChartMetric::Prefill,
         );
-        let show_footprint = self.show_process_footprint();
-        let middle = Layout::horizontal(vec![
-            Constraint::Fill(1);
-            if show_footprint { 4 } else { 3 }
-        ])
-        .split(rows[1]);
-        if show_footprint {
-            self.draw_operator_chart(frame, middle[0], Chart::Footprint);
-        }
-        let start = usize::from(show_footprint);
-        self.draw_operator_chart(frame, middle[start], Chart::Queue);
         self.render_indicator_chart(
             frame,
-            middle[start + 1],
+            columns[2],
             self.gpu_chart_title(),
             &self.collector.gpu_history,
             ChartMetric::Gpu,
         );
-        self.render_indicator_chart(
-            frame,
-            middle[start + 2],
-            "system memory",
-            &self.collector.load_history,
-            ChartMetric::Memory,
-        );
-        let bottom = Layout::horizontal([
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-            Constraint::Percentage(50),
-        ])
-        .split(rows[2]);
-        self.render_indicator_chart(
-            frame,
-            bottom[0],
-            "paging",
-            &self.collector.swap_history,
-            ChartMetric::Swap,
-        );
-        self.render_indicator_chart(
-            frame,
-            bottom[1],
-            "cache",
-            &self.collector.cache_history,
-            ChartMetric::Cache,
-        );
-        if self.collector.operator_history.has_latency() {
-            self.draw_operator_chart(frame, bottom[2], Chart::Latency);
-        } else {
-            self.draw_signal_log(frame, bottom[2]);
-        }
-    }
-
-    fn draw_operations_panel(&self, frame: &mut Frame, area: Rect) {
-        if area.width < 120 {
-            self.draw_compact_operations_panel(frame, area);
-            return;
-        }
-
-        let s = &self.collector.current;
-        let sections = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(7), Constraint::Min(5)])
-            .split(area);
-        let top = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(27),
-                Constraint::Percentage(34),
-                Constraint::Percentage(39),
-            ])
-            .split(sections[0]);
-        let metrics = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-                Constraint::Percentage(25),
-            ])
-            .split(sections[1]);
-
-        let llm_tone = llm_status_tone(&s.llm_status);
-        let process_summary = if s.llm_count > 0 {
-            format!(
-                "{} process(es) · RSS {} · CPU {:.1}%",
-                s.llm_count,
-                bytes(s.llm_rss),
-                s.llm_cpu
-            )
-        } else {
-            "provider live · process match unavailable".into()
-        };
-        let health_label = s
-            .health
-            .map(|score| format!("{} · {score}/100", s.grade))
-            .unwrap_or_else(|| s.grade.clone());
-        let compressed_memory = compressed_memory_label(s);
-        let availability = s.availability;
-        let memory_load = availability.map(|value| 100_u8.saturating_sub(value));
-        let load_tone = memory_load
-            .map(|value| ChartMetric::Memory.tone(value as u64, self.thresholds))
-            .unwrap_or(Tone::Muted);
-        let memory_tone = match s.pressure_tone {
-            Tone::Yellow | Tone::Red => s.pressure_tone,
-            _ => load_tone,
-        };
-        let paging_rates_available = s.swap_available && s.vm_available && s.rate_ready;
-        let paging_rate = if paging_rates_available {
-            s.swap_in.saturating_add(s.swap_out)
-        } else {
-            0
-        };
-        let paging_tone = if paging_rates_available {
-            ChartMetric::Swap.tone(paging_rate, self.thresholds)
-        } else {
-            Tone::Muted
-        };
-        let paging_percent = if s.swap_available && s.swap_total > 0 {
-            s.swap_used
-                .saturating_mul(100)
-                .checked_div(s.swap_total)
-                .unwrap_or(0)
-                .min(100) as u16
-        } else {
-            0
-        };
-        let paging_usage = if s.swap_available {
-            format!("USED {} / {}", bytes(s.swap_used), bytes(s.swap_total))
-        } else {
-            "USED —".into()
-        };
-        let gpu_tone = s
-            .gpu_util
-            .map(|value| ChartMetric::Gpu.tone(value as u64, self.thresholds))
-            .unwrap_or(Tone::Muted);
-        let gpu_memory = match (s.gpu_in_use, s.gpu_alloc) {
-            (Some(used), Some(allocated)) => {
-                format!("{} / {}", bytes(used), bytes(allocated))
-            }
-            (Some(used), None) => format!("{} used", bytes(used)),
-            _ => "not exposed".into(),
-        };
-
-        render_card(
-            frame,
-            top[0],
-            Line::from(vec![
-                Span::styled(
-                    format!(" {} ", llm_tone.icon()),
-                    Style::default()
-                        .fg(llm_tone.color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "MODEL / STATE",
-                    Style::default()
-                        .fg(llm_tone.color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            vec![
-                Line::from(vec![
-                    tone_badge(
-                        llm_tone,
-                        &format!("{} {}", llm_tone.icon(), s.llm_status.to_ascii_uppercase()),
-                    ),
-                    Span::styled(
-                        format!("  {health_label}"),
-                        Style::default()
-                            .fg(llm_tone.color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(Span::styled(
-                    compact_label(
-                        &format!(
-                            "{} · {}",
-                            compact_label(&s.llm_provider, 10),
-                            llm_model_label(s, 38),
-                        ),
-                        top[0].width.saturating_sub(4) as usize,
-                    ),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    compact_label(&process_summary, top[0].width.saturating_sub(4) as usize),
-                    Style::default().fg(MUTED),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        "{} · {}",
-                        telemetry_source(s),
-                        telemetry_age(s.llm_observed_at)
-                    ),
-                    Style::default().fg(CYAN),
-                )),
-            ],
-            llm_tone,
-        );
-
-        render_card(
-            frame,
-            top[1],
-            Line::from(vec![
-                Span::styled(
-                    " ↯ ",
-                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "THROUGHPUT",
-                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            vec![
-                Line::from(vec![
-                    Span::styled(
-                        llm_generation_rate_label(s),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" · ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        llm_prefill_rate_label(s),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(Span::styled(
-                    format!(
-                        "PROMPT {} · OUT {} · CONTEXT {}",
-                        optional_tokens(s.llm_prompt_tokens),
-                        optional_tokens(s.llm_output_tokens),
-                        llm_context_label(s)
-                    ),
-                    Style::default().fg(MUTED),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        "CACHE {} · HIT {} · REQ {}/{}",
-                        percent(s.llm_cache_efficiency),
-                        percent(s.llm_prefix_hit_rate),
-                        count(s.llm_active_requests),
-                        count(s.llm_waiting_requests)
-                    ),
-                    Style::default().fg(CYAN),
-                )),
-                Line::from(Span::styled(
-                    process_memory::summary(s),
-                    Style::default().fg(MUTED),
-                )),
-                Line::from(Span::styled(
-                    process_memory::detail(s),
-                    Style::default().fg(MUTED),
-                )),
-            ],
-            Tone::Cyan,
-        );
-
-        diagnosis::draw(frame, top[2], s);
-
-        render_metric_card(
-            frame,
-            metrics[0],
-            Line::from(vec![
-                Span::styled(
-                    " ◉ ",
-                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "MEMORY",
-                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    memory_load
-                        .map(|value| format!("{value}% load"))
-                        .unwrap_or_else(|| "— load".into()),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    availability
-                        .map(|value| format!("  ·  {value}% free"))
-                        .unwrap_or_else(|| "  ·  — free".into()),
-                    Style::default().fg(memory_tone.color()),
-                ),
-            ]),
-            memory_load.map(|value| (value as u16, format!("{value}%"), memory_tone)),
-            vec![Line::from(Span::styled(
-                compact_label(
-                    &format!(
-                        "MODEL {} · COMP {} · PRESSURE {}",
-                        compact_model_memory(s),
-                        compressed_memory,
-                        pressure_state_label(s)
-                    ),
-                    metrics[0].width.saturating_sub(4) as usize,
-                ),
-                Style::default().fg(memory_tone.color()),
-            ))],
-            memory_tone,
-        );
-
-        let paging_label = if paging_rates_available && paging_rate > 0 {
-            "ACTIVE"
-        } else if paging_rates_available {
-            "IDLE"
-        } else if s.swap_available && s.vm_available {
-            "SAMPLING"
-        } else {
-            "UNAVAILABLE"
-        };
-        render_metric_card(
-            frame,
-            metrics[1],
-            Line::from(vec![
-                Span::styled(
-                    " ⇄ ",
-                    Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "PAGING / I/O",
-                    Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    if paging_rates_available {
-                        rate(paging_rate)
-                    } else {
-                        "—".into()
-                    },
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ·  {paging_usage} · {paging_label}"),
-                    Style::default().fg(paging_tone.color()),
-                ),
-            ]),
-            s.swap_available
-                .then_some((paging_percent, format!("{paging_percent}%"), paging_tone)),
-            vec![Line::from(Span::styled(
-                if paging_rates_available {
-                    compact_label(
-                        &format!(
-                            "IN {} · OUT {} · COMP {}",
-                            rate(s.swap_in),
-                            rate(s.swap_out),
-                            rate(s.compress.saturating_add(s.decompress))
-                        ),
-                        metrics[1].width.saturating_sub(4) as usize,
-                    )
-                } else {
-                    "rate baseline sampling".into()
-                },
-                Style::default().fg(Color::White),
-            ))],
-            Tone::Yellow,
-        );
-
-        render_metric_card(
-            frame,
-            metrics[2],
-            Line::from(vec![
-                Span::styled(
-                    " ◇ ",
-                    Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "GPU / COMPUTE",
-                    Style::default().fg(BLUE).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    s.gpu_util
-                        .map(|value| {
-                            format!(
-                                "{value}% {}",
-                                if s.has_nvidia_gpus() && s.gpus.len() > 1 {
-                                    "max"
-                                } else {
-                                    "busy"
-                                }
-                            )
-                        })
-                        .unwrap_or_else(|| "— busy".into()),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ·  {}", gpu_load_label(s.gpu_util, self.thresholds)),
-                    Style::default().fg(gpu_tone.color()),
-                ),
-            ]),
-            s.gpu_util
-                .map(|value| (value as u16, format!("{value}%"), gpu_tone)),
-            vec![Line::from(Span::styled(
-                compact_label(
-                    &metal_signal_line(s, &gpu_memory),
-                    metrics[2].width.saturating_sub(4) as usize,
-                ),
-                Style::default().fg(MUTED),
-            ))],
-            Tone::Blue,
-        );
-
-        let cache_tone = if s.llm_cache_efficiency.is_some() {
-            Tone::Cyan
-        } else {
-            Tone::Muted
-        };
-        render_metric_card(
-            frame,
-            metrics[3],
-            Line::from(vec![
-                Span::styled(
-                    " ◈ ",
-                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    "CACHE / QUEUE",
-                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    format!("CACHE {}", percent(s.llm_cache_efficiency)),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("  ·  HIT {}", percent(s.llm_prefix_hit_rate)),
-                    Style::default().fg(CYAN),
-                ),
-            ]),
-            s.llm_cache_efficiency.map(|value| {
-                let value = value.clamp(0.0, 100.0).round() as u16;
-                (value, format!("{value}%"), cache_tone)
-            }),
-            vec![Line::from(Span::styled(
-                compact_label(
-                    &format!(
-                        "REQ {}/{} · CONTEXT {}",
-                        count(s.llm_active_requests),
-                        count(s.llm_waiting_requests),
-                        llm_context_label(s)
-                    ),
-                    metrics[3].width.saturating_sub(4) as usize,
-                ),
-                Style::default().fg(MUTED),
-            ))],
-            cache_tone,
-        );
-    }
-
-    fn draw_compact_operations_panel(&self, frame: &mut Frame, area: Rect) {
-        let sample = &self.collector.current;
-        let width = area.width.saturating_sub(4) as usize;
-        let llm_tone = llm_status_tone(&sample.llm_status);
-        let paging_rate = sample.swap_in.saturating_add(sample.swap_out);
-        let generation = llm_generation_rate_label(sample);
-        let prefill = llm_prefill_rate_label(sample);
-        let finding = diagnosis::assess(sample);
-        let diagnosis = format!("{} · {}", finding.title, finding.evidence);
-        let signals = format!(
-            "MEM {} load · {} {} · PAGE {} · PRESSURE {}",
-            sample
-                .availability
-                .map(|value| format!("{}%", 100_u8.saturating_sub(value)))
-                .unwrap_or_else(|| "—".into()),
-            self.gpu_chart_title(),
-            percent_u8(sample.gpu_util),
-            if sample.rate_ready {
-                rate(paging_rate)
-            } else {
-                "sampling".into()
-            },
-            pressure_state_label(sample),
-        );
-        let runtime = format!(
-            "COMP {} · THERMAL {} · {} · {}",
-            compressed_memory_label(sample),
-            sample.thermal,
-            telemetry_source(sample),
-            telemetry_age(sample.llm_observed_at),
-        );
-        let lines = vec![
-            Line::from(vec![
-                Span::styled(" STATUS  ", Style::default().fg(MUTED)),
-                tone_badge(llm_tone, &sample.llm_status.to_ascii_uppercase()),
-                Span::styled(
-                    format!("  {} · {}", sample.grade, sample.llm_provider),
-                    Style::default()
-                        .fg(llm_tone.color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(" MODEL   ", Style::default().fg(MUTED)),
-                Span::styled(
-                    compact_label(&sample.llm_model, width.saturating_sub(9)),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(" RATE    ", Style::default().fg(MUTED)),
-                Span::styled(
-                    format!("{generation} · {prefill}"),
-                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(" WORK    ", Style::default().fg(MUTED)),
-                Span::styled(
-                    compact_label(
-                        &format!(
-                            "PROMPT {} · CACHE {} · REQ {}/{}",
-                            optional_tokens(sample.llm_prompt_tokens),
-                            percent(sample.llm_cache_efficiency),
-                            count(sample.llm_active_requests),
-                            count(sample.llm_waiting_requests),
-                        ),
-                        width.saturating_sub(9),
-                    ),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(" DIAG    ", Style::default().fg(MUTED)),
-                Span::styled(
-                    compact_label(&diagnosis, width.saturating_sub(9)),
-                    Style::default()
-                        .fg(finding.tone.color())
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(
-                    if finding.actionable {
-                        " CHECK   "
-                    } else {
-                        " NOTE    "
-                    },
-                    Style::default().fg(MUTED),
-                ),
-                Span::styled(finding.next, Style::default().fg(finding.tone.color())),
-            ]),
-            Line::from(vec![
-                Span::styled(" SIGNAL  ", Style::default().fg(MUTED)),
-                Span::styled(
-                    compact_label(&signals, width.saturating_sub(9)),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(" RUNTIME ", Style::default().fg(MUTED)),
-                Span::styled(
-                    compact_label(&runtime, width.saturating_sub(9)),
-                    Style::default().fg(MUTED),
-                ),
-            ]),
-        ];
-        frame.render_widget(
-            Paragraph::new(lines)
-                .block(panel("LLM OPERATIONS · LIVE IMPACT", sample.impact_tone))
-                .wrap(Wrap { trim: true }),
-            area,
-        );
-    }
-
-    fn draw_trend_strip(&self, frame: &mut Frame, area: Rect) {
-        self.render_indicator_charts(frame, area);
     }
 
     fn gpu_chart_title(&self) -> &'static str {
@@ -3331,65 +2847,6 @@ impl App {
 
     fn show_process_footprint(&self) -> bool {
         !self.collector.current.has_nvidia_gpus() || self.collector.current.process_memory.is_some()
-    }
-
-    fn render_indicator_charts(&self, frame: &mut Frame, area: Rect) {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Fill(1); 3])
-            .split(area);
-        for (row, series) in rows.iter().zip([
-            [
-                (
-                    "generation",
-                    &self.collector.generation_history,
-                    ChartMetric::Generation,
-                ),
-                (
-                    "prefill",
-                    &self.collector.prefill_history,
-                    ChartMetric::Prefill,
-                ),
-                ("cache", &self.collector.cache_history, ChartMetric::Cache),
-            ],
-            [
-                (
-                    self.gpu_chart_title(),
-                    &self.collector.gpu_history,
-                    ChartMetric::Gpu,
-                ),
-                ("memory", &self.collector.load_history, ChartMetric::Memory),
-                ("paging", &self.collector.swap_history, ChartMetric::Swap),
-            ],
-        ]) {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
-                    Constraint::Ratio(1, 3),
-                ])
-                .split(*row);
-            for (column, (name, history, metric)) in columns.iter().zip(series) {
-                self.render_indicator_chart(frame, *column, name, history, metric);
-            }
-        }
-        let show_footprint = self.show_process_footprint();
-        let has_latency = self.collector.operator_history.has_latency();
-        let extra = Layout::horizontal(vec![
-            Constraint::Fill(1);
-            1 + usize::from(show_footprint)
-                + usize::from(has_latency)
-        ])
-        .split(rows[2]);
-        if show_footprint {
-            self.draw_operator_chart(frame, extra[0], Chart::Footprint);
-        }
-        let start = usize::from(show_footprint);
-        self.draw_operator_chart(frame, extra[start], Chart::Queue);
-        if has_latency {
-            self.draw_operator_chart(frame, extra[start + 1], Chart::Latency);
-        }
     }
 
     fn render_indicator_chart(
@@ -3405,13 +2862,47 @@ impl App {
         let current = history.back().and_then(|point| point.value);
         let current_label = match metric {
             ChartMetric::Generation | ChartMetric::Prefill => current
-                .map(|value| format!("{:.1} tok/s", value as f64 / 10.0))
-                .unwrap_or_else(|| chart_inactive_rate_label(metric, &self.collector.current)),
+                .map(|value| {
+                    if area.width < 38 {
+                        format!("{:.1}", value as f64 / 10.0)
+                    } else {
+                        format!("{:.1} tok/s", value as f64 / 10.0)
+                    }
+                })
+                .unwrap_or_else(|| {
+                    let label = chart_inactive_rate_label(metric, &self.collector.current);
+                    if area.width < 38 {
+                        label.replace(" active", "")
+                    } else {
+                        label
+                    }
+                }),
             ChartMetric::Cache => current
+                .map(|value| {
+                    if area.width < 28 {
+                        format!("int {value}%")
+                    } else {
+                        format!("interval {value}%")
+                    }
+                })
+                .unwrap_or_else(|| {
+                    if area.width < 28 {
+                        "int —".into()
+                    } else {
+                        "interval —".into()
+                    }
+                }),
+            ChartMetric::Gpu => current
                 .map(|value| format!("{value}%"))
                 .unwrap_or_else(|| "—".into()),
-            ChartMetric::Memory | ChartMetric::Gpu => current
-                .map(|value| format!("{value}%"))
+            ChartMetric::Memory => current
+                .map(|value| {
+                    if area.width >= 24 {
+                        format!("{value}% resident")
+                    } else {
+                        format!("{value}%")
+                    }
+                })
                 .unwrap_or_else(|| "—".into()),
             ChartMetric::Swap => current.map(rate).unwrap_or_else(|| "—".into()),
         };
@@ -3420,94 +2911,356 @@ impl App {
             .back()
             .map(|point| point.tone)
             .unwrap_or(Tone::Muted);
-        let scale_max = chart_scale_max(history, metric);
-        let axis_label = if matches!(metric, ChartMetric::Generation | ChartMetric::Prefill) {
-            format!("0–{:.0}", scale_max as f64 / 10.0)
-        } else if matches!(metric, ChartMetric::Swap) {
-            "0–100 log".into()
+        let rate_chart = matches!(metric, ChartMetric::Generation | ChartMetric::Prefill);
+        let label_width = if metric == ChartMetric::Swap {
+            12
+        } else if rate_chart {
+            6
         } else {
-            "0–100".into()
-        };
-        let top_axis = if matches!(metric, ChartMetric::Generation | ChartMetric::Prefill) {
-            format!("{:.0}", scale_max as f64 / 10.0)
-        } else {
-            "100".into()
-        };
-        let label_width = (top_axis.chars().count() + 1)
-            .clamp(3, 6)
-            .min(area.width.saturating_sub(2) as usize);
+            5
+        }
+        .min(area.width.saturating_sub(2) as usize);
         let plot_width = (area.width.saturating_sub(2) as usize).saturating_sub(label_width);
         let visible_count = plot_width.div_ceil(zoom);
+        let visible_missing = history
+            .iter()
+            .rev()
+            .take(visible_count)
+            .all(|point| point.value.is_none());
+        let scale = chart_scale(history, metric, visible_count);
+        let top_axis = chart_axis_label(metric, scale.1);
+        let mut axis_label = if rate_chart || metric == ChartMetric::Swap {
+            format!("{}–{} auto", chart_axis_label(metric, scale.0), top_axis)
+        } else {
+            "0–100%".into()
+        };
         let (average, peak) = chart_stats_for_width(history, metric, visible_count);
+        if metric == ChartMetric::Swap && peak == Some(0) {
+            axis_label = "zero traffic".into();
+        }
         let window = format!(
             "{} · {zoom}×",
             chart_window_label(history.len().min(visible_count), self.interval)
         );
-        let stats = if area.width >= 68 {
-            format!(
-                "  · avg {} · peak {} · {} · {} · older → now",
-                chart_stat_label(metric, average),
-                chart_stat_label(metric, peak),
-                window,
-                axis_label
-            )
-        } else if area.width >= 52 {
-            format!(
-                "  · avg {} · peak {} · {}",
-                chart_stat_label(metric, average),
-                chart_stat_label(metric, peak),
-                window
-            )
+        let name = if metric == ChartMetric::Memory && area.width < 30 {
+            "RAM"
+        } else if metric == ChartMetric::Swap && area.width < 34 {
+            "paging"
         } else {
-            format!(" · {window}")
+            name
         };
-        let title = Line::from(vec![
-            Span::styled(
-                format!(" {name} "),
-                Style::default()
-                    .fg(chart_tone.color())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ", Style::default().fg(MUTED)),
-            Span::styled(
-                current_label,
-                Style::default()
-                    .fg(current_tone.color())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(stats, Style::default().fg(MUTED)),
-        ]);
-        let block = Block::default()
+        let mut title = Line::from(vec![Span::styled(
+            format!(" {name} "),
+            Style::default()
+                .fg(chart_tone.color())
+                .add_modifier(Modifier::BOLD),
+        )]);
+        let reading = Line::from(Span::styled(
+            format!(" {current_label} "),
+            Style::default()
+                .fg(current_tone.color())
+                .add_modifier(Modifier::BOLD),
+        ))
+        .alignment(Alignment::Right);
+        // Whole metadata fields fit or disappear. Never clip a token rate,
+        // unit, time window or PID to squeeze in lower-priority statistics.
+        let mut details = vec![window.clone()];
+        if average.is_some() {
+            details.extend([
+                format!("window avg {}", chart_stat_label(metric, average)),
+                format!("peak {}", chart_stat_label(metric, peak)),
+                axis_label,
+                "older → now".into(),
+            ]);
+        }
+        if self.charts.expanded && area.width >= 38 {
+            for detail in details {
+                let span = Span::styled(format!(" · {detail}"), Style::default().fg(MUTED));
+                if title.width() + span.width() + reading.width() + 2
+                    <= usize::from(area.width.saturating_sub(2))
+                {
+                    title.spans.push(span);
+                }
+            }
+        }
+        let mut block = Block::default()
             .title(title)
+            .title(reading)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(DIM))
             .style(Style::default().bg(PANEL));
-        let inner = block.inner(area);
+        let sample = &self.collector.current;
+        let summary = match metric {
+            ChartMetric::Generation
+                if sample.llm_generation_tps.is_some() && !sample.llm_generation_tps_live =>
+            {
+                Some(llm_generation_rate_label(sample))
+            }
+            ChartMetric::Prefill
+                if sample.llm_prefill_tps.is_some() && !sample.llm_prefill_tps_live =>
+            {
+                Some(llm_prefill_rate_label(sample))
+            }
+            ChartMetric::Generation | ChartMetric::Prefill => {
+                let mut summary = "tok/s".to_string();
+                for detail in ["auto".to_string(), window.clone()] {
+                    let candidate = format!("{summary} · {detail}");
+                    if Line::from(candidate.as_str()).width() + 2
+                        <= usize::from(area.width.saturating_sub(2))
+                    {
+                        summary = candidate;
+                    }
+                }
+                Some(summary)
+            }
+            ChartMetric::Memory => Some(if area.width < 24 {
+                pressure_state_label(sample).into()
+            } else {
+                format!("PRESSURE {}", pressure_state_label(sample))
+            }),
+            ChartMetric::Gpu => Some(if current == Some(0) {
+                "idle".into()
+            } else {
+                gpu_load_label(sample.gpu_util, self.thresholds).into()
+            }),
+            ChartMetric::Swap => Some(format!(
+                "IN {} OUT {}",
+                if sample.rate_ready {
+                    rate(sample.swap_in).replace(' ', "")
+                } else {
+                    "—".into()
+                },
+                if sample.rate_ready {
+                    rate(sample.swap_out).replace(' ', "")
+                } else {
+                    "—".into()
+                }
+            )),
+            ChartMetric::Cache => Some(if visible_missing {
+                format!("PREFIX HIT {}", percent(sample.llm_prefix_hit_rate))
+            } else if area.width < 38 {
+                format!("TOTAL {}", percent(sample.llm_cache_efficiency))
+            } else {
+                format!(
+                    "TOTAL {} · PREFIX HIT {}",
+                    percent(sample.llm_cache_efficiency),
+                    percent(sample.llm_prefix_hit_rate)
+                )
+            }),
+        };
+        if let Some(summary) = summary {
+            let summary = if rate_chart {
+                if area.width < 38 {
+                    summary.replace(" GEN", "").replace(" PREFILL", "")
+                } else {
+                    summary.replacen("AVG ", "SERVER AVG ", 1)
+                }
+            } else if metric == ChartMetric::Memory
+                && Line::from(summary.as_str()).width() + 2
+                    > usize::from(area.width.saturating_sub(2))
+            {
+                summary.replace("process ", "OS ")
+            } else {
+                summary
+            };
+            block = block.title_bottom(Line::from(Span::styled(
+                format!(" {summary} "),
+                if metric == ChartMetric::Memory {
+                    Style::default()
+                        .fg(sample.pressure_tone.color())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(chart_tone.color())
+                },
+            )));
+        }
+        let mut inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.is_empty() {
             return;
         }
-
-        if history.iter().all(|point| point.value.is_none()) {
+        if metric == ChartMetric::Memory && inner.height >= 5 {
+            let usage = sample
+                .resident_memory
+                .map(|used| format!("{} / {}", bytes(used), bytes(sample.total_memory)))
+                .unwrap_or_else(|| "RAM reading unavailable".into());
+            for text in [usage, "Includes file cache".into()] {
+                frame.render_widget(
+                    Paragraph::new(text).style(Style::default().fg(MUTED)),
+                    Rect::new(inner.x, inner.y, inner.width, 1),
+                );
+                inner.y += 1;
+                inner.height -= 1;
+            }
+        }
+        if metric == ChartMetric::Swap {
+            swap_usage::draw(
+                frame,
+                Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+                sample,
+            );
+            inner.height = inner.height.saturating_sub(1);
+            if inner.is_empty() {
+                return;
+            }
+            if inner.height < 3 {
+                frame.render_widget(
+                    Paragraph::new(match current {
+                        Some(0) => "No paging traffic",
+                        Some(_) => "Paging active",
+                        None => "Paging unavailable",
+                    })
+                    .style(Style::default().fg(current_tone.color())),
+                    inner,
+                );
+                return;
+            }
+        }
+        let average_cache = (metric == ChartMetric::Cache && visible_missing)
+            .then_some(sample.llm_cache_efficiency)
+            .flatten();
+        if metric == ChartMetric::Cache && !visible_missing && area.width < 38 && inner.height >= 4
+        {
+            frame.render_widget(
+                Paragraph::new(format!(
+                    "PREFIX HIT {}",
+                    percent(sample.llm_prefix_hit_rate)
+                ))
+                .style(Style::default().fg(MUTED)),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            inner.y += 1;
+            inner.height -= 1;
+        }
+        let compact_percent = inner.height < 3
+            && matches!(
+                metric,
+                ChartMetric::Memory | ChartMetric::Gpu | ChartMetric::Cache
+            );
+        if average_cache.is_some() || compact_percent {
+            let measured = current
+                .map(|value| (value as f64, format!("{value}%"), current_tone))
+                .or_else(|| {
+                    average_cache.map(|value| (value, format!("TOTAL {value:.1}%"), Tone::Cyan))
+                });
+            if let Some((value, label, tone)) = measured {
+                frame.render_widget(
+                    Gauge::default()
+                        .ratio((value / 100.0).clamp(0.0, 1.0))
+                        .label(label)
+                        .use_unicode(true)
+                        .gauge_style(Style::default().fg(tone.color()).bg(EDGE)),
+                    Rect::new(inner.x, inner.y, inner.width, 1),
+                );
+                if inner.height > 1 {
+                    frame.render_widget(
+                        Paragraph::new(if average_cache.is_some() {
+                            if history.iter().any(|point| point.value.is_some()) {
+                                "No samples in view"
+                            } else {
+                                "No interval history"
+                            }
+                        } else {
+                            "Enter: history"
+                        })
+                        .style(Style::default().fg(MUTED)),
+                        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                    );
+                }
+            } else {
+                frame.render_widget(
+                    Paragraph::new(if inner.width < 19 {
+                        "Unavailable"
+                    } else {
+                        "Reading unavailable"
+                    })
+                    .style(Style::default().fg(MUTED)),
+                    inner,
+                );
+            }
+            return;
+        }
+        if visible_missing {
             let message = match metric {
+                _ if history.iter().any(|point| point.value.is_some()) => "No samples in view",
+                ChartMetric::Cache if inner.width < 22 => "No cache samples",
                 ChartMetric::Cache => "No interval cache data",
+                ChartMetric::Generation | ChartMetric::Prefill
+                    if sample.llm_status == "idle" && inner.width >= 28 =>
+                {
+                    "Idle · no live rate samples"
+                }
                 ChartMetric::Generation | ChartMetric::Prefill => "No live rate samples",
                 _ => "No samples available",
             };
             frame.render_widget(
-                Paragraph::new(message).style(Style::default().fg(MUTED)),
+                Paragraph::new(message)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(MUTED)),
+                Rect::new(
+                    inner.x,
+                    inner.y + inner.height.saturating_sub(1) / 2,
+                    inner.width,
+                    1,
+                ),
+            );
+            return;
+        }
+        // Zero is a measurement, not an absent sample. Keep the zero trace
+        // and its gaps, but do not invent a 1 B/s ceiling for an idle window.
+        let paging_idle = metric == ChartMetric::Swap && peak == Some(0);
+        if rate_chart && inner.height < 3 {
+            frame.render_widget(
+                Paragraph::new("Enter: history").style(Style::default().fg(MUTED)),
                 inner,
             );
             return;
+        }
+
+        // Historical observations end where sampling stopped. Explain the
+        // trailing gap without drawing a zero or holding the old rate live.
+        if current.is_none() && inner.height >= 4 {
+            if let Some((observed_at, value)) = history
+                .iter()
+                .rev()
+                .take(visible_count)
+                .find_map(|point| point.value.map(|value| (point.observed_at, value)))
+            {
+                let value_label = chart_stat_label(metric, Some(value));
+                let mut label = if rate_chart {
+                    format!("LAST SAMPLE {value_label} tok/s")
+                } else if metric == ChartMetric::Cache {
+                    format!("LAST INTERVAL {value_label}")
+                } else {
+                    format!("LAST {value_label}")
+                };
+                if Line::from(label.as_str()).width() > usize::from(inner.width) {
+                    label = if rate_chart {
+                        format!("LAST {value_label} tok/s")
+                    } else {
+                        format!("LAST INT {value_label}")
+                    };
+                }
+                let with_age = format!("{label} · {}", telemetry_age(Some(observed_at)));
+                if Line::from(with_age.as_str()).width() <= usize::from(inner.width) {
+                    label = with_age;
+                }
+                frame.render_widget(
+                    Paragraph::new(label).style(Style::default().fg(MUTED)),
+                    Rect::new(inner.x, inner.y, inner.width, 1),
+                );
+                inner.y += 1;
+                inner.height -= 1;
+            }
         }
 
         let plot_height = inner.height as usize;
         // Render the newest sample at the right edge and let older samples
         // leave from the left. Every displayed column maps to one captured
         // sample: smoothing uses only the causal prefix and the current chart
-        // resolution; no re-bucketing, future-sample smoothing, recoloring,
-        // or rescaling can rewrite history while the chart is scrolling.
-        let points = chart_columns_for_plot(history, visible_count, metric, plot_height);
+        // resolution. Auto-scaling changes coordinates, never captured values,
+        // ordering or colors; there is no future-sample smoothing.
+        let points = chart_columns_for_plot(history, visible_count, metric, plot_height, scale);
         let visible_points: Vec<_> = points
             .into_iter()
             .flat_map(|point| std::iter::repeat_n(point, zoom))
@@ -3526,7 +3279,7 @@ impl App {
         for (row, row_cells) in cells.iter_mut().enumerate() {
             let guide = if row + 1 == plot_height {
                 Some('─')
-            } else if row * 2 == plot_height {
+            } else if row == plot_height.saturating_sub(1) / 2 && !paging_idle {
                 Some('┄')
             } else {
                 None
@@ -3550,7 +3303,7 @@ impl App {
             if point.break_before {
                 previous_point = None;
             }
-            let display_value = chart_display_value(metric, value, scale_max);
+            let display_value = chart_display_value(metric, value, scale);
             let Some((row, glyph)) = trace_point(display_value, plot_height) else {
                 previous_point = None;
                 continue;
@@ -3560,7 +3313,15 @@ impl App {
             }
             point_rows[column] = Some((row, point.tone));
             cells[row][column] = TraceCell {
-                glyph,
+                glyph: if previous_point.is_none()
+                    && visible_points
+                        .get(column + 1)
+                        .is_none_or(|next| next.value.is_none() || next.break_before)
+                {
+                    '●'
+                } else {
+                    glyph
+                },
                 tone: point.tone,
             };
             previous_point = Some((row, point.tone));
@@ -3585,22 +3346,25 @@ impl App {
                     previous_tone,
                     tone,
                     thresholds: self.thresholds,
+                    scale,
                 },
             );
         }
 
         let mut lines = Vec::with_capacity(plot_height);
         for (row, row_cells) in cells.iter().enumerate() {
-            let label = if row == 0 {
+            let label = if row == 0 && !paging_idle {
                 format!("{top_axis} ")
             } else if row + 1 == plot_height {
-                "0 ".into()
-            } else if row * 2 == plot_height {
-                if matches!(metric, ChartMetric::Generation | ChartMetric::Prefill) {
-                    format!("{:.0} ", scale_max as f64 / 20.0)
-                } else {
-                    "50 ".into()
-                }
+                format!("{} ", chart_axis_label(metric, scale.0))
+            } else if row == plot_height.saturating_sub(1) / 2
+                && !paging_idle
+                && scale.1.saturating_sub(scale.0) > 1
+            {
+                format!(
+                    "{} ",
+                    chart_axis_label(metric, scale.0 + (scale.1 - scale.0) / 2)
+                )
             } else {
                 String::new()
             };
@@ -3629,43 +3393,109 @@ impl App {
             lines.push(Line::from(spans));
         }
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+        if paging_idle && inner.height >= 4 {
+            frame.render_widget(
+                Paragraph::new(if inner.width >= 32 {
+                    "No paging traffic in this window"
+                } else {
+                    "No paging traffic"
+                })
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(MUTED)),
+                Rect::new(inner.x, inner.y + inner.height / 2 - 1, inner.width, 1),
+            );
+        }
     }
 
     fn draw_signal_log(&self, frame: &mut Frame, area: Rect) {
-        let capacity = area.height.saturating_sub(2) as usize;
-        let rows = self
-            .collector
-            .signals
-            .iter()
-            .rev()
-            .take(capacity)
-            .map(|event| {
-                Line::from(vec![
-                    Span::styled(format!(" {} ", event.time), Style::default().fg(DIM)),
-                    Span::styled(
-                        format!("{:^19}", event.state),
-                        Style::default()
-                            .fg(event.tone.color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!("  {}", event.summary), Style::default().fg(MUTED)),
-                ])
-            })
-            .collect::<Vec<_>>();
-        let text = if rows.is_empty() {
-            Text::from(Line::from(Span::styled(
-                " waiting for the first classified sample",
+        let block = panel("RECENT JOURNAL", Tone::Muted)
+            .title(
+                Line::from(Span::styled(" 3 open ", Style::default().fg(CYAN)))
+                    .alignment(Alignment::Right),
+            )
+            .title_bottom(Line::from(Span::styled(
+                format!(" latest first · {} events ", self.collector.signals.len()),
                 Style::default().fg(MUTED),
-            )))
-        } else {
-            Text::from(rows)
-        };
-        frame.render_widget(
-            Paragraph::new(text)
-                .block(panel("RECENT JOURNAL", Tone::Muted))
-                .wrap(Wrap { trim: true }),
-            area,
-        );
+            )));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        if inner.is_empty() {
+            return;
+        }
+        if self.collector.signals.is_empty() {
+            frame.render_widget(
+                Paragraph::new("No events yet. Requests and resource changes appear here.")
+                    .style(Style::default().fg(MUTED))
+                    .wrap(Wrap { trim: true }),
+                inner,
+            );
+            return;
+        }
+        let message_x = inner.x + 24.min(inner.width);
+        let message_width = inner.right().saturating_sub(message_x);
+        let mut y = inner.y;
+        for event in self.collector.signals.iter().rev() {
+            if y >= inner.bottom() || message_width == 0 {
+                break;
+            }
+            let mut lines = Vec::new();
+            let mut line = String::new();
+            for word in event.summary.split_whitespace() {
+                let next = if line.is_empty() {
+                    word.to_owned()
+                } else {
+                    format!("{line} {word}")
+                };
+                if Line::from(next.as_str()).width() > usize::from(message_width)
+                    && !line.is_empty()
+                {
+                    lines.push(std::mem::take(&mut line));
+                    line = compact_label(word, usize::from(message_width));
+                } else {
+                    line = compact_label(&next, usize::from(message_width));
+                }
+            }
+            if !line.is_empty() {
+                lines.push(line);
+            }
+            if lines.is_empty() {
+                lines.push(String::new());
+            }
+            let height = lines.len().min(2).min(usize::from(inner.bottom() - y));
+            if lines.len() > height {
+                lines[height - 1] = format!(
+                    "{}…",
+                    compact_label(
+                        &lines[height - 1],
+                        usize::from(message_width).saturating_sub(1)
+                    )
+                );
+            }
+            frame.render_widget(
+                Paragraph::new(event.time.as_str()).style(Style::default().fg(MUTED)),
+                Rect::new(inner.x, y, 9, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(compact_label(&event.state, 13)).style(
+                    Style::default()
+                        .fg(event.tone.color())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Rect::new(inner.x + 10, y, 13, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(
+                    lines
+                        .into_iter()
+                        .take(height)
+                        .map(Line::from)
+                        .collect::<Vec<_>>(),
+                )
+                .style(Style::default().fg(Color::White)),
+                Rect::new(message_x, y, message_width, height as u16),
+            );
+            y += height as u16;
+        }
     }
 
     fn draw_journal(&self, frame: &mut Frame, area: Rect) {
@@ -3717,210 +3547,60 @@ impl App {
     }
 
     fn draw_llm_top(&self, frame: &mut Frame, area: Rect) {
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(4),
-                Constraint::Length(6),
-                Constraint::Min(10),
-            ])
-            .split(area);
+        let rows = Layout::vertical([
+            Constraint::Length(4),
+            Constraint::Min(6),
+            Constraint::Length(7),
+        ])
+        .split(area);
         let sample = &self.collector.current;
         let filtered = self.filtered_llm_processes();
+        let total_rss = filtered.iter().map(|p| p.rss).sum::<u64>();
+        let total_cpu = filtered.iter().map(|p| p.cpu).sum::<f64>();
         let filter_label = if self.top_filter.is_empty() {
-            "all detected processes".to_owned()
+            "all local LLM processes".to_owned()
         } else {
             format!("filter /{}", self.top_filter)
         };
-        let editing = if self.top_filtering {
-            " · typing filter · Enter/Esc close"
-        } else {
-            ""
-        };
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled(
-                        " MLX TOP  ",
-                        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+                Line::from(Span::styled(
+                    format!(
+                        " {} of {} processes · RSS {} · CPU {:.1}% · sort {}",
+                        filtered.len(),
+                        sample.llm_processes.len(),
+                        bytes(total_rss),
+                        total_cpu,
+                        self.top_sort.label()
                     ),
-                    Span::styled(
-                        format!(
-                            "{} processes · sort {} · {}",
-                            filtered.len(),
-                            self.top_sort.label(),
-                            filter_label
-                        ),
-                        Style::default().fg(Color::White),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    format!(
+                        " {}{}",
+                        filter_label,
+                        if self.top_filtering {
+                            " · typing · Enter/Esc finish"
+                        } else {
+                            " · ↑↓ select · s sort · / filter · c clear"
+                        }
                     ),
-                ]),
-                Line::from(vec![
-                    Span::styled("  ↑↓ select  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        "s",
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" sort  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        "f / /",
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" filter  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        "c",
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" clear", Style::default().fg(MUTED)),
-                    Span::styled(editing, Style::default().fg(YELLOW)),
-                ]),
+                    Style::default().fg(if self.top_filtering { YELLOW } else { MUTED }),
+                )),
             ])
-            .block(panel("PROCESS MONITOR · LIVE LLM WORKLOAD", Tone::Cyan))
-            .wrap(Wrap { trim: true }),
+            .block(panel("PROCESS MONITOR · LOCAL OS READINGS", Tone::Cyan)),
             rows[0],
         );
-
-        let status_tone = llm_status_tone(&sample.llm_status);
-        if rows[1].width < 120 {
-            self.draw_compact_top_summary(frame, rows[1]);
-        } else {
-            let columns = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(33),
-                    Constraint::Percentage(34),
-                    Constraint::Percentage(33),
-                ])
-                .split(rows[1]);
-            let summary_width = columns[0].width.saturating_sub(4) as usize;
-            render_card(
-                frame,
-                columns[0],
-                Line::from(vec![
-                    Span::styled(
-                        " ◉ ",
-                        Style::default()
-                            .fg(status_tone.color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "MODEL / STATE",
-                        Style::default()
-                            .fg(status_tone.color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                vec![
-                    Line::from(vec![
-                        tone_badge(status_tone, &sample.llm_status.to_ascii_uppercase()),
-                        Span::styled(
-                            format!("  {}", compact_label(&sample.llm_provider, 12)),
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(Span::styled(
-                        compact_label(&sample.llm_model, summary_width),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(Span::styled(
-                        format!(
-                            "{} · {} · {}",
-                            process_count_label(sample),
-                            telemetry_source(sample),
-                            telemetry_age(sample.llm_observed_at)
-                        ),
-                        Style::default().fg(MUTED),
-                    )),
-                    Line::from(Span::styled(
-                        format!("RSS {} · CPU {:.1}%", bytes(sample.llm_rss), sample.llm_cpu),
-                        Style::default().fg(MUTED),
-                    )),
-                ],
-                status_tone,
-            );
-            render_card(
-                frame,
-                columns[1],
-                Line::from(vec![
-                    Span::styled(
-                        " ↯ ",
-                        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "THROUGHPUT",
-                        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                vec![
-                    Line::from(vec![
-                        Span::styled(
-                            llm_generation_rate_label(sample),
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" · ", Style::default().fg(MUTED)),
-                        Span::styled(
-                            llm_prefill_rate_label(sample),
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(Span::styled(
-                        format!(
-                            "PROMPT {} · OUT {} · CONTEXT {}",
-                            optional_tokens(sample.llm_prompt_tokens),
-                            optional_tokens(sample.llm_output_tokens),
-                            llm_context_label(sample)
-                        ),
-                        Style::default().fg(MUTED),
-                    )),
-                    Line::from(Span::styled(
-                        format!(
-                            "CACHE {} · HIT {} · REQ {}/{}",
-                            percent(sample.llm_cache_efficiency),
-                            percent(sample.llm_prefix_hit_rate),
-                            count(sample.llm_active_requests),
-                            count(sample.llm_waiting_requests)
-                        ),
-                        Style::default().fg(CYAN),
-                    )),
-                    Line::from(Span::styled(
-                        process_memory::summary(sample),
-                        Style::default().fg(MUTED),
-                    )),
-                    Line::from(Span::styled(
-                        process_memory::detail(sample),
-                        Style::default().fg(MUTED),
-                    )),
-                ],
-                Tone::Cyan,
-            );
-            diagnosis::draw(frame, columns[2], sample);
-        }
-
-        let selected = if filtered.is_empty() {
-            0
-        } else {
-            self.top_selected.min(filtered.len() - 1)
-        };
-        let visible = rows[2].height.saturating_sub(3).max(1) as usize;
+        let selected = self.top_selected.min(filtered.len().saturating_sub(1));
+        let visible = rows[1].height.saturating_sub(3).max(1) as usize;
         let start = selected
             .saturating_sub(visible.saturating_sub(1))
             .min(filtered.len().saturating_sub(visible));
-        let table_mode = if rows[2].width >= 150 {
+        let table_mode = if rows[1].width >= 150 {
             2
-        } else if rows[2].width >= 95 {
+        } else if rows[1].width >= 95 {
             1
         } else {
             0
@@ -3928,48 +3608,43 @@ impl App {
         let (headers, widths): (Vec<&str>, Vec<Constraint>) = match table_mode {
             2 => (
                 vec![
-                    "PID",
-                    "PROCESS / COMMAND",
-                    "CPU",
-                    "MEM%",
-                    "RSS",
-                    "PAGEIN/s",
-                    "OS",
-                    "LLM STATE",
-                    "MODEL",
+                    "PID", "PROCESS", "CPU", "MEM%", "RSS", "PAGEIN/s", "OS STATE", "PROVIDER",
+                    "COMMAND",
                 ],
                 vec![
                     Constraint::Length(8),
-                    Constraint::Min(26),
+                    Constraint::Length(20),
                     Constraint::Length(8),
                     Constraint::Length(8),
                     Constraint::Length(13),
                     Constraint::Length(11),
-                    Constraint::Length(7),
+                    Constraint::Length(9),
                     Constraint::Length(12),
-                    Constraint::Min(22),
+                    Constraint::Min(20),
                 ],
             ),
             1 => (
-                vec!["PID", "PROCESS", "CPU", "RSS", "PAGEIN/s", "STATE", "MODEL"],
+                vec![
+                    "PID", "PROCESS", "CPU", "RSS", "PAGEIN/s", "OS STATE", "PROVIDER",
+                ],
                 vec![
                     Constraint::Length(7),
                     Constraint::Min(20),
-                    Constraint::Length(7),
+                    Constraint::Length(8),
                     Constraint::Length(12),
                     Constraint::Length(10),
-                    Constraint::Length(11),
-                    Constraint::Min(16),
+                    Constraint::Length(9),
+                    Constraint::Length(12),
                 ],
             ),
             _ => (
-                vec!["PID", "PROCESS", "CPU", "RSS", "STATE"],
+                vec!["PID", "PROCESS", "CPU", "RSS", "OS STATE"],
                 vec![
                     Constraint::Length(7),
                     Constraint::Min(22),
-                    Constraint::Length(7),
+                    Constraint::Length(8),
                     Constraint::Length(12),
-                    Constraint::Length(11),
+                    Constraint::Length(9),
                 ],
             ),
         };
@@ -3978,83 +3653,46 @@ impl App {
             .skip(start)
             .take(visible)
             .map(|process| {
-                let command = if process.command == process.name {
-                    process.name.clone()
-                } else {
-                    format!("{} {}", process.name, process.command)
-                };
-                let status = sample.llm_status.to_ascii_uppercase();
-                let memory_percent = process
-                    .memory_percent
-                    .map(|value| format!("{value:.1}%"))
-                    .unwrap_or_else(|| "—".into());
-                let memory_tone = process
-                    .memory_percent
-                    .map(|value| {
-                        ChartMetric::Memory.tone(value.max(0.0).round() as u64, self.thresholds)
-                    })
-                    .unwrap_or(Tone::Muted);
-                let pagein_rate = process
+                let pagein = process
                     .pagein_rate
                     .map(|value| format!("{value:.1}"))
                     .unwrap_or_else(|| "—".into());
-                let os_state = if process.state == "?" {
-                    "—".into()
+                let state = if process.state == "?" {
+                    "—"
                 } else {
-                    compact_label(&process.state, 7)
+                    &process.state
                 };
-                let state = Cell::from(tone_badge(status_tone, &compact_label(&status, 10)));
-                let cells = match table_mode {
-                    2 => vec![
-                        Cell::from(process.pid.to_string()),
-                        Cell::from(compact_label(&command, 34)),
-                        Cell::from(format!("{:.1}%", process.cpu)),
-                        Cell::from(Span::styled(
-                            memory_percent,
-                            Style::default().fg(memory_tone.color()),
-                        )),
-                        Cell::from(bytes(process.rss)),
-                        Cell::from(pagein_rate),
-                        Cell::from(os_state),
-                        state,
-                        Cell::from(compact_label(&sample.llm_model, 24)),
-                    ],
-                    1 => vec![
-                        Cell::from(process.pid.to_string()),
-                        Cell::from(compact_label(&command, 28)),
-                        Cell::from(format!("{:.1}%", process.cpu)),
-                        Cell::from(bytes(process.rss)),
-                        Cell::from(pagein_rate),
-                        state,
-                        Cell::from(compact_label(&sample.llm_model, 20)),
-                    ],
-                    _ => vec![
-                        Cell::from(process.pid.to_string()),
-                        Cell::from(compact_label(&command, 28)),
-                        Cell::from(format!("{:.1}%", process.cpu)),
-                        Cell::from(bytes(process.rss)),
-                        state,
-                    ],
-                };
+                let provider =
+                    process_provider(&process.name, &process.command).unwrap_or_else(|| "—".into());
+                let mut cells = vec![
+                    Cell::from(process.pid.to_string()),
+                    Cell::from(process.name.clone()),
+                    Cell::from(format!("{:.1}%", process.cpu)),
+                ];
+                if table_mode == 2 {
+                    cells.push(Cell::from(
+                        process
+                            .memory_percent
+                            .map(|value| format!("{value:.1}%"))
+                            .unwrap_or_else(|| "—".into()),
+                    ));
+                }
+                cells.push(Cell::from(bytes(process.rss)));
+                if table_mode > 0 {
+                    cells.push(Cell::from(pagein));
+                }
+                cells.push(Cell::from(state.to_owned()));
+                if table_mode > 0 {
+                    cells.push(Cell::from(provider));
+                }
+                if table_mode == 2 {
+                    cells.push(Cell::from(process.command.clone()));
+                }
                 Row::new(cells)
             })
             .collect::<Vec<_>>();
-        let table_rows = if table_rows.is_empty() {
-            let mut cells = (0..headers.len())
-                .map(|_| Cell::from("—"))
-                .collect::<Vec<_>>();
-            cells[1] = Cell::from(if filtered.is_empty() && !self.top_filter.is_empty() {
-                "No process matches this filter"
-            } else {
-                "No local LLM process; provider telemetry may still be live"
-            });
-            vec![Row::new(cells)]
-        } else {
-            table_rows
-        };
         let title = format!(
-            "LLM PROCESSES · SORT {} · {}–{} of {}",
-            self.top_sort.label(),
+            "LLM PROCESSES · {}–{} of {}",
             if filtered.is_empty() { 0 } else { start + 1 },
             (start + visible).min(filtered.len()),
             filtered.len()
@@ -4069,92 +3707,84 @@ impl App {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )
+            .highlight_symbol("▸ ")
             .block(panel(&title, Tone::Blue));
         let mut table_state = TableState::default();
         if !filtered.is_empty() {
             table_state.select(Some(selected.saturating_sub(start)));
         }
-        frame.render_stateful_widget(table, rows[2], &mut table_state);
-    }
+        frame.render_stateful_widget(table, rows[1], &mut table_state);
 
-    fn draw_compact_top_summary(&self, frame: &mut Frame, area: Rect) {
-        let sample = &self.collector.current;
-        let width = area.width.saturating_sub(4) as usize;
-        let status_tone = llm_status_tone(&sample.llm_status);
-        let finding = diagnosis::assess(sample);
-        let diagnosis = format!("{} · {}", finding.title, finding.evidence);
-        render_card(
-            frame,
-            area,
-            Line::from(vec![
-                Span::styled(" ◉ ", Style::default().fg(status_tone.color())),
-                Span::styled(
-                    "WORKLOAD SUMMARY · THROUGHPUT / IMPACT",
-                    Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        let Some(process) = filtered.get(selected) else {
+            let message = if self.top_filter.is_empty() {
+                "No local LLM processes detected. Provider telemetry can still be available in Overview."
+            } else {
+                "No processes match this filter. Press c to clear it or / to edit."
+            };
+            frame.render_widget(
+                Paragraph::new(message)
+                    .wrap(Wrap { trim: true })
+                    .block(panel("SELECTED PROCESS", Tone::Muted)),
+                rows[2],
+            );
+            return;
+        };
+        let provider = process_provider(&process.name, &process.command);
+        let mut detail = vec![Line::from(format!(
+            "CPU {:.1}% · RSS {} · RAM {} · OS {} · PAGEIN {} pages/s",
+            process.cpu,
+            bytes(process.rss),
+            process
+                .memory_percent
+                .map(|v| format!("{v:.1}%"))
+                .unwrap_or_else(|| "—".into()),
+            process.state,
+            process
+                .pagein_rate
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "—".into())
+        ))];
+        if sample
+            .process_memory
+            .as_ref()
+            .is_some_and(|reading| reading.pid == process.pid)
+        {
+            detail.push(Line::from(format!(
+                "OS footprint {} · {}",
+                bytes(sample.process_memory.as_ref().unwrap().footprint),
+                process_memory::detail(sample)
+            )));
+        }
+        // Provider telemetry is runtime-wide; never attribute it to every PID.
+        if provider.as_deref() == Some(sample.llm_provider.as_str()) {
+            detail.push(Line::from(Span::styled(
+                format!(
+                    "RUNTIME {} · {} · {} · {}",
+                    sample.llm_provider,
+                    sample.llm_model,
+                    sample.llm_status.to_uppercase(),
+                    telemetry_source(sample)
                 ),
-            ]),
-            vec![
-                Line::from(vec![
-                    tone_badge(status_tone, &sample.llm_status.to_ascii_uppercase()),
-                    Span::styled(
-                        format!(
-                            "  {} · {}",
-                            compact_label(&sample.llm_provider, 10),
-                            compact_label(&sample.llm_model, width.saturating_sub(20)),
-                        ),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("RATE  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        compact_label(
-                            &format!(
-                                "{} · {} · CACHE {} · REQ {}/{}",
-                                llm_generation_rate_label(sample),
-                                llm_prefill_rate_label(sample),
-                                percent(sample.llm_cache_efficiency),
-                                count(sample.llm_active_requests),
-                                count(sample.llm_waiting_requests),
-                            ),
-                            width.saturating_sub(6),
-                        ),
-                        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("HOST  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        compact_label(
-                            &format!(
-                                "RSS {} · CPU {:.1}% · GPU {} · PAGE {}",
-                                bytes(sample.llm_rss),
-                                sample.llm_cpu,
-                                percent_u8(sample.gpu_util),
-                                if sample.rate_ready {
-                                    rate(sample.swap_in.saturating_add(sample.swap_out))
-                                } else {
-                                    "sampling".into()
-                                },
-                            ),
-                            width.saturating_sub(6),
-                        ),
-                        Style::default().fg(MUTED),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("DIAG  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        diagnosis,
-                        Style::default()
-                            .fg(finding.tone.color())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-            ],
-            sample.impact_tone,
+                Style::default().fg(CYAN),
+            )));
+        } else {
+            detail.push(Line::from(Span::styled(
+                format!(
+                    "RUNTIME {} · model/state unavailable",
+                    provider.as_deref().unwrap_or("unknown")
+                ),
+                Style::default().fg(MUTED),
+            )));
+        }
+        detail.push(Line::from(format!("COMMAND {}", process.command)));
+        frame.render_widget(
+            Paragraph::new(detail)
+                .wrap(Wrap { trim: true })
+                .block(panel(
+                    &format!("SELECTED PROCESS · PID {} · {}", process.pid, process.name),
+                    Tone::Cyan,
+                )),
+            rows[2],
         );
     }
 
@@ -4283,66 +3913,98 @@ impl App {
     }
 
     fn draw_controls(&self, frame: &mut Frame, area: Rect) {
-        let compact = area.width < 60;
-        let hints = match (self.tab, compact) {
-            (1, true) => vec![("↑↓", "select"), ("/", "filter"), ("q", "quit")],
-            (0, true) => vec![("Tab", "chart"), ("+/−", "zoom"), ("?", "help")],
-            (0, false) => vec![
-                ("Tab/↑↓←→", "chart"),
+        frame.render_widget(
+            Block::default().style(Style::default().bg(PANEL_RAISED)),
+            area,
+        );
+        let help = Line::from(vec![
+            Span::styled(
+                " ?",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" help ", Style::default().fg(MUTED)),
+            Span::styled(
+                "q",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" quit ", Style::default().fg(MUTED)),
+        ]);
+        let available = usize::from(area.width).saturating_sub(help.width());
+        let mut line = Line::from(Span::styled(
+            if self.tab == 0 {
+                format!(
+                    " {} · {}× ",
+                    self.charts.focused.label(),
+                    self.charts.zoom(self.charts.focused)
+                )
+            } else if self.tab == 1 {
+                " MLX Top ".into()
+            } else {
+                " Journal ".into()
+            },
+            Style::default().fg(CYAN),
+        ));
+        let hints = match self.tab {
+            0 => vec![
+                (
+                    "Enter",
+                    if self.charts.expanded {
+                        "restore"
+                    } else {
+                        "expand"
+                    },
+                ),
+                ("↑↓←→", "chart"),
                 ("+/−", "zoom"),
-                ("Enter", "expand"),
-                ("p", "pause"),
-                ("q", "quit"),
+                ("Tab", "view"),
+                ("p", if self.paused { "resume" } else { "pause" }),
+                ("Shift+↑↓", "requests"),
+                ("{ / }", "interval"),
             ],
-            (2, true) => vec![("↑↓", "scroll"), ("f", "filter"), ("q", "quit")],
-            (_, true) => vec![("p", "pause"), ("?", "help"), ("q", "quit")],
-            (1, false) => vec![
+            1 => vec![
                 ("↑↓", "select"),
                 ("s", "sort"),
                 ("/", "filter"),
-                ("tab", "view"),
-                ("?", "help"),
-                ("q", "quit"),
+                ("Tab", "view"),
+                ("p", "pause"),
             ],
-            (2, false) => vec![
+            _ => vec![
                 ("↑↓", "scroll"),
-                ("f", "event filter"),
-                ("tab", "view"),
+                ("f", "filter"),
+                ("Tab", "view"),
                 ("r", "reset"),
-                ("?", "help"),
-                ("q", "quit"),
-            ],
-            (_, false) => vec![
-                ("p", if self.paused { "resume" } else { "pause" }),
-                ("r", "reset"),
-                ("tab", "view"),
-                ("{ / }", "interval"),
-                ("?", "help"),
-                ("q", "quit"),
+                ("p", "pause"),
             ],
         };
-        let spans = hints
-            .into_iter()
-            .flat_map(|(key, label)| {
-                [
-                    Span::styled(
-                        format!(" {key}"),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(format!(" {label}  "), Style::default().fg(MUTED)),
-                ]
-            })
-            .collect::<Vec<_>>();
-        let controls = Paragraph::new(Line::from(spans))
-            .alignment(Alignment::Right)
-            .block(
-                Block::default()
-                    .borders(Borders::BOTTOM)
-                    .border_style(Style::default().fg(DIM)),
+        for (key, label) in hints {
+            let key = Span::styled(
+                format!(" {key}"),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             );
-        frame.render_widget(controls, area);
+            let label = Span::styled(format!(" {label} "), Style::default().fg(MUTED));
+            if line.width() + key.width() + label.width() <= available {
+                line.spans.extend([key, label]);
+            }
+        }
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(area.x, area.y, available as u16, 1),
+        );
+        frame.render_widget(
+            Paragraph::new(help),
+            Rect::new(
+                area.x + available as u16,
+                area.y,
+                area.width - available as u16,
+                1,
+            ),
+        );
     }
 
     fn draw_help(&self, frame: &mut Frame, area: Rect) {
@@ -4360,6 +4022,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from("1 / 2 / 3       Overview / MLX Top / Journal"),
+            Line::from("Tab / Shift-Tab next / previous view"),
             Line::from("p / Space       pause or resume; r resets history"),
             Line::from("{ / }           change refresh interval (1–60s)"),
             Line::from("a               acknowledge critical system alarm"),
@@ -4368,7 +4031,6 @@ impl App {
         ];
         text.extend(match self.tab {
             0 => vec![
-                Line::from("Tab / Shift-Tab next / previous chart"),
                 Line::from("Arrow keys      select a neighboring chart"),
                 Line::from("+ / - / wheel   zoom chart history; 0 resets zoom"),
                 Line::from("Enter / Esc     enlarge / restore chart"),
@@ -4387,13 +4049,11 @@ impl App {
                 Line::from("Home / End      first / last process"),
                 Line::from("s               cycle RSS / CPU / PID / name sort"),
                 Line::from("f or /          filter processes; c clears filter"),
-                Line::from("Tab / ← →       switch views"),
             ],
             _ => vec![
                 Line::from("↑↓ / PgUp/PgDn  newer / older events"),
                 Line::from("Home / End      newest / oldest event"),
                 Line::from("f / [ / ]       cycle event filters"),
-                Line::from("Tab / ← →       switch views"),
             ],
         });
         frame.render_widget(
@@ -4667,9 +4327,12 @@ fn signal_summary(sample: &Sample) -> String {
             signed_rate(sample.swap_growth)
         ),
         "MEMORY BOTTLENECK" => format!(
-            "native pressure critical · LLM RSS {} · {}% free",
+            "native pressure critical · LLM RSS {} · RAM resident {}",
             bytes(sample.llm_rss),
-            sample.availability.unwrap_or(0)
+            sample
+                .resident_memory
+                .map(bytes)
+                .unwrap_or_else(|| "—".into())
         ),
         "PAGE-IN RECOVERY" => format!(
             "page-in {} · growth {}",
@@ -4751,20 +4414,9 @@ fn correlation_evidence_label(sample: &Sample) -> String {
 
 fn normalize_chart_value(metric: ChartMetric, value: u64) -> u64 {
     match metric {
-        ChartMetric::Generation | ChartMetric::Prefill => value,
+        ChartMetric::Generation | ChartMetric::Prefill | ChartMetric::Swap => value,
         ChartMetric::Cache | ChartMetric::Memory | ChartMetric::Gpu => value.min(100),
-        ChartMetric::Swap => swap_chart_percent(value),
     }
-}
-
-fn swap_chart_percent(value: u64) -> u64 {
-    if value == 0 {
-        return 0;
-    }
-    let anchor = SWAP_CHART_LOG_ANCHOR as f64;
-    let numerator = (1.0 + value as f64 / anchor).ln();
-    let denominator = (1.0 + SWAP_CHART_SCALE as f64 / anchor).ln();
-    (100.0 * numerator / denominator).round().min(100.0) as u64
 }
 
 fn chart_stats<'a, I>(points: I, metric: ChartMetric) -> (Option<u64>, Option<u64>)
@@ -4820,21 +4472,57 @@ fn chart_stat_label(metric: ChartMetric, value: Option<u64>) -> String {
     }
 }
 
-fn chart_scale_max(_history: &VecDeque<ChartPoint>, metric: ChartMetric) -> u64 {
-    match metric {
-        ChartMetric::Generation => GENERATION_CHART_SCALE_MAX,
-        ChartMetric::Prefill => PREFILL_CHART_SCALE_MAX,
-        ChartMetric::Cache | ChartMetric::Memory | ChartMetric::Swap | ChartMetric::Gpu => 100,
+fn chart_scale(history: &VecDeque<ChartPoint>, metric: ChartMetric, width: usize) -> (u64, u64) {
+    if matches!(metric, ChartMetric::Generation | ChartMetric::Prefill) {
+        chart_scale::range(
+            history
+                .iter()
+                .skip(history.len().saturating_sub(width))
+                .filter_map(|point| point.value),
+            10,
+        )
+    } else if metric == ChartMetric::Swap {
+        (
+            0,
+            chart_scale::ceiling(
+                history
+                    .iter()
+                    .skip(history.len().saturating_sub(width))
+                    .filter_map(|point| point.value)
+                    .max()
+                    .unwrap_or(0),
+                1,
+            ),
+        )
+    } else {
+        (0, 100)
     }
 }
 
-fn chart_display_value(metric: ChartMetric, value: u64, scale_max: u64) -> u64 {
+fn chart_axis_label(metric: ChartMetric, value: u64) -> String {
     if matches!(metric, ChartMetric::Generation | ChartMetric::Prefill) {
-        value
-            .saturating_mul(100)
-            .checked_div(scale_max.max(1))
-            .unwrap_or(0)
-            .min(100)
+        if value >= 100_000 {
+            compact_tokens(value / 10)
+        } else if value.is_multiple_of(10) {
+            (value / 10).to_string()
+        } else {
+            format!("{:.1}", value as f64 / 10.0)
+        }
+    } else if metric == ChartMetric::Swap {
+        rate(value)
+    } else {
+        format!("{value}%")
+    }
+}
+
+fn chart_display_value(metric: ChartMetric, value: u64, scale: (u64, u64)) -> u64 {
+    if matches!(
+        metric,
+        ChartMetric::Generation | ChartMetric::Prefill | ChartMetric::Swap
+    ) {
+        (u128::from(value.saturating_sub(scale.0)) * 100
+            / u128::from(scale.1.saturating_sub(scale.0).max(1)))
+        .min(100) as u64
     } else {
         normalize_chart_value(metric, value)
     }
@@ -4880,23 +4568,24 @@ fn chart_columns_for_plot(
     width: usize,
     metric: ChartMetric,
     plot_height: usize,
+    scale: (u64, u64),
 ) -> Vec<RenderPoint> {
     let mut columns = chart_columns(history, width);
     let visible_start = history.len().saturating_sub(width);
     let left_padding = width.saturating_sub(history.len() - visible_start);
-    let plot_values = chart_plot_values(history, metric, plot_height);
+    let plot_values = chart_plot_values_scaled(history, metric, plot_height, scale);
     for (offset, value) in plot_values.iter().skip(visible_start).enumerate() {
         columns[left_padding + offset].value = *value;
     }
     columns
 }
 
-fn chart_plot_values(
+fn chart_plot_values_scaled(
     history: &VecDeque<ChartPoint>,
     metric: ChartMetric,
     plot_height: usize,
+    scale: (u64, u64),
 ) -> Vec<Option<u64>> {
-    let scale_max = chart_scale_max(history, metric);
     let deadband = chart_visual_deadband(plot_height);
     let mut anchor = None;
     let mut values = Vec::with_capacity(history.len());
@@ -4907,9 +4596,7 @@ fn chart_plot_values(
             continue;
         };
         let plotted = match anchor {
-            Some(previous)
-                if chart_display_delta(metric, previous, value, scale_max) <= deadband =>
-            {
+            Some(previous) if chart_display_delta(metric, previous, value, scale) <= deadband => {
                 previous
             }
             _ => value,
@@ -4929,9 +4616,9 @@ fn chart_visual_deadband(plot_height: usize) -> f64 {
     }
 }
 
-fn chart_display_delta(metric: ChartMetric, left: u64, right: u64, scale_max: u64) -> f64 {
-    let left = chart_display_value(metric, left, scale_max) as f64;
-    let right = chart_display_value(metric, right, scale_max) as f64;
+fn chart_display_delta(metric: ChartMetric, left: u64, right: u64, scale: (u64, u64)) -> f64 {
+    let left = chart_display_value(metric, left, scale) as f64;
+    let right = chart_display_value(metric, right, scale) as f64;
     (left - right).abs()
 }
 
@@ -4941,7 +4628,7 @@ fn trace_point(value: u64, height: usize) -> Option<(usize, char)> {
     }
     let value = value.min(100);
     let row_count = height.saturating_sub(1) as u64;
-    let row_from_bottom = value.saturating_mul(row_count) / 100;
+    let row_from_bottom = value.saturating_mul(row_count).saturating_add(50) / 100;
     let row = height - 1 - row_from_bottom.min(row_count) as usize;
     Some((row, '━'))
 }
@@ -4956,6 +4643,7 @@ struct TraceStyle {
     previous_tone: Tone,
     tone: Tone,
     thresholds: Thresholds,
+    scale: (u64, u64),
 }
 
 fn trace_connector(
@@ -4970,6 +4658,7 @@ fn trace_connector(
         previous_tone,
         tone,
         thresholds,
+        scale,
     } = style;
     if column >= cells.first().map(Vec::len).unwrap_or(0)
         || previous_row == row
@@ -4982,7 +4671,14 @@ fn trace_connector(
     let lower = previous_row.max(row);
     let height = cells.len();
     for (offset, row_cells) in cells.iter_mut().enumerate().take(lower).skip(upper + 1) {
-        let display_value = chart_row_value(offset, height);
+        let fraction = chart_row_value(offset, height);
+        let display_value = if metric == ChartMetric::Swap {
+            scale.0.saturating_add(
+                (u128::from(scale.1.saturating_sub(scale.0)) * u128::from(fraction) / 100) as u64,
+            )
+        } else {
+            fraction
+        };
         row_cells[column] = TraceCell {
             glyph: '┃',
             tone: chart_transition_tone(metric, display_value, previous_tone, tone, thresholds),
@@ -5032,9 +4728,12 @@ fn chart_transition_tone(
                 Tone::Muted
             }
         }
-        ChartMetric::Cache => tone,
-        ChartMetric::Memory | ChartMetric::Gpu => metric.tone(display_value, thresholds),
-        ChartMetric::Swap => metric.tone(display_value.saturating_mul(16 * MIB) / 100, thresholds),
+        // Pressure has no numeric relationship to the connector's RAM height.
+        // Use the newly captured state; never synthesize a warning while
+        // crossing an occupancy percentage between two normal observations.
+        ChartMetric::Cache | ChartMetric::Memory => tone,
+        ChartMetric::Gpu => metric.tone(display_value, thresholds),
+        ChartMetric::Swap => metric.tone(display_value, thresholds),
     }
 }
 
@@ -5081,6 +4780,7 @@ fn cache_interval_efficiency(
     stale: bool,
 ) -> Option<f64> {
     if stale {
+        *previous = None;
         return None;
     }
     let Some(telemetry) = telemetry else {
@@ -5091,6 +4791,7 @@ fn cache_interval_efficiency(
         .total_prompt_tokens
         .zip(telemetry.total_cached_tokens)
         .map(|(prompt_tokens, cached_tokens)| CacheCounters {
+            provider: telemetry.provider.clone(),
             prompt_tokens,
             cached_tokens,
         })
@@ -5098,17 +4799,18 @@ fn cache_interval_efficiency(
         *previous = None;
         return None;
     };
-    let previous = previous.replace(counters)?;
-    let prompt_delta = counters
-        .prompt_tokens
-        .saturating_sub(previous.prompt_tokens);
+    let previous = previous.replace(counters.clone())?;
+    if previous.provider != telemetry.provider {
+        return None;
+    }
+    let prompt_delta = counters.prompt_tokens.checked_sub(previous.prompt_tokens)?;
     if prompt_delta == 0 {
         return None;
     }
-    let cached_delta = counters
-        .cached_tokens
-        .saturating_sub(previous.cached_tokens)
-        .min(prompt_delta);
+    let cached_delta = counters.cached_tokens.checked_sub(previous.cached_tokens)?;
+    if cached_delta > prompt_delta {
+        return None;
+    }
     Some(cached_delta as f64 / prompt_delta as f64 * 100.0)
 }
 
@@ -5174,22 +4876,6 @@ fn optional_tokens(value: Option<u64>) -> String {
     value.map(compact_tokens).unwrap_or_else(|| "—".into())
 }
 
-fn mlx_runtime_summary(mlx: &MlxTelemetry) -> String {
-    let counters: Vec<_> = [
-        ("active", mlx.active_memory),
-        ("cache", mlx.cache_memory),
-        ("peak", mlx.peak_memory),
-    ]
-    .into_iter()
-    .filter_map(|(label, value)| value.map(|value| format!("{label} {}", bytes(value))))
-    .collect();
-    if counters.is_empty() {
-        String::new()
-    } else {
-        format!("MLX {}", counters.join(" · "))
-    }
-}
-
 fn llm_context_label(sample: &Sample) -> String {
     llm_context_tokens(sample)
         .map(compact_tokens)
@@ -5222,51 +4908,46 @@ fn gpu_load_label(value: Option<u8>, thresholds: Thresholds) -> &'static str {
     }
 }
 
-fn metal_signal_line(sample: &Sample, gpu_memory: &str) -> String {
-    if sample.has_nvidia_gpus() {
-        let memory = gpu::memory_totals(&sample.gpus)
-            .map(|(used, total)| format!("{} / {}", bytes(used), bytes(total)))
-            .unwrap_or_else(|| "—".into());
-        return format!("{} GPUs · VRAM sum {memory}", sample.gpus.len());
+/// Report measured GPU load transitions without declaring a critical fault.
+/// Missing readings cannot establish that a busy period ended.
+fn gpu_journal_transition(
+    previous: Option<u8>,
+    current: Option<u8>,
+    thresholds: Thresholds,
+) -> Option<(String, Tone)> {
+    let (previous, current) = (u64::from(previous?), u64::from(current?));
+    let saturated = current >= thresholds.gpu_critical_load;
+    let saturation_changed = (previous >= thresholds.gpu_critical_load) != saturated;
+    // Keep the existing busy-burst threshold to avoid logging every 75↔74%
+    // fluctuation. Per-sample chart bands still retain all measured changes.
+    let busy = current >= GPU_BUSY_ENTER_LOAD;
+    let busy_changed = (previous >= GPU_BUSY_ENTER_LOAD) != busy;
+    if !saturation_changed && !busy_changed {
+        return None;
     }
-    let mut parts = Vec::new();
-    if let Some(device) = sample.metal.device_name.as_deref() {
-        parts.push(compact_label(device, 14));
-    }
-    if let Some(cores) = sample.metal.gpu_cores {
-        parts.push(format!("{cores} cores"));
-    }
-    if gpu_memory != "not exposed" {
-        parts.push(format!("mem {gpu_memory}"));
-    }
-    if let Some(renderer) = sample.metal.renderer_util {
-        parts.push(format!("R {renderer}%"));
-    }
-    if let Some(tiler) = sample.metal.tiler_util {
-        parts.push(format!("T {tiler}%"));
-    }
-    parts.push(format!("thermal {}", sample.thermal));
-    parts.join(" · ")
+    let label = if current == 0 {
+        "GPU idle"
+    } else if saturation_changed && saturated {
+        "GPU load saturated"
+    } else if !saturation_changed && busy {
+        "busy burst started"
+    } else {
+        "GPU load eased"
+    };
+    Some((
+        format!("{label} · {current}% busy"),
+        ChartMetric::Gpu.tone(current, thresholds),
+    ))
 }
 
 fn telemetry_source(sample: &Sample) -> String {
-    match sample.llm_source {
-        TelemetrySource::Live => {
-            let age = sample
-                .llm_observed_at
-                .and_then(|observed_at| SystemTime::now().duration_since(observed_at).ok())
-                .map(|age| age.as_secs())
-                .unwrap_or_default();
-            if age >= 2 {
-                format!("LIVE {}s old", age)
-            } else {
-                "LIVE".into()
-            }
-        }
-        TelemetrySource::Log => format!("LOG {}", telemetry_age(sample.llm_observed_at)),
-        TelemetrySource::Report => format!("REPORTED {}", telemetry_age(sample.llm_observed_at)),
-        TelemetrySource::None => "SOURCE —".into(),
-    }
+    let label = match sample.llm_source {
+        TelemetrySource::Live => "LIVE",
+        TelemetrySource::Log => "LOG",
+        TelemetrySource::Report => "REPORTED",
+        TelemetrySource::None => "SOURCE —",
+    };
+    format!("{label} · {}", telemetry_age(sample.llm_observed_at))
 }
 
 fn telemetry_age(observed_at: Option<SystemTime>) -> String {
@@ -5297,18 +4978,6 @@ fn process_count_label(sample: &Sample) -> String {
         "1 process".into()
     } else {
         format!("{} processes", sample.llm_count)
-    }
-}
-
-fn compact_model_memory(sample: &Sample) -> String {
-    match (sample.llm_model_memory, sample.llm_model_memory_max) {
-        (Some(used), Some(max)) if max > 0 => format!(
-            "{:.1}/{:.1}G",
-            used as f64 / 1024_f64.powi(3),
-            max as f64 / 1024_f64.powi(3)
-        ),
-        (Some(used), None) => format!("{:.1}G", used as f64 / 1024_f64.powi(3)),
-        _ => "—".into(),
     }
 }
 
@@ -5711,12 +5380,13 @@ fn compact_tokens(value: u64) -> String {
     }
 }
 
-fn sample_macos_memory(sample: &mut Sample, page_size: u64) {
-    let level = command_text(
-        "/usr/sbin/sysctl",
-        &["-n", "kern.memorystatus_vm_pressure_level"],
-    )
-    .unwrap_or_default();
+fn sample_macos_memory(host: &dyn Host, sample: &mut Sample, page_size: u64) {
+    let level = host
+        .command(
+            "/usr/sbin/sysctl",
+            &["-n", "kern.memorystatus_vm_pressure_level"],
+        )
+        .unwrap_or_default();
     match level.trim() {
         "1" => {
             sample.pressure = "GREEN".into();
@@ -5736,7 +5406,7 @@ fn sample_macos_memory(sample: &mut Sample, page_size: u64) {
         _ => {}
     }
 
-    if let Some(output) = command_text("/usr/bin/memory_pressure", &["-Q"]) {
+    if let Some(output) = host.command("/usr/bin/memory_pressure", &["-Q"]) {
         if let Some(line) = output.lines().find(|line| line.contains("free percentage")) {
             sample.availability = line
                 .split(|c: char| !c.is_ascii_digit())
@@ -5745,38 +5415,52 @@ fn sample_macos_memory(sample: &mut Sample, page_size: u64) {
         }
     }
 
-    let vm = command_text("/usr/bin/vm_stat", &[]).unwrap_or_default();
+    let vm = host.command("/usr/bin/vm_stat", &[]).unwrap_or_default();
     sample.vm_available = !vm.trim().is_empty();
     let counters = parse_vm_stat(&vm, page_size);
+    // vm_stat prints free_count minus speculative_count as "Pages free".
+    // memory_pressure -Q uses AVAILABLE_NON_COMPRESSED_MEMORY, including
+    // active and inactive application pages, so it cannot measure RAM use.
+    sample.resident_memory = resident_memory_bytes(
+        sample.total_memory,
+        counters
+            .free
+            .zip(counters.speculative)
+            .and_then(|(free, speculative)| free.checked_add(speculative)),
+    );
     sample.wired = counters.wired;
     sample.compressor = counters.compressor;
     sample.compressed_logical = counters.compressed_logical;
     sample.anonymous = counters.anonymous;
     sample.file_backed = counters.file_backed;
-    let swap_usage = command_text("/usr/sbin/sysctl", &["-n", "vm.swapusage"]);
+    let swap_usage = host.command("/usr/sbin/sysctl", &["-n", "vm.swapusage"]);
     sample.swap_available = swap_usage.is_some();
     (sample.swap_total, sample.swap_used) = parse_swap_usage(&swap_usage.unwrap_or_default());
 }
 
-fn macos_counters_for_rates(page_size: u64) -> VmCounters {
-    let vm = command_text("/usr/bin/vm_stat", &[]).unwrap_or_default();
+fn macos_counters_for_rates(host: &dyn Host, page_size: u64) -> VmCounters {
+    let vm = host.command("/usr/bin/vm_stat", &[]).unwrap_or_default();
     parse_vm_stat(&vm, page_size)
 }
 
-fn sample_macos_gpu_thermal(sample: &mut Sample) {
-    let ioreg = command_text(
-        "/usr/sbin/ioreg",
-        &["-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"],
-    )
-    .unwrap_or_default();
+fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample) {
+    let ioreg = host
+        .command(
+            "/usr/sbin/ioreg",
+            &["-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"],
+        )
+        .unwrap_or_default();
     (sample.gpu_util, sample.gpu_alloc, sample.gpu_in_use) = parse_gpu(&ioreg);
     let live_metal = parse_metal_hardware(&ioreg);
     sample.metal.device_name = live_metal.device_name.or(sample.metal.device_name.take());
     sample.metal.gpu_cores = live_metal.gpu_cores.or(sample.metal.gpu_cores);
     sample.metal.renderer_util = live_metal.renderer_util;
     sample.metal.tiler_util = live_metal.tiler_util;
-    sample.thermal =
-        parse_thermal(&command_text("/usr/bin/pmset", &["-g", "therm"]).unwrap_or_default());
+    sample.thermal = parse_thermal(
+        &host
+            .command("/usr/bin/pmset", &["-g", "therm"])
+            .unwrap_or_default(),
+    );
 }
 
 // --- Linux sampling -------------------------------------------------------
@@ -5790,6 +5474,7 @@ fn sample_macos_gpu_thermal(sample: &mut Sample) {
 #[derive(Default)]
 struct LinuxMeminfo {
     total_kb: u64,
+    free_kb: Option<u64>,
     available_kb: u64,
     swap_total_kb: u64,
     swap_free_kb: u64,
@@ -5797,16 +5482,15 @@ struct LinuxMeminfo {
     file_kb: u64,
 }
 
-fn read_file_to_string(path: &str) -> Option<String> {
-    fs::read_to_string(path).ok()
+fn parse_meminfo_value_kb(text: &str, key: &str) -> u64 {
+    parse_meminfo_optional_kb(text, key).unwrap_or(0)
 }
 
-fn parse_meminfo_value_kb(text: &str, key: &str) -> u64 {
+fn parse_meminfo_optional_kb(text: &str, key: &str) -> Option<u64> {
     text.lines()
         .find(|line| line.starts_with(key))
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0)
 }
 
 fn parse_linux_meminfo(text: &str) -> LinuxMeminfo {
@@ -5827,6 +5511,7 @@ fn parse_linux_meminfo(text: &str) -> LinuxMeminfo {
         .saturating_add(parse_meminfo_value_kb(text, "Buffers:"));
     LinuxMeminfo {
         total_kb,
+        free_kb: parse_meminfo_optional_kb(text, "MemFree:"),
         available_kb,
         swap_total_kb,
         swap_free_kb,
@@ -5859,15 +5544,17 @@ fn parse_memory_pressure_stall(text: &str) -> Option<f64> {
         .find_map(|token| token.strip_prefix("avg10=")?.parse::<f64>().ok())
 }
 
-fn linux_pressure_state(load_percent: u64, stall_avg10: Option<f64>) -> (&'static str, Tone) {
-    // Base the level on load like the in-app MEMORY_WARN/CRITICAL_LOAD
-    // thresholds (70/85), then let sustained full stalls escalate it.
-    let mut level = if load_percent >= MEMORY_CRITICAL_LOAD {
-        2
-    } else if load_percent >= MEMORY_WARN_LOAD {
-        1
-    } else {
-        0
+fn linux_pressure_state(
+    load_percent: u64,
+    stall_avg10: Option<f64>,
+    thresholds: Thresholds,
+) -> (&'static str, Tone) {
+    // MemAvailable excludes reclaimable cache from load; resident occupancy
+    // does not. Apply the configured bands here, then escalate for full stalls.
+    let mut level = match ChartMetric::Memory.tone(load_percent, thresholds) {
+        Tone::Red => 2,
+        Tone::Yellow => 1,
+        _ => 0,
     };
     match stall_avg10 {
         Some(stall) if stall >= 5.0 => level = level.max(2),
@@ -5881,41 +5568,38 @@ fn linux_pressure_state(load_percent: u64, stall_avg10: Option<f64>) -> (&'stati
     }
 }
 
-fn linux_total_memory() -> u64 {
-    read_file_to_string("/proc/meminfo")
+fn linux_total_memory(host: &dyn Host) -> u64 {
+    host.read_file(Path::new("/proc/meminfo"))
         .map(|text| parse_linux_meminfo(&text))
         .map(|info| info.total_kb.saturating_mul(1024))
         .unwrap_or(0)
 }
 
-fn linux_page_size() -> u64 {
-    command_u64("getconf", &["PAGESIZE"]).unwrap_or(4096)
+fn linux_page_size(host: &dyn Host) -> u64 {
+    host.command_u64("getconf", &["PAGESIZE"]).unwrap_or(4096)
 }
 
-fn linux_cpu_architecture() -> Option<String> {
-    command_text("uname", &["-m"])
+fn linux_cpu_architecture(host: &dyn Host) -> Option<String> {
+    host.command("uname", &["-m"])
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
 }
 
-fn linux_metal_init() -> MetalTelemetry {
+fn linux_metal_init(host: &dyn Host) -> MetalTelemetry {
     MetalTelemetry {
-        architecture: linux_cpu_architecture(),
+        architecture: linux_cpu_architecture(host),
         ..MetalTelemetry::default()
     }
 }
 
-fn linux_thermal_celsius(nvidia_temp: Option<u64>) -> Option<u64> {
+fn linux_thermal_celsius(host: &dyn Host, nvidia_temp: Option<u64>) -> Option<u64> {
     let mut hottest = nvidia_temp.unwrap_or(0);
-    if let Ok(entries) = fs::read_dir("/sys/class/thermal") {
-        for entry in entries.flatten() {
-            let path = entry.path().join("temp");
-            if let Ok(text) = fs::read_to_string(&path) {
-                // Values are millidegrees Celsius on most drivers.
-                if let Ok(millidegrees) = text.trim().parse::<i64>() {
-                    if millidegrees > 0 {
-                        hottest = hottest.max((millidegrees / 1000).max(0) as u64);
-                    }
+    for entry in host.read_dir(Path::new("/sys/class/thermal")) {
+        if let Some(text) = host.read_file(&entry.join("temp")) {
+            // Values are millidegrees Celsius on most drivers.
+            if let Ok(millidegrees) = text.trim().parse::<i64>() {
+                if millidegrees > 0 {
+                    hottest = hottest.max((millidegrees / 1000).max(0) as u64);
                 }
             }
         }
@@ -5929,9 +5613,9 @@ fn linux_thermal_label(hottest: Option<u64>) -> String {
         .unwrap_or_else(|| "unavailable".into())
 }
 
-fn linux_counters_for_rates() -> VmCounters {
+fn linux_counters_for_rates(host: &dyn Host) -> VmCounters {
     let mut counters = VmCounters::default();
-    if let Some(text) = read_file_to_string("/proc/vmstat") {
+    if let Some(text) = host.read_file(Path::new("/proc/vmstat")) {
         let (swapins, swapouts) = parse_linux_paging(&text);
         counters.swapins = swapins;
         counters.swapouts = swapouts;
@@ -5939,8 +5623,14 @@ fn linux_counters_for_rates() -> VmCounters {
     counters
 }
 
-fn sample_linux_memory(sample: &mut Sample, _page_size: u64, total_memory: u64) {
-    let Some(text) = read_file_to_string("/proc/meminfo") else {
+fn sample_linux_memory(
+    host: &dyn Host,
+    sample: &mut Sample,
+    _page_size: u64,
+    total_memory: u64,
+    thresholds: Thresholds,
+) {
+    let Some(text) = host.read_file(Path::new("/proc/meminfo")) else {
         return;
     };
     let info = parse_linux_meminfo(&text);
@@ -5950,6 +5640,8 @@ fn sample_linux_memory(sample: &mut Sample, _page_size: u64, total_memory: u64) 
         info.total_kb.saturating_mul(1024)
     };
     sample.total_memory = total;
+    sample.resident_memory =
+        resident_memory_bytes(total, info.free_kb.and_then(|free| free.checked_mul(1024)));
     sample.vm_available = true;
     sample.anonymous = info.anon_kb.saturating_mul(1024);
     sample.file_backed = info.file_kb.saturating_mul(1024);
@@ -5962,10 +5654,11 @@ fn sample_linux_memory(sample: &mut Sample, _page_size: u64, total_memory: u64) 
         let free_percent = (available.saturating_mul(100) / total).min(100);
         sample.availability = u8::try_from(free_percent).ok();
         let load = 100u64.saturating_sub(free_percent);
-        let stall = read_file_to_string("/proc/pressure/memory")
+        let stall = host
+            .read_file(Path::new("/proc/pressure/memory"))
             .as_deref()
             .and_then(parse_memory_pressure_stall);
-        let (pressure, tone) = linux_pressure_state(load, stall);
+        let (pressure, tone) = linux_pressure_state(load, stall, thresholds);
         sample.pressure = pressure.into();
         sample.pressure_meaning = match pressure {
             "GREEN" => "normal",
@@ -5982,11 +5675,11 @@ fn sample_linux_memory(sample: &mut Sample, _page_size: u64, total_memory: u64) 
         .swap_total_kb
         .saturating_sub(info.swap_free_kb.min(info.swap_total_kb))
         .saturating_mul(1024);
-    sample.swap_available = info.swap_total_kb > 0;
+    sample.swap_available = true;
 }
 
-fn sample_linux_gpu_thermal(sample: &mut Sample, previous: &[gpu::Device]) {
-    sample.gpus = gpu::collect(previous);
+fn sample_linux_gpu_thermal(host: &dyn Host, sample: &mut Sample, previous: &[gpu::Device]) {
+    sample.gpus = gpu::collect(host, previous);
     sample.gpu_util = gpu::peak_utilization(&sample.gpus);
     // VRAM remains per-card. A sum would falsely suggest a single allocation
     // pool and feed NVIDIA memory into the Apple Metal correlation rules.
@@ -5995,13 +5688,13 @@ fn sample_linux_gpu_thermal(sample: &mut Sample, previous: &[gpu::Device]) {
     sample.metal.renderer_util = None;
     sample.metal.tiler_util = None;
     let hottest_gpu = sample.gpus.iter().filter_map(|gpu| gpu.temperature).max();
-    sample.thermal = linux_thermal_label(linux_thermal_celsius(hottest_gpu));
+    sample.thermal = linux_thermal_label(linux_thermal_celsius(host, hottest_gpu));
 }
 
 fn parse_vm_stat(text: &str, page_size: u64) -> VmCounters {
     let mut c = VmCounters::default();
     for line in text.lines() {
-        let value = line
+        let Some(value) = line
             .split(':')
             .nth(1)
             .and_then(|v| {
@@ -6010,9 +5703,15 @@ fn parse_vm_stat(text: &str, page_size: u64) -> VmCounters {
                     .map(|value| value.trim_matches(|c: char| !c.is_ascii_digit()))
             })
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+        else {
+            continue;
+        };
         let bytes = value.saturating_mul(page_size);
-        if line.starts_with("Pages wired") {
+        if line.starts_with("Pages free:") {
+            c.free = value.checked_mul(page_size);
+        } else if line.starts_with("Pages speculative:") {
+            c.speculative = value.checked_mul(page_size);
+        } else if line.starts_with("Pages wired") {
             c.wired = bytes;
         } else if line.starts_with("Pages occupied by compressor")
             || line.starts_with("Pages used by compressor")
@@ -6039,6 +5738,19 @@ fn parse_vm_stat(text: &str, page_size: u64) -> VmCounters {
         }
     }
     c
+}
+
+fn resident_memory_bytes(total: u64, free: Option<u64>) -> Option<u64> {
+    (total > 0).then_some(())?;
+    total.checked_sub(free?)
+}
+
+fn resident_memory_percent(sample: &Sample) -> Option<u64> {
+    let used = sample.resident_memory?;
+    if sample.total_memory == 0 || used > sample.total_memory {
+        return None;
+    }
+    Some((u128::from(used) * 100 / u128::from(sample.total_memory)) as u64)
 }
 
 fn parse_swap_usage(text: &str) -> (u64, u64) {
@@ -6294,10 +6006,11 @@ fn process_provider(name: &str, command: &str) -> Option<String> {
 }
 
 impl LlmTelemetryClient {
-    fn from_config(config: &Config) -> Self {
-        let (host, port) = read_omlx_endpoint(config);
+    fn from_config(config: &Config, home: Option<PathBuf>) -> Self {
+        let (host, port) = read_omlx_endpoint(config, home.as_deref());
         Self {
             provider_adapter: providers::Adapter::new(),
+            home,
             host,
             port,
             session_cookie: None,
@@ -6480,7 +6193,7 @@ impl LlmTelemetryClient {
         {
             return;
         }
-        let Some(api_key) = read_omlx_api_key() else {
+        let Some(api_key) = read_omlx_api_key(self.home.as_deref()) else {
             return;
         };
         let body = json!({ "api_key": api_key, "remember": true }).to_string();
@@ -6636,9 +6349,9 @@ fn resolve_omlx_endpoint(discovered: &DiscoveredEndpoint, config: &Config) -> (S
     (host, port)
 }
 
-fn read_omlx_endpoint(config: &Config) -> (String, u16) {
-    let discovered = env::var_os("HOME")
-        .map(|home| Path::new(&home).join(".config/omlx-coding/server.env"))
+fn read_omlx_endpoint(config: &Config, home: Option<&Path>) -> (String, u16) {
+    let discovered = home
+        .map(|home| home.join(".config/omlx-coding/server.env"))
         .and_then(|path| fs::read_to_string(path).ok())
         .map(|text| parse_omlx_server_env(&text))
         .unwrap_or_default();
@@ -6672,9 +6385,8 @@ fn is_loopback_host(host: &str) -> bool {
     )
 }
 
-fn read_omlx_api_key() -> Option<String> {
-    let home = env::var_os("HOME")?;
-    let path = Path::new(&home).join(".config/omlx-coding/server.env");
+fn read_omlx_api_key(home: Option<&Path>) -> Option<String> {
+    let path = home?.join(".config/omlx-coding/server.env");
     let text = std::fs::read_to_string(path).ok()?;
     text.lines()
         .find_map(|line| {
@@ -7146,14 +6858,14 @@ fn json_value<'a>(mut value: &'a Value, path: &[&str]) -> Option<&'a Value> {
     Some(value)
 }
 
-fn read_llm_stats() -> LlmLogStats {
-    let Some(home) = env::var_os("HOME") else {
+fn read_llm_stats(home: Option<&Path>) -> LlmLogStats {
+    let Some(home) = home else {
         return LlmLogStats::default();
     };
     let candidates = [
-        Path::new(&home).join(".omlx-coding/logs/server.log"),
-        Path::new(&home).join(".omlx-coding/logs/launchd.stdout.log"),
-        Path::new(&home).join(".omlx-coding/logs/launchd.stderr.log"),
+        home.join(".omlx-coding/logs/server.log"),
+        home.join(".omlx-coding/logs/launchd.stdout.log"),
+        home.join(".omlx-coding/logs/launchd.stderr.log"),
     ];
     candidates
         .into_iter()
@@ -7364,10 +7076,6 @@ fn command_text(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-fn command_u64(program: &str, args: &[&str]) -> Option<u64> {
-    command_text(program, args)?.trim().parse().ok()
-}
-
 fn delta(current: u64, previous: u64) -> u64 {
     current.saturating_sub(previous)
 }
@@ -7404,11 +7112,26 @@ fn push_history(
     limit: usize,
     thresholds: Thresholds,
 ) {
-    history.push_back(ChartPoint {
-        tone: value
+    push_history_with_tone(
+        history,
+        value,
+        value
             .map(|value| metric.tone(value, thresholds))
             .unwrap_or(Tone::Muted),
+        limit,
+    );
+}
+
+fn push_history_with_tone(
+    history: &mut VecDeque<ChartPoint>,
+    value: Option<u64>,
+    tone: Tone,
+    limit: usize,
+) {
+    history.push_back(ChartPoint {
+        tone: if value.is_some() { tone } else { Tone::Muted },
         value,
+        observed_at: SystemTime::now(),
     });
     while history.len() > limit {
         history.pop_front();
@@ -7476,8 +7199,8 @@ fn signed_rate(value: i64) -> String {
     }
 }
 
-fn now_clock() -> String {
-    if let Some(value) = command_text("/bin/date", &["+%H:%M:%S"]) {
+fn now_clock(host: &dyn Host) -> String {
+    if let Some(value) = host.command("/bin/date", &["+%H:%M:%S"]) {
         return value.trim().to_string();
     }
     "??:??:??".into()
@@ -7499,80 +7222,6 @@ fn card_block<'a>(title: Line<'a>, tone: Tone) -> Block<'a> {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(EDGE))
         .style(Style::default().bg(PANEL_RAISED).fg(tone.color()))
-}
-
-fn render_card<'a>(
-    frame: &mut Frame,
-    area: Rect,
-    title: Line<'a>,
-    lines: Vec<Line<'a>>,
-    tone: Tone,
-) {
-    let block = card_block(title, tone);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if !inner.is_empty() {
-        frame.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().bg(PANEL_RAISED))
-                .wrap(Wrap { trim: true }),
-            inner,
-        );
-    }
-}
-
-fn render_metric_card<'a>(
-    frame: &mut Frame,
-    area: Rect,
-    title: Line<'a>,
-    headline: Line<'a>,
-    gauge: Option<(u16, String, Tone)>,
-    details: Vec<Line<'a>>,
-    tone: Tone,
-) {
-    let block = card_block(title, tone);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.is_empty() {
-        return;
-    }
-
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Min(1),
-        ])
-        .split(inner);
-    frame.render_widget(
-        Paragraph::new(headline)
-            .style(Style::default().bg(PANEL_RAISED))
-            .wrap(Wrap { trim: true }),
-        rows[0],
-    );
-    if let Some((value, label, gauge_tone)) = gauge {
-        frame.render_widget(
-            Gauge::default()
-                .gauge_style(Style::default().fg(gauge_tone.color()).bg(DIM))
-                .label(label)
-                .percent(value.min(100)),
-            rows[1],
-        );
-    } else {
-        frame.render_widget(
-            Paragraph::new("—")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(MUTED).bg(PANEL_RAISED)),
-            rows[1],
-        );
-    }
-    frame.render_widget(
-        Paragraph::new(details)
-            .style(Style::default().bg(PANEL_RAISED))
-            .wrap(Wrap { trim: true }),
-        rows[2],
-    );
 }
 
 fn llm_status_tone(status: &str) -> Tone {
@@ -7618,45 +7267,59 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn print_static(sample: &Sample, interval: u64, thresholds: Thresholds) {
-    println!("mlxtop · static report ({interval}s sample)\n");
-    println!("SIGNAL       {} · {}", sample.impact, sample.grade);
-    println!("PRESSURE     {}", pressure_state_label(sample));
-    println!(
-        "MEMORY       {} free · {} total",
+/// Write the `--once` report. `platform` selects the GPU section, so either
+/// platform's layout can be checked from any host.
+fn write_static(
+    out: &mut dyn Write,
+    sample: &Sample,
+    interval: u64,
+    thresholds: Thresholds,
+    platform: Platform,
+) -> io::Result<()> {
+    writeln!(out, "mlxtop · static report ({interval}s sample)\n")?;
+    writeln!(out, "SIGNAL       {} · {}", sample.impact, sample.grade)?;
+    writeln!(out, "PRESSURE     {}", pressure_state_label(sample))?;
+    writeln!(
+        out,
+        "MEMORY       {} resident / {} total · includes file cache",
         sample
-            .availability
-            .map(|v| format!("{v}%"))
+            .resident_memory
+            .map(bytes)
             .unwrap_or_else(|| "—".into()),
         bytes(sample.total_memory)
-    );
-    if sample.swap_available {
-        let used_percent = if sample.swap_total > 0 {
-            sample
-                .swap_used
-                .saturating_mul(100)
-                .checked_div(sample.swap_total)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        println!(
+    )?;
+    if sample.swap_available && sample.swap_total == 0 {
+        writeln!(
+            out,
+            "PAGING       SWAP 0 B · not allocated · in {} · out {}",
+            rate(sample.swap_in),
+            rate(sample.swap_out)
+        )?;
+    } else if sample.swap_available {
+        let used_percent = sample
+            .swap_used
+            .saturating_mul(100)
+            .checked_div(sample.swap_total)
+            .unwrap_or(0);
+        writeln!(
+            out,
             "PAGING       {} / {} · {}% used · in {} · out {}",
             bytes(sample.swap_used),
             bytes(sample.swap_total),
             used_percent,
             rate(sample.swap_in),
             rate(sample.swap_out)
-        );
+        )?;
     } else {
-        println!("PAGING       —");
+        writeln!(out, "PAGING       —")?;
     }
     if sample.has_nvidia_gpus() {
         for line in gpu_dashboard::static_lines(&sample.gpus, thresholds) {
-            println!("{line}");
+            writeln!(out, "{line}")?;
         }
-    } else if cfg!(target_os = "macos") {
-        println!(
+    } else if platform == Platform::MacOs {
+        writeln!(
+            out,
             "METAL        {} · {} cores · GPU {} · renderer {} · tiler {}",
             sample.metal.device_name.as_deref().unwrap_or("unavailable"),
             sample
@@ -7670,25 +7333,28 @@ fn print_static(sample: &Sample, interval: u64, thresholds: Thresholds) {
                 .unwrap_or_else(|| "—".into()),
             percent_u8(sample.metal.renderer_util),
             percent_u8(sample.metal.tiler_util)
-        );
+        )?;
     } else {
-        println!("GPU          NVIDIA counters unavailable");
+        writeln!(out, "GPU          NVIDIA counters unavailable")?;
     }
-    println!(
+    writeln!(
+        out,
         "RUNTIME      thermal {} · LLM {} · footprint {} · Metal limit {}",
         sample.thermal,
         sample.llm_count,
         optional_bytes(sample.mlx.process_footprint),
         optional_bytes(sample.metal.resource_limit)
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "LLM          {} · {} · {} · {}",
         sample.llm_provider,
         sample.llm_status,
         telemetry_source(sample),
         llm_model_label(sample, 40)
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "SERVING      {} · {} · active {} · cache {}",
         llm_generation_rate_label(sample),
         llm_prefill_rate_label(sample),
@@ -7697,17 +7363,19 @@ fn print_static(sample: &Sample, interval: u64, thresholds: Thresholds) {
             .map(|value| value.to_string())
             .unwrap_or_else(|| "—".into()),
         percent(sample.llm_cache_efficiency)
-    );
-    println!(
+    )?;
+    writeln!(
+        out,
         "TOKENS       PROMPT {} · OUT {}",
         optional_tokens(sample.llm_prompt_tokens),
         optional_tokens(sample.llm_output_tokens)
-    );
+    )?;
     for request in &sample.llm_requests {
-        println!("REQUEST      {}", request.summary());
+        writeln!(out, "REQUEST      {}", request.summary())?;
     }
     if let Some(memory) = &sample.process_memory {
-        println!(
+        writeln!(
+            out,
             "PROCESS OS   pid {} · footprint {} · lifetime peak {} · RSS {} · growth {}",
             memory.pid,
             bytes(memory.footprint),
@@ -7717,31 +7385,39 @@ fn print_static(sample: &Sample, interval: u64, thresholds: Thresholds) {
                 .process_memory_growth
                 .map(signed_rate)
                 .unwrap_or_else(|| "—".into())
-        );
+        )?;
     }
-    println!(
+    writeln!(
+        out,
         "MLX          version {} · active {} · cache {} · peak {}",
         sample.mlx.version.as_deref().unwrap_or("—"),
         optional_bytes(sample.mlx.active_memory),
         optional_bytes(sample.mlx.cache_memory),
         optional_bytes(sample.mlx.peak_memory)
-    );
+    )?;
     if !sample.correlation.summary.is_empty() {
-        println!("CORRELATION   {}", sample.correlation.summary);
-        println!(
+        writeln!(out, "CORRELATION   {}", sample.correlation.summary)?;
+        writeln!(
+            out,
             "EVIDENCE      {} · {} confidence",
             sample.correlation.details,
             sample.correlation.confidence_label()
-        );
+        )?;
     }
     let finding = diagnosis::assess(sample);
-    println!("DIAGNOSIS    {}", finding.title);
-    println!("EVIDENCE     {} · {}", finding.evidence, finding.context);
-    println!(
+    writeln!(out, "DIAGNOSIS    {}", finding.title)?;
+    writeln!(
+        out,
+        "EVIDENCE     {} · {}",
+        finding.evidence, finding.context
+    )?;
+    writeln!(
+        out,
         "{}         {}",
         if finding.actionable { "CHECK" } else { "NOTE " },
         finding.next
-    );
+    )?;
+    Ok(())
 }
 
 struct TerminalGuard {
@@ -7773,9 +7449,32 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+/// Wait up to `timeout` for one terminal event.
+fn next_terminal_event(timeout: Duration) -> io::Result<Option<Event>> {
+    match event::poll(timeout) {
+        Ok(false) => Ok(None),
+        Ok(true) => event::read().map(Some).inspect_err(|error| {
+            diagnostics_log(
+                "ERROR",
+                "input_read_error",
+                format!("error={}", log_field(&error.to_string())),
+            );
+        }),
+        Err(error) => {
+            diagnostics_log(
+                "ERROR",
+                "input_poll_error",
+                format!("error={}", log_field(&error.to_string())),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn run_app<B: Backend>(
+    terminal: &mut Terminal<B>,
     app: &mut App,
+    next_event: &mut dyn FnMut(Duration) -> io::Result<Option<Event>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     diagnostics_log("INFO", "tui_start", "interactive_session_started");
     loop {
@@ -7829,31 +7528,10 @@ fn run_app(
         if app.quit {
             break;
         }
-        let input_ready = match event::poll(Duration::from_millis(100)) {
-            Ok(input_ready) => input_ready,
-            Err(error) => {
-                diagnostics_log(
-                    "ERROR",
-                    "input_poll_error",
-                    format!("error={}", log_field(&error.to_string())),
-                );
-                return Err(error.into());
-            }
-        };
-        if input_ready {
-            match event::read() {
-                Ok(Event::Key(key)) => app.handle_key(key),
-                Ok(Event::Mouse(mouse)) => app.handle_mouse(mouse),
-                Ok(_) => {}
-                Err(error) => {
-                    diagnostics_log(
-                        "ERROR",
-                        "input_read_error",
-                        format!("error={}", log_field(&error.to_string())),
-                    );
-                    return Err(error.into());
-                }
-            }
+        match next_event(Duration::from_millis(100))? {
+            Some(Event::Key(key)) => app.handle_key(key),
+            Some(Event::Mouse(mouse)) => app.handle_mouse(mouse),
+            Some(_) | None => {}
         }
     }
     diagnostics_log("INFO", "tui_stop", "interactive_session_stopped");
@@ -7877,10 +7555,36 @@ fn main() {
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config();
-    let (mut interval, interval_rejected) = config_interval(&config);
-    let (mut history, history_rejected) = config_history(&config);
+/// What the command line asks for, after config defaults are applied.
+#[derive(Debug, PartialEq, Eq)]
+enum CliAction {
+    /// Print this text (version or help) and exit successfully.
+    Print(String),
+    Run {
+        interval: u64,
+        history: usize,
+        once: bool,
+    },
+}
+
+fn help_text(platform: Platform) -> String {
+    format!(
+        "Usage: mlxtop [refresh-seconds] [options]\n\n\
+         Options: -i, --interval N  refresh interval (default 1)\n\
+         -n, --history N    chart/journal history (20–3600)\n\
+         -1, --once         static report\n\
+         -V, --version      show version\n\
+         -h, --help         show help\n\
+         Config file: ~/.config/mlxtop/config.json\n\
+         Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
+         Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · ? help",
+        diagnostics_default_hint(platform)
+    )
+}
+
+fn parse_args(args: &[String], config: &Config) -> Result<CliAction, Box<dyn std::error::Error>> {
+    let (mut interval, interval_rejected) = config_interval(config);
+    let (mut history, history_rejected) = config_history(config);
     if interval_rejected {
         diagnostics_log(
             "WARN",
@@ -7902,7 +7606,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let mut once = false;
-    let args: Vec<String> = env::args().skip(1).collect();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -7915,25 +7618,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 history = args.get(i).ok_or("missing history")?.parse()?;
             }
             "-1" | "--once" => once = true,
-            "-V" | "--version" => {
-                println!("mlxtop {VERSION}");
-                return Ok(());
-            }
-            "-h" | "--help" => {
-                println!(
-                    "Usage: mlxtop [refresh-seconds] [options]\n\n\
-                     Options: -i, --interval N  refresh interval (default 1)\n\
-                     -n, --history N    chart/journal history (20–3600)\n\
-                     -1, --once         static report\n\
-                     -V, --version      show version\n\
-                     -h, --help         show help\n\
-                     Config file: ~/.config/mlxtop/config.json\n\
-                     Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
-                     Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab/arrows charts · +/- zoom · enter expand · {{/}} interval · ? help",
-                    diagnostics_default_hint()
-                );
-                return Ok(());
-            }
+            "-V" | "--version" => return Ok(CliAction::Print(format!("mlxtop {VERSION}"))),
+            "-h" | "--help" => return Ok(CliAction::Print(help_text(Platform::current()))),
             value if !value.starts_with('-') && i == 0 => interval = value.parse()?,
             value => return Err(format!("unknown option: {value}").into()),
         }
@@ -7945,6 +7631,41 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if !(HISTORY_MIN..=HISTORY_MAX).contains(&history) {
         return Err("history must be between 20 and 3600".into());
     }
+    Ok(CliAction::Run {
+        interval,
+        history,
+        once,
+    })
+}
+
+/// Take two samples `interval` apart, so rates are measured, and report.
+fn run_once(collector: &mut Collector, interval: Duration, out: &mut dyn Write) -> io::Result<()> {
+    collector.sample();
+    thread::sleep(interval);
+    let sample = collector.sample();
+    write_static(
+        out,
+        &sample,
+        interval.as_secs(),
+        collector.thresholds,
+        collector.platform,
+    )
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config();
+    let args: Vec<String> = env::args().skip(1).collect();
+    let (interval, history, once) = match parse_args(&args, &config)? {
+        CliAction::Print(text) => {
+            println!("{text}");
+            return Ok(());
+        }
+        CliAction::Run {
+            interval,
+            history,
+            once,
+        } => (interval, history, once),
+    };
 
     diagnostics_log(
         "INFO",
@@ -7957,11 +7678,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if once {
-        let mut collector = Collector::new(history, config.clone());
-        collector.sample();
-        thread::sleep(Duration::from_secs(interval));
-        let sample = collector.sample();
-        print_static(&sample, interval, collector.thresholds);
+        let mut collector = Collector::new(history, config);
+        run_once(
+            &mut collector,
+            Duration::from_secs(interval),
+            &mut stdout().lock(),
+        )?;
         return Ok(());
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -7980,7 +7702,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::new(interval, history, config);
-    let result = run_app(&mut terminal, &mut app);
+    let result = run_app(&mut terminal, &mut app, &mut next_terminal_event);
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -7995,2538 +7717,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /** Built-in thresholds, for tests that are not exercising configuration. */
-    fn defaults() -> Thresholds {
-        Thresholds::default()
-    }
-
-    /**
-     * A config file that sets every supported field to a value that differs
-     * from the built-in default and survives normalization unchanged.
-     */
-    const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
-        "interval": 7,
-        "history": 1234,
-        "omx": { "host": "10.1.2.3", "port": 9999 },
-        "memory_warn_load": 55,
-        "memory_critical_load": 77,
-        "gpu_warn_load": 44,
-        "gpu_critical_load": 66,
-        "gpu_warn_exit": 33,
-        "swap_warn_rate": 3145728,
-        "swap_critical_rate": 25165824,
-        "swap_warn_exit": 4194304,
-        "compression_warn_rate": 100663296,
-        "compression_warn_exit": 50331648
-    }"#;
-
-    fn test_app(tab: usize) -> App {
-        let (app, _views) = test_app_with_sender(tab);
-        app
-    }
-
-    fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
-        let (commands, _command_receiver) = mpsc::channel();
-        let (view_sender, views) = mpsc::channel();
-        let app = App {
-            collector: CollectorView {
-                current: Sample {
-                    total_memory: 1,
-                    ..Sample::default()
-                },
-                generation_history: VecDeque::new(),
-                prefill_history: VecDeque::new(),
-                cache_history: VecDeque::new(),
-                load_history: VecDeque::new(),
-                swap_history: VecDeque::new(),
-                gpu_history: VecDeque::new(),
-                signals: VecDeque::new(),
-                request_history: request_dashboard::History::default(),
-                operator_history: operator_charts::History::default(),
-            },
-            sampler: Sampler {
-                commands,
-                views,
-                handle: None,
-            },
-            interval: Duration::from_secs(1),
-            paused: false,
-            tab,
-            top_sort: TopSort::Rss,
-            top_filter: String::new(),
-            top_filtering: false,
-            top_selected: 0,
-            journal_filter: JournalFilter::All,
-            journal_scroll: 0,
-            request_scroll: 0,
-            charts: chart_navigation::Navigation::default(),
-            gpu_selected: 0,
-            help: false,
-            quit: false,
-            sampler_disconnected: false,
-            alert: None,
-            alert_bells: 0,
-            critical_episode: false,
-            thresholds: Thresholds::default(),
-        };
-        (app, view_sender)
-    }
-
-    fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
-        CollectorView {
-            current: Sample {
-                impact: impact.into(),
-                updated: updated.into(),
-                ..Sample::default()
-            },
-            generation_history: VecDeque::new(),
-            prefill_history: VecDeque::new(),
-            cache_history: VecDeque::new(),
-            load_history: VecDeque::new(),
-            swap_history: VecDeque::new(),
-            gpu_history: VecDeque::new(),
-            signals: VecDeque::new(),
-            request_history: request_dashboard::History::default(),
-            operator_history: operator_charts::History::default(),
-        }
-    }
-
-    fn render_app(app: &App, width: u16, height: u16) -> String {
-        render_view(width, height, |frame| app.draw(frame))
-    }
-
-    // Exercise the NVIDIA layout on development hosts too; production routing
-    // is covered separately and must never enable it on a non-Linux target.
-    fn render_nvidia_overview(app: &App, width: u16, height: u16) -> String {
-        render_view(width, height, |frame| {
-            app.draw_header(frame, Rect::new(0, 0, width, 2));
-            app.draw_gpu_overview(frame, Rect::new(0, 2, width, height - 2));
-        })
-    }
-
-    fn render_view(width: u16, height: u16, draw: impl FnOnce(&mut Frame)) -> String {
-        let backend = ratatui::backend::TestBackend::new(width, height);
-        let mut terminal = Terminal::new(backend).expect("test backend should initialize");
-        terminal.draw(draw).expect("application should render");
-        let mut rendered = String::new();
-        for y in 0..height {
-            for x in 0..width {
-                rendered.push_str(
-                    terminal
-                        .backend()
-                        .buffer()
-                        .cell((x, y))
-                        .expect("rendered cell should exist")
-                        .symbol(),
-                );
-            }
-            rendered.push('\n');
-        }
-        rendered
-    }
-
-    #[test]
-    fn parses_macos_swapusage_with_spaced_equals() {
-        let (total, used) = parse_swap_usage("total = 8.00G used = 1.50G free = 6.50G");
-        assert_eq!(total, 8 * 1024_u64.pow(3));
-        assert_eq!(used, 1_536 * 1024_u64.pow(2));
-    }
-
-    #[test]
-    fn parses_vm_stat_punctuation_and_rates() {
-        let counters = parse_vm_stat(
-            "Pages wired down: 10.\nPages occupied by compressor: 2.\n\
-             Pages stored in compressor: 4.\nSwapins: 7.\nSwapouts: 3.",
-            16_384,
-        );
-        assert_eq!(counters.wired, 10 * 16_384);
-        assert_eq!(counters.compressor, 2 * 16_384);
-        assert_eq!(counters.compressed_logical, 4 * 16_384);
-        assert_eq!(counters.swapins, 7);
-        assert_eq!(counters.swapouts, 3);
-    }
-
-    #[test]
-    fn parses_linux_meminfo_and_swap() {
-        let info = parse_linux_meminfo(
-            "MemTotal:       16290024 kB\nMemAvailable:    7947480 kB\n\
-             Active(anon):    4973124 kB\nInactive(anon):  1904636 kB\n\
-             Active(file):    3432840 kB\nInactive(file):  4277316 kB\n\
-             Cached:          7662848 kB\nBuffers:          171612 kB\n\
-             SwapTotal:       4194300 kB\nSwapFree:         309148 kB\n",
-        );
-        assert_eq!(info.total_kb, 16_290_024);
-        assert_eq!(info.available_kb, 7_947_480);
-        assert_eq!(info.swap_total_kb, 4_194_300);
-        assert_eq!(info.swap_free_kb, 309_148);
-        assert_eq!(info.anon_kb, 4_973_124 + 1_904_636);
-    }
-
-    #[test]
-    fn parses_linux_vmstat_paging_counters() {
-        let (swapins, swapouts) =
-            parse_linux_paging("pswpin 237839\npswpout 1172451\npgpgin 67709690\n");
-        assert_eq!(swapins, 237_839);
-        assert_eq!(swapouts, 1_172_451);
-    }
-
-    #[test]
-    fn linux_pressure_follows_load_and_stall() {
-        assert_eq!(linux_pressure_state(10, None).0, "GREEN");
-        assert_eq!(linux_pressure_state(70, None).0, "YELLOW");
-        assert_eq!(linux_pressure_state(85, None).0, "RED");
-        // Sustained full stalls escalate an otherwise idle machine.
-        assert_eq!(linux_pressure_state(10, Some(2.0)).0, "YELLOW");
-        assert_eq!(linux_pressure_state(10, Some(6.0)).0, "RED");
-    }
-
-    #[test]
-    fn parses_memory_pressure_stall_average() {
-        let text = "some avg10=0.00 avg60=0.00 avg300=0.00 total=18031870\n\
-                    full avg10=2.50 avg60=1.00 avg300=0.20 total=17677407\n";
-        assert_eq!(parse_memory_pressure_stall(text), Some(2.5));
-        assert_eq!(parse_memory_pressure_stall(""), None);
-    }
-
-    #[test]
-    fn linux_temperature_does_not_invent_a_throttling_signal() {
-        assert_eq!(linux_thermal_label(Some(95)), "95°C measured");
-        assert_eq!(linux_thermal_label(Some(85)), "85°C measured");
-        assert_eq!(linux_thermal_label(Some(40)), "40°C measured");
-        assert_eq!(linux_thermal_label(None), "unavailable");
-    }
-
-    #[test]
-    fn compression_summary_keeps_footprint_and_ratio_visible() {
-        let sample = Sample {
-            vm_available: true,
-            compressor: 512 * 1024 * 1024,
-            compressed_logical: 4 * 1024 * 1024 * 1024,
-            ..Sample::default()
-        };
-        assert_eq!(compressed_memory_label(&sample), "512.0 MiB · 8.0×");
-    }
-
-    #[test]
-    fn chart_colors_follow_load_thresholds() {
-        assert_eq!(ChartMetric::Memory.tone(69, defaults()), Tone::Green);
-        assert_eq!(ChartMetric::Memory.tone(70, defaults()), Tone::Yellow);
-        assert_eq!(ChartMetric::Memory.tone(85, defaults()), Tone::Red);
-        assert_eq!(ChartMetric::Swap.tone(0, defaults()), Tone::Green);
-        assert_eq!(
-            ChartMetric::Swap.tone(1024 * 1024, defaults()),
-            Tone::Yellow
-        );
-        assert_eq!(
-            ChartMetric::Swap.tone(16 * 1024 * 1024, defaults()),
-            Tone::Red
-        );
-    }
-
-    #[test]
-    fn user_facing_load_labels_describe_conditions_not_colors() {
-        let sample = Sample {
-            pressure: "GREEN".into(),
-            pressure_meaning: "normal".into(),
-            ..Sample::default()
-        };
-        assert_eq!(pressure_state_label(&sample), "normal");
-
-        let sample = Sample {
-            pressure: "YELLOW".into(),
-            pressure_meaning: "warning".into(),
-            ..Sample::default()
-        };
-        assert_eq!(pressure_state_label(&sample), "watch");
-
-        let sample = Sample {
-            pressure: "RED".into(),
-            pressure_meaning: "critical".into(),
-            ..Sample::default()
-        };
-        assert_eq!(pressure_state_label(&sample), "critical");
-        assert_eq!(gpu_load_label(Some(40), defaults()), "within target");
-        assert_eq!(gpu_load_label(Some(80), defaults()), "loaded");
-        assert_eq!(gpu_load_label(Some(95), defaults()), "saturated");
-        assert_eq!(gpu_load_label(None, defaults()), "unavailable");
-    }
-
-    #[test]
-    fn chart_stats_use_normalized_values_and_keep_the_window_label_honest() {
-        let history = VecDeque::from([
-            ChartPoint::new(Some(0), Tone::Green),
-            ChartPoint::new(Some(16 * 1024 * 1024), Tone::Red),
-            ChartPoint::new(None, Tone::Muted),
-        ]);
-        // Paging stats stay in raw bytes/s so they match the live label.
-        assert_eq!(
-            chart_stats(&history, ChartMetric::Swap),
-            (Some(8 * 1024 * 1024), Some(16 * 1024 * 1024))
-        );
-        assert_eq!(
-            chart_stat_label(ChartMetric::Swap, Some(57 * 1024 + 640)),
-            "57.6 KiB/s"
-        );
-        assert_eq!(
-            chart_window_label(history.len(), Duration::from_secs(60)),
-            "3m"
-        );
-    }
-
-    #[test]
-    fn overview_renders_the_first_glance_cards_at_reference_size() {
-        let rendered = render_app(&test_app(0), 180, 50);
-        for label in [
-            "MODEL / STATE",
-            "THROUGHPUT",
-            "DIAGNOSIS",
-            "MEMORY",
-            "PAGING / I/O",
-            "GPU / COMPUTE",
-            "CACHE / QUEUE",
-            "generation",
-            "prefill",
-            "cache",
-            "queue",
-            "process memory",
-            "pause",
-        ] {
-            assert!(rendered.contains(label), "missing rendered label: {label}");
-        }
-        assert!(!rendered.contains("/ local LLM performance"));
-        assert!(!rendered.contains("LLM READY  HEALTHY"));
-    }
-
-    fn nvidia_app(count: usize) -> App {
-        let mut app = test_app(0);
-        let csv = (0..count)
-            .map(|i| {
-                format!(
-                    "{i}, GPU-fixture-{i}, NVIDIA RTX 4090 #{i}, {}, {}, 24564, {}",
-                    [97, 62, 0, 85][i % 4],
-                    [22100, 16800, 1024, 19700][i % 4],
-                    [76, 63, 35, 71][i % 4]
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        app.collector.current = Sample {
-            updated: "12:30:00".into(),
-            gpus: gpu::parse(&csv),
-            gpu_util: Some(97),
-            total_memory: 128 * 1024 * MIB,
-            availability: Some(62),
-            pressure: "GREEN".into(),
-            pressure_meaning: "normal".into(),
-            pressure_tone: Tone::Green,
-            vm_available: true,
-            swap_available: true,
-            rate_ready: true,
-            thermal: "no warning".into(),
-            llm_provider: "llama.cpp".into(),
-            llm_model: "local-model-70B".into(),
-            llm_status: "generating".into(),
-            llm_source: TelemetrySource::Live,
-            llm_observed_at: Some(SystemTime::now()),
-            llm_count: 1,
-            llm_generation_tps: Some(42.5),
-            llm_generation_tps_live: true,
-            llm_prefill_tps: Some(980.0),
-            llm_active_requests: Some(1),
-            llm_waiting_requests: Some(0),
-            llm_rss: 38 * 1024 * MIB,
-            llm_cpu: 128.0,
-            ..Sample::default()
-        };
-        classify(&mut app.collector.current, None, defaults());
-        for i in 0..80 {
-            app.collector
-                .generation_history
-                .push_back(ChartPoint::new(Some(350 + i % 9 * 10), Tone::Cyan));
-            app.collector
-                .load_history
-                .push_back(ChartPoint::new(Some(38), Tone::Green));
-            app.collector
-                .gpu_history
-                .push_back(ChartPoint::new(Some(88 + i % 10), Tone::Blue));
-            app.collector
-                .swap_history
-                .push_back(ChartPoint::new(Some(0), Tone::Green));
-            app.collector
-                .operator_history
-                .observe(&app.collector.current, 100);
-        }
-        app
-    }
-
-    #[test]
-    fn nvidia_overview_keeps_primary_values_and_every_card_reachable() {
-        for count in [1, 2, 4, 8, 16] {
-            for (width, height) in [(80, 24), (100, 32), (120, 40), (180, 50)] {
-                let mut app = nvidia_app(count);
-                assert_eq!(app.collector.current.health, Some(100));
-                assert_eq!(llm_status_tone("generating"), Tone::Cyan);
-                let screen = render_nvidia_overview(&app, width, height);
-                for label in [
-                    "GPU DEVICES",
-                    "UTILIZATION",
-                    "VRAM USED / TOTAL",
-                    "TEMP",
-                    "97%",
-                    "76°C",
-                    "21.6/24.0 GiB",
-                ] {
-                    assert!(
-                        screen.contains(label),
-                        "missing {label} at {width}x{height}, {count} cards\n{screen}"
-                    );
-                }
-                assert!(screen.contains("NOTE"));
-                assert!(screen.contains("42.5"));
-                assert!(screen.contains("prompt load"));
-                for _ in 1..count {
-                    app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE));
-                }
-                assert_eq!(app.gpu_selected, count - 1);
-                let last = render_nvidia_overview(&app, width, height);
-                assert!(
-                    last.contains(&format!("▸ {}", count - 1)),
-                    "last GPU inaccessible at {width}x{height}\n{last}"
-                );
-                assert_eq!(app.request_scroll, 0);
-                if count > 1 {
-                    app.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
-                    assert_eq!(app.gpu_selected, count - 2);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn nvidia_selection_follows_uuid_and_missing_utilization_remains_visible() {
-        let (mut app, views) = test_app_with_sender(0);
-        app.collector = nvidia_app(2).collector.clone();
-        app.gpu_selected = 1;
-        let mut next = app.collector.clone();
-        next.current.gpus.swap(0, 1);
-        next.current.gpus[0].index = 0;
-        next.current.gpus[1].index = 1;
-        next.current.gpus[0].utilization = None;
-        next.current.gpus[0].used = None;
-        next.current.gpus[0].temperature = None;
-        next.current.gpu_util = gpu::peak_utilization(&next.current.gpus);
-        views.send(next).unwrap();
-        app.tick();
-        assert_eq!(app.gpu_selected, 0);
-        assert_eq!(
-            app.collector.current.gpus[app.gpu_selected].uuid,
-            "GPU-fixture-1"
-        );
-        let screen = render_nvidia_overview(&app, 180, 50);
-        assert!(screen.contains("unavailable"));
-        assert!(screen.contains("— / 24.0 GiB"));
-        assert!(!render_app(&test_app(0), 80, 24).contains("GPU DEVICES"));
-    }
-
-    #[test]
-    fn nvidia_dashboard_requires_linux_and_detected_cards() {
-        for count in [0, 2] {
-            let mut app = nvidia_app(count);
-            let expected = cfg!(target_os = "linux") && count > 0;
-            assert_eq!(app.collector.current.has_nvidia_gpus(), expected);
-            for (width, height) in [(80, 24), (180, 50)] {
-                let screen = render_app(&app, width, height);
-                assert_eq!(screen.contains("GPU DEVICES"), expected);
-                assert_eq!(screen.contains("VRAM USED / TOTAL"), expected);
-            }
-            assert_eq!(
-                app.gpu_chart_title(),
-                if expected { "GPU max" } else { "GPU" }
-            );
-            assert_eq!(app.show_process_footprint(), !expected);
-            app.help = true;
-            assert_eq!(render_app(&app, 100, 40).contains("[ / ] GPUs"), expected);
-        }
-    }
-
-    #[test]
-    fn critical_host_conditions_drive_alerts_but_gpu_usage_does_not() {
-        assert!(is_critical_state("SWAP THRASHING"));
-        assert!(is_critical_state("HEAVY PAGING"));
-        assert!(is_critical_state("PAGE-IN RECOVERY"));
-        assert!(!is_critical_state("PAGING ACTIVE"));
-        assert!(!is_critical_state("WATCH PAGING"));
-        assert!(is_critical_state("MEMORY BOTTLENECK"));
-        assert!(!is_critical_state("GPU BUSY"));
-        assert!(!is_critical_state("THERMAL LIMIT"));
-        assert!(!is_critical_state("LLM READY"));
-        assert!(!is_critical_state(""));
-    }
-
-    #[test]
-    fn critical_memory_alarm_survives_missing_counters_and_acknowledgment() {
-        let (mut app, views) = test_app_with_sender(0);
-        for utilization in [80, 99, 100] {
-            let mut view = view_with_impact("GPU BUSY", "12:00:00");
-            view.current.gpu_util = Some(utilization);
-            views.send(view).unwrap();
-            app.tick();
-        }
-        assert_eq!(app.alert_bells, 0);
-        let mut critical = view_with_impact("DATA LIMITED", "12:00:01");
-        critical.current.pressure = "RED".into();
-        views.send(critical.clone()).unwrap();
-        app.tick();
-        assert_eq!(app.alert_bells, 1);
-        assert_eq!(app.alert.as_ref().unwrap().state, "MEMORY BOTTLENECK");
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        views
-            .send(view_with_impact("DATA LIMITED", "12:00:02"))
-            .unwrap();
-        views.send(critical.clone()).unwrap();
-        app.tick();
-        assert_eq!(app.alert_bells, 1);
-        assert!(app.alert.is_none());
-        views
-            .send(view_with_impact("GPU BUSY", "12:00:03"))
-            .unwrap();
-        views.send(critical).unwrap();
-        app.tick();
-        assert_eq!(app.alert_bells, 2);
-    }
-
-    #[test]
-    fn chart_controls_focus_zoom_and_expand_without_changing_sampling() {
-        let mut app = test_app(0);
-        render_app(&app, 180, 50);
-        let original_interval = app.interval;
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.charts.focused, Chart::Generation);
-        app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
-        assert_eq!(app.charts.zoom(Chart::Generation), 2);
-        assert_eq!(app.charts.zoom(Chart::Prompt), 1);
-        assert_eq!(app.interval, original_interval);
-        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        assert_eq!(app.charts.focused, Chart::Prefill);
-        app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-        assert_eq!(app.charts.focused, Chart::Generation);
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        let screen = render_app(&app, 80, 24);
-        assert!(screen.contains("generation"));
-        assert!(screen.contains("Enter/Esc restore"));
-        assert!(!screen.contains("LLM OPERATIONS"));
-        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.charts.expanded);
-        assert!(!app.quit);
-        assert_eq!(app.charts.zoom(Chart::Generation), 2);
-        app.handle_key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE));
-        assert_eq!(app.charts.zoom(Chart::Generation), 1);
-        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
-        assert_eq!(app.tab, 1);
-    }
-
-    #[test]
-    fn mouse_targets_visible_charts_and_resize_replaces_hit_regions() {
-        let mut app = test_app(0);
-        render_app(&app, 180, 50);
-        let area = app
-            .charts
-            .regions
-            .borrow()
-            .iter()
-            .find(|(chart, _)| *chart == Chart::Queue)
-            .unwrap()
-            .1;
-        let mouse = |kind| MouseEvent {
-            kind,
-            column: area.x + 1,
-            row: area.y + 1,
-            modifiers: KeyModifiers::NONE,
-        };
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left)));
-        assert_eq!(app.charts.focused, Chart::Queue);
-        for _ in 0..10 {
-            app.handle_mouse(mouse(MouseEventKind::ScrollUp));
-        }
-        assert_eq!(app.charts.zoom(Chart::Queue), 8);
-        assert_eq!(app.charts.zoom(Chart::Gpu), 1);
-        for _ in 0..10 {
-            app.handle_mouse(mouse(MouseEventKind::ScrollDown));
-        }
-        assert_eq!(app.charts.zoom(Chart::Queue), 1);
-        app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right)));
-        assert!(app.charts.expanded);
-        app.help = true;
-        app.handle_mouse(mouse(MouseEventKind::ScrollUp));
-        assert_eq!(app.charts.zoom(Chart::Queue), 1);
-        app.help = false;
-        app.charts.expanded = false;
-        render_app(&app, 80, 24);
-        assert!(app
-            .charts
-            .regions
-            .borrow()
-            .iter()
-            .all(|(_, area)| area.right() <= 80 && area.bottom() <= 24));
-        render_app(&app, 60, 20);
-        assert!(app.charts.regions.borrow().is_empty());
-    }
-
-    #[test]
-    fn paging_alert_rings_once_per_episode_and_rearms() {
-        let (mut app, views) = test_app_with_sender(0);
-        app.collector.current.impact = "LLM READY".into();
-
-        views
-            .send(view_with_impact("HEAVY PAGING", "00:52:54"))
-            .expect("test channel should accept views");
-        app.tick();
-        let alert = app.alert.as_ref().expect("alert should raise");
-        assert_eq!(alert.state, "HEAVY PAGING");
-        assert_eq!(alert.summary, "swap 0 B/s / growth 0 B/s");
-        assert_eq!(alert.time, "00:52:54");
-        assert_eq!(app.alert_bells, 1);
-
-        // Staying aggressive must not re-ring; escalation refreshes the
-        // banner without raising a second alert.
-        views
-            .send(view_with_impact("SWAP THRASHING", "00:52:55"))
-            .expect("test channel should accept views");
-        app.tick();
-        let alert = app.alert.as_ref().expect("alert persists while paging");
-        assert_eq!(alert.state, "SWAP THRASHING");
-        assert_eq!(alert.time, "00:52:55");
-        assert_eq!(app.alert_bells, 1);
-
-        // Recovery retires the alert and re-arms it for the next episode.
-        views
-            .send(view_with_impact("LLM READY", "00:52:56"))
-            .expect("test channel should accept views");
-        app.tick();
-        assert!(app.alert.is_none());
-        views
-            .send(view_with_impact("HEAVY PAGING", "00:53:10"))
-            .expect("test channel should accept views");
-        app.tick();
-        assert_eq!(app.alert_bells, 2);
-        assert_eq!(app.alert.as_ref().expect("rearmed").time, "00:53:10");
-    }
-
-    #[test]
-    fn paging_alert_banner_shows_until_acknowledged_or_reset() {
-        let (mut app, views) = test_app_with_sender(0);
-        app.collector.current.impact = "LLM READY".into();
-        views
-            .send(view_with_impact("HEAVY PAGING", "00:52:54"))
-            .expect("test channel should accept views");
-        app.tick();
-        assert!(app.alert.is_some());
-
-        let rendered = render_app(&app, 180, 50);
-        assert!(rendered.contains("⚠ HEAVY PAGING"));
-        assert!(rendered.contains("a acknowledge"));
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        assert!(app.alert.is_none());
-        let rendered = render_app(&app, 180, 50);
-        assert!(!rendered.contains("⚠ HEAVY PAGING"));
-
-        // A fresh episode after recovery raises again; reset retires it.
-        views
-            .send(view_with_impact("LLM READY", "00:52:55"))
-            .expect("test channel should accept views");
-        app.tick();
-        views
-            .send(view_with_impact("SWAP THRASHING", "00:52:56"))
-            .expect("test channel should accept views");
-        app.tick();
-        assert_eq!(app.alert_bells, 2);
-        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-        assert!(app.alert.is_none());
-        let rendered = render_app(&app, 180, 50);
-        assert!(!rendered.contains("⚠ SWAP THRASHING"));
-    }
-
-    #[test]
-    fn paging_alert_survives_a_quiet_sample_while_paging_persists() {
-        // A momentary 0 B/s sample inside an aggressive episode is normal
-        // churn noise; the episode ends only when the classifier leaves the
-        // aggressive states, so the alert must not flap on a single dip.
-        let (mut app, views) = test_app_with_sender(0);
-        app.collector.current.impact = "WATCH PAGING".into();
-        views
-            .send(view_with_impact("PAGE-IN RECOVERY", "00:52:54"))
-            .expect("test channel should accept views");
-        app.tick();
-        assert!(app.alert.is_some());
-        assert_eq!(app.alert_bells, 1);
-    }
-
-    #[test]
-    fn overview_uses_semantic_state_labels_instead_of_color_names() {
-        let mut app = test_app(0);
-        app.collector.current.pressure = "GREEN".into();
-        app.collector.current.pressure_meaning = "normal".into();
-        app.collector.current.pressure_tone = Tone::Green;
-        app.collector.current.availability = Some(50);
-        let rendered = render_app(&app, 180, 50);
-
-        assert!(rendered.contains("PRESSURE normal"));
-        assert!(!rendered.contains("GREEN"));
-        assert!(!rendered.contains("YELLOW"));
-        assert!(!rendered.contains("RED"));
-    }
-
-    #[test]
-    fn overview_renders_stepped_traces_instead_of_braille_points() {
-        let mut app = test_app(0);
-        app.collector.load_history = VecDeque::from([
-            ChartPoint::new(Some(10), Tone::Green),
-            ChartPoint::new(Some(100), Tone::Red),
-        ]);
-        let rendered = render_app(&app, 180, 50);
-
-        assert!(rendered.contains('━'));
-        assert!(!rendered.contains('⠁'));
-    }
-
-    #[test]
-    fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
-        let mut app = test_app(0);
-        app.collector.current = Sample {
-            total_memory: 32 * 1024 * 1024 * 1024,
-            llm_provider: "oMLX".into(),
-            llm_source: TelemetrySource::Live,
-            llm_status: "generating".into(),
-            llm_observed_at: Some(SystemTime::now()),
-            llm_active_requests: Some(2),
-            llm_waiting_requests: Some(1),
-            ..Sample::default()
-        };
-        for i in 0..40 {
-            app.collector.current.process_memory = Some(process_memory::Reading {
-                pid: 37966,
-                started: 1,
-                resident: 16 * 1024 * 1024 * 1024,
-                footprint: (12 + i / 10) * 1024 * 1024 * 1024,
-                peak: 29 * 1024 * 1024 * 1024,
-                at: Instant::now(),
-            });
-            app.collector
-                .operator_history
-                .observe(&app.collector.current, 120);
-            app.collector
-                .generation_history
-                .push_back(ChartPoint::new(Some(280), Tone::Cyan));
-            app.collector
-                .prefill_history
-                .push_back(ChartPoint::new(Some(1560), Tone::Cyan));
-            app.collector
-                .gpu_history
-                .push_back(ChartPoint::new(Some(70), Tone::Green));
-            app.collector
-                .load_history
-                .push_back(ChartPoint::new(Some(58), Tone::Green));
-            app.collector
-                .swap_history
-                .push_back(ChartPoint::new(Some(0), Tone::Green));
-            app.collector
-                .cache_history
-                .push_back(ChartPoint::new(Some(50), Tone::Cyan));
-        }
-        for (i, prompt) in [22000, 23000, 12000, 10000, 18000, 24000, 40000]
-            .into_iter()
-            .enumerate()
-        {
-            app.collector.current.llm_requests = vec![providers::RequestUsage {
-                provider: "oMLX".into(),
-                model: "test".into(),
-                id: i.to_string(),
-                prompt,
-                cached: Some(prompt * 3 / 4),
-                output: Some(100),
-                completed: false,
-                observed_at: Some(SystemTime::now()),
-                ttft_ms: None,
-            }];
-            app.collector
-                .request_history
-                .observe(&app.collector.current.llm_requests);
-            app.collector
-                .operator_history
-                .observe(&app.collector.current, 120);
-        }
-        for (width, height) in [(180, 46), (100, 40)] {
-            let screen = render_app(&app, width, height);
-            for label in [
-                "prompt load",
-                "process memory",
-                "queue",
-                "generation",
-                "prefill",
-                "paging",
-                "cache",
-            ] {
-                assert!(
-                    screen.contains(label),
-                    "missing {label} at {width}x{height}"
-                );
-            }
-            assert!(!screen.contains("first token"));
-        }
-        app.collector.current.llm_requests[0].ttft_ms = Some(1250);
-        app.collector
-            .operator_history
-            .observe(&app.collector.current, 120);
-        let screen = render_app(&app, 180, 46);
-        assert!(screen.contains("first token"));
-        assert!(screen.contains("1250 ms"));
-        assert!(screen.contains("REPORTED"));
-    }
-
-    #[test]
-    fn overview_labels_os_process_memory_and_growth() {
-        let mut app = test_app(0);
-        app.collector.current.process_memory = Some(process_memory::Reading {
-            pid: 37966,
-            started: 1,
-            resident: 16 * 1024 * 1024 * 1024,
-            footprint: 17 * 1024 * 1024 * 1024,
-            peak: 29 * 1024 * 1024 * 1024,
-            at: Instant::now(),
-        });
-        app.collector.current.process_memory_growth = Some(-1024 * 1024);
-        let screen = render_app(&app, 180, 50);
-        for label in [
-            "PROCESS 37966",
-            "footprint 17.0 GiB",
-            "peak 29.0 GiB",
-            "growth -1.0 MiB/s",
-            "OS",
-        ] {
-            assert!(screen.contains(label), "missing {label}");
-        }
-        app.collector.current.process_memory = None;
-        let screen = render_app(&app, 180, 50);
-        assert!(!screen.contains("PROCESS 37966"));
-        assert!(!screen.contains("growth -1.0 MiB/s"));
-    }
-
-    #[test]
-    fn requests_dashboard_renders_counts_history_and_empty_state() {
-        let mut app = test_app(0);
-        let empty = render_app(&app, 80, 24);
-        assert!(empty.contains("No per-request counts received"));
-        for (i, prompt) in [12000, 20000, 32768].into_iter().enumerate() {
-            app.collector
-                .request_history
-                .observe(&[providers::RequestUsage {
-                    provider: "oMLX".into(),
-                    model: "test-model".into(),
-                    id: format!("req-{i}"),
-                    prompt,
-                    cached: Some(prompt / 2),
-                    output: Some(40),
-                    completed: true,
-                    ttft_ms: None,
-                    observed_at: Some(SystemTime::now()),
-                }]);
-        }
-        for (width, height) in [(80, 24), (100, 40), (180, 50)] {
-            let screen = render_app(&app, width, height);
-            for label in ["prompt load", "32,768", "CACHE", "PREVIOUS OBSERVED"] {
-                assert!(
-                    screen.contains(label),
-                    "missing {label} at {width}x{height}"
-                );
-            }
-        }
-        app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
-        assert_eq!(app.request_scroll, 2);
-        let older = render_app(&app, 80, 24);
-        assert!(older.contains("12,000"));
-        assert!(!older.contains("20,000"));
-        app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        assert_eq!(app.request_scroll, 0);
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.tab, 0);
-        assert_ne!(app.charts.focused, Chart::Prompt);
-        app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
-        assert_eq!(app.tab, 1);
-        app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
-        assert_eq!(app.tab, 1);
-        assert!(!render_app(&app, 100, 40).contains("4 REQ"));
-    }
-
-    #[test]
-    fn prompt_counts_are_visible_and_request_events_use_the_llm_filter() {
-        let mut app = test_app(0);
-        app.collector.current.llm_prompt_tokens = Some(32768);
-        for (width, height) in [(80, 24), (100, 40), (180, 50)] {
-            let rendered = render_app(&app, width, height);
-            assert!(
-                rendered.contains("PROMPT 32.8k"),
-                "prompt missing at {width}x{height}"
-            );
-        }
-        assert!(JournalFilter::Llm.matches(EventKind::from_state("PROMPT")));
-        let reported = Sample {
-            llm_source: TelemetrySource::Report,
-            llm_generation_tps: Some(30.0),
-            ..Sample::default()
-        };
-        assert!(llm_generation_rate_label(&reported).starts_with("LAST GEN"));
-        assert_eq!(chart_rate_value(&reported, ChartMetric::Generation), None);
-    }
-
-    #[test]
-    fn recent_journal_keeps_two_event_rows_after_header_compaction() {
-        let mut app = test_app(0);
-        app.collector.signals = VecDeque::from([
-            SignalEvent {
-                time: "12:00:00".into(),
-                recorded_at: SystemTime::now(),
-                kind: EventKind::Llm,
-                state: "LLM".into(),
-                summary: "request started".into(),
-                tone: Tone::Cyan,
-            },
-            SignalEvent {
-                time: "12:00:01".into(),
-                recorded_at: SystemTime::now(),
-                kind: EventKind::Gpu,
-                state: "GPU".into(),
-                summary: "compute burst started".into(),
-                tone: Tone::Yellow,
-            },
-        ]);
-        let rendered = render_app(&app, 180, 50);
-        assert!(rendered.contains("request started"));
-        assert!(rendered.contains("compute burst started"));
-        assert!(!rendered.contains("Live · sampling system counters"));
-    }
-
-    #[test]
-    fn overview_uses_a_compact_operational_strip_on_medium_terminals() {
-        let rendered = render_app(&test_app(0), 100, 40);
-        for label in [
-            "LLM OPERATIONS",
-            "STATUS",
-            "RATE",
-            "DIAG",
-            "generation",
-            "GPU",
-            "memory",
-            "paging",
-        ] {
-            assert!(rendered.contains(label), "missing compact label: {label}");
-        }
-        assert!(!rendered.contains("Terminal too small"));
-    }
-
-    #[test]
-    fn overview_remains_useful_at_a_classic_eighty_column_size() {
-        let rendered = render_app(&test_app(0), 80, 24);
-        for label in ["LLM OPERATIONS", "generation", "GPU", "memory", "paging"] {
-            assert!(rendered.contains(label), "missing 80-column label: {label}");
-        }
-        assert!(!rendered.contains("This dashboard needs"));
-    }
-
-    #[test]
-    fn process_table_adapts_to_medium_terminals() {
-        let rendered = render_app(&test_app(1), 100, 40);
-        for label in ["PROCESS MONITOR", "THROUGHPUT", "PAGEIN/s", "STATE"] {
-            assert!(rendered.contains(label), "missing process label: {label}");
-        }
-        assert!(!rendered.contains("MEM%"));
-    }
-
-    #[test]
-    fn process_view_remains_scannable_at_eighty_columns() {
-        let rendered = render_app(&test_app(1), 80, 24);
-        for label in ["WORKLOAD SUMMARY", "RATE", "LLM PROCESSES", "PROCESS"] {
-            assert!(
-                rendered.contains(label),
-                "missing narrow process label: {label}"
-            );
-        }
-        assert!(!rendered.contains("This dashboard needs"));
-    }
-
-    #[test]
-    fn help_remains_readable_at_eighty_columns() {
-        let mut app = test_app(0);
-        app.help = true;
-        let rendered = render_app(&app, 80, 24);
-        for label in [
-            "CONTROLS",
-            "next / previous chart",
-            "change refresh interval",
-            "newest / oldest prompt",
-        ] {
-            assert!(
-                rendered.contains(label),
-                "missing narrow help label: {label}"
-            );
-        }
-    }
-
-    #[test]
-    fn llm_top_sort_cycles_in_a_predictable_order() {
-        assert_eq!(TopSort::Rss.next(), TopSort::Cpu);
-        assert_eq!(TopSort::Cpu.next(), TopSort::Pid);
-        assert_eq!(TopSort::Pid.next(), TopSort::Name);
-        assert_eq!(TopSort::Name.next(), TopSort::Rss);
-    }
-
-    #[test]
-    fn parses_detected_llm_processes_for_top_view() {
-        let snapshot = parse_processes(
-            "123 15728640 12.5 48.5 Rs 20 /usr/local/bin/omlx-server --port 8080\n\
-             456 2048 0.1 0.0 S 0 /usr/bin/other-worker --task test",
-        );
-        let processes = snapshot.llm_processes;
-        assert_eq!(processes.len(), 1);
-        assert_eq!(snapshot.largest_consumer.as_deref(), Some("omlx-server"));
-        assert_eq!(snapshot.provider.as_deref(), Some("oMLX"));
-        assert_eq!(processes[0].pid, 123);
-        assert_eq!(processes[0].name, "omlx-server");
-        assert_eq!(processes[0].cpu, 12.5);
-        assert_eq!(processes[0].memory_percent, Some(48.5));
-        assert_eq!(processes[0].state, "Rs");
-        assert_eq!(processes[0].pageins, Some(20));
-        assert!(processes[0].command.contains("--port 8080"));
-    }
-
-    #[test]
-    fn detects_runtime_entrypoints_with_consistent_provider_names() {
-        for (name, command, provider) in [
-            ("Python", "python -m mlx_lm.server --model test", "mlx-lm"),
-            ("mlx_lm.server", "mlx_lm.server --model test", "mlx-lm"),
-            ("ollama", "/usr/local/bin/ollama serve", "Ollama"),
-            ("llama-server", "llama-server --model test", "llama.cpp"),
-            ("Python", "python KoboldCpp.py --model test", "KoboldCpp"),
-            (
-                "LM",
-                "Studio /Applications/LM Studio.app/Contents/MacOS/LM Studio",
-                "LM Studio",
-            ),
-            ("llmster", "llmster", "LM Studio"),
-            (
-                "llama-server",
-                "/home/user/.lmstudio/engines/llama-server",
-                "LM Studio",
-            ),
-            ("local-ai", "local-ai run", "LocalAI"),
-        ] {
-            assert!(is_llm_process(name, command), "{command}");
-            assert_eq!(
-                process_provider(name, command).as_deref(),
-                Some(provider),
-                "{command}"
-            );
-            let snapshot = parse_processes(&format!("42 1024 1.0 0.1 S 0 {name} {command}"));
-            assert_eq!(snapshot.provider.as_deref(), Some(provider), "{command}");
-        }
-        assert!(!is_llm_process("python", "python client.py --model ollama"));
-        assert!(!is_llm_process("mlxtop", "mlxtop --help"));
-    }
-
-    #[test]
-    fn detects_bionic_and_lmstudio_helpers_with_resource_totals() {
-        let snapshot = parse_processes(
-            "101 4096 12.5 0.1 S 0 Bionic /Applications/Bionic.app/Contents/MacOS/Bionic\n\
-             102 2048 2.0 0.1 S 0 lmlink-connector /Users/test/.lmstudio/extensions/frameworks/lmlink-connector-test/lmlink-connector\n\
-             103 1024 0.5 0.1 S 0 node /Users/test/.lmstudio/.internal/utils/node script.js --lmstudio-window-key=test",
-        );
-        assert_eq!(snapshot.provider.as_deref(), Some("LM Studio"));
-        assert_eq!(snapshot.llm_count, 3);
-        assert_eq!(snapshot.llm_rss, 7168 * 1024);
-        assert_eq!(snapshot.llm_cpu, 15.0);
-        assert_eq!(snapshot.llm_processes.len(), 3);
-        assert_eq!(snapshot.top_llm.as_ref().unwrap().pid, 101);
-
-        // The app is enough to detect LM Studio even without its helpers.
-        for (name, command) in [
-            ("Bionic", "/Applications/Bionic.app/Contents/MacOS/Bionic"),
-            (
-                "Bionic",
-                "/Users/test/Applications/Bionic.app/Contents/MacOS/Bionic --some-option",
-            ),
-        ] {
-            let snapshot = parse_processes(&format!("101 4096 12.5 0.1 S 0 {name} {command}"));
-            assert_eq!(snapshot.provider.as_deref(), Some("LM Studio"));
-            assert_eq!(snapshot.llm_count, 1);
-        }
-    }
-
-    #[test]
-    fn bionic_detection_does_not_match_unrelated_names_or_arguments() {
-        for (name, command) in [
-            ("bionic", "/usr/local/bin/bionic"),
-            ("python", "python bionic.py"),
-            ("cat", "cat /Applications/Bionic.app/Contents/MacOS/Bionic"),
-            (
-                "Bionic-tools",
-                "/Applications/Bionic.app/Contents/MacOS/Bionic-tools",
-            ),
-        ] {
-            assert!(!is_llm_process(name, command), "{command}");
-        }
-    }
-
-    #[test]
-    fn process_pagein_rates_are_pid_scoped() {
-        let mut current = vec![LlmProcess {
-            pid: 123,
-            name: "omlx-server".into(),
-            command: "omlx-server".into(),
-            rss: 1,
-            cpu: 0.0,
-            memory_percent: Some(1.0),
-            state: "S".into(),
-            pageins: Some(30),
-            pagein_rate: None,
-        }];
-        let previous = vec![LlmProcess {
-            pid: 123,
-            name: "omlx-server".into(),
-            command: "omlx-server".into(),
-            rss: 1,
-            cpu: 0.0,
-            memory_percent: Some(1.0),
-            state: "S".into(),
-            pageins: Some(10),
-            pagein_rate: None,
-        }];
-        annotate_process_pagein_rates(&mut current, &previous, Duration::from_secs(2));
-        assert_eq!(current[0].pagein_rate, Some(10.0));
-    }
-
-    #[test]
-    fn command_text_drains_large_child_output() {
-        let output = command_text(
-            "/bin/sh",
-            &[
-                "-c",
-                "i=0; while [ $i -lt 2048 ]; do printf 0123456789012345678901234567890123456789012345678901234567890123; i=$((i + 1)); done",
-            ],
-        )
-        .expect("large child output should be collected");
-        assert_eq!(output.len(), 2048 * 64);
-    }
-
-    #[test]
-    fn composite_chart_normalizes_rate_indicators() {
-        assert_eq!(normalize_chart_value(ChartMetric::Memory, 72), 72);
-        assert_eq!(normalize_chart_value(ChartMetric::Gpu, 120), 100);
-        assert_eq!(normalize_chart_value(ChartMetric::Cache, 120), 100);
-        assert_eq!(normalize_chart_value(ChartMetric::Swap, 0), 0);
-        // Log scale: small bursts stay visible, warn lands mid-plot, the
-        // critical rate fills the axis.
-        assert_eq!(
-            normalize_chart_value(ChartMetric::Swap, 57 * 1024 + 640),
-            12
-        );
-        assert_eq!(normalize_chart_value(ChartMetric::Swap, MIB), 51);
-        assert_eq!(normalize_chart_value(ChartMetric::Swap, 8 * MIB), 88);
-        assert_eq!(
-            normalize_chart_value(ChartMetric::Swap, SWAP_CHART_SCALE),
-            100
-        );
-        assert_eq!(normalize_chart_value(ChartMetric::Swap, 64 * MIB), 100);
-    }
-
-    #[test]
-    fn generation_chart_uses_a_stable_scale() {
-        let history = VecDeque::from([
-            ChartPoint::new(Some(239), Tone::Cyan),
-            ChartPoint::new(Some(302), Tone::Cyan),
-        ]);
-        assert_eq!(
-            chart_scale_max(&history, ChartMetric::Generation),
-            GENERATION_CHART_SCALE_MAX
-        );
-        assert_eq!(
-            chart_display_value(ChartMetric::Generation, 175, GENERATION_CHART_SCALE_MAX),
-            17
-        );
-        assert_eq!(chart_stat_label(ChartMetric::Generation, Some(239)), "23.9");
-        assert_eq!(
-            chart_scale_max(&history, ChartMetric::Prefill),
-            PREFILL_CHART_SCALE_MAX
-        );
-        assert_eq!(
-            chart_display_value(ChartMetric::Prefill, 1000, PREFILL_CHART_SCALE_MAX),
-            50
-        );
-        assert_eq!(chart_stat_label(ChartMetric::Prefill, Some(1098)), "109.8");
-        assert_eq!(chart_stat_label(ChartMetric::Cache, Some(67)), "67%");
-    }
-
-    #[test]
-    fn inactive_rate_chart_identifies_the_other_active_phase() {
-        let prefilling = Sample {
-            llm_status: "prefilling".into(),
-            ..Sample::default()
-        };
-        assert_eq!(
-            chart_inactive_rate_label(ChartMetric::Generation, &prefilling),
-            "prefill active"
-        );
-        assert_eq!(
-            chart_inactive_rate_label(ChartMetric::Prefill, &prefilling),
-            "active"
-        );
-
-        let generating = Sample {
-            llm_status: "generating".into(),
-            ..Sample::default()
-        };
-        assert_eq!(
-            chart_inactive_rate_label(ChartMetric::Prefill, &generating),
-            "decode active"
-        );
-    }
-
-    #[test]
-    fn stepped_chart_uses_thin_trace_bars() {
-        assert_eq!(trace_point(0, 4), Some((3, '━')));
-        assert_eq!(trace_point(1, 4), Some((3, '━')));
-        assert_eq!(trace_point(50, 4), Some((2, '━')));
-        assert_eq!(trace_point(100, 4), Some((0, '━')));
-        assert_eq!(trace_point(100, 0), None);
-    }
-
-    #[test]
-    fn stepped_chart_connectors_follow_the_level_being_crossed() {
-        let mut cells = vec![
-            vec![
-                TraceCell {
-                    glyph: ' ',
-                    tone: Tone::Muted,
-                };
-                3
-            ];
-            7
-        ];
-        trace_connector(
-            &mut cells,
-            1,
-            0,
-            6,
-            TraceStyle {
-                metric: ChartMetric::Memory,
-                previous_tone: Tone::Red,
-                tone: Tone::Green,
-                thresholds: defaults(),
-            },
-        );
-        assert_eq!(cells[0][1].glyph, '┓');
-        assert_eq!(cells[0][1].tone, Tone::Red);
-        assert_eq!(cells[1][1].glyph, '┃');
-        assert_eq!(cells[1][1].tone, Tone::Yellow);
-        assert_eq!(cells[2][1].tone, Tone::Green);
-        assert_eq!(cells[6][1].glyph, '┗');
-        assert_eq!(cells[6][1].tone, Tone::Green);
-
-        trace_connector(
-            &mut cells,
-            2,
-            6,
-            0,
-            TraceStyle {
-                metric: ChartMetric::Memory,
-                previous_tone: Tone::Green,
-                tone: Tone::Yellow,
-                thresholds: defaults(),
-            },
-        );
-        assert_eq!(cells[0][2].glyph, '┏');
-        assert_eq!(cells[0][2].tone, Tone::Yellow);
-        assert_eq!(cells[1][2].tone, Tone::Yellow);
-        assert_eq!(cells[2][2].tone, Tone::Green);
-        assert_eq!(cells[6][2].glyph, '┛');
-        assert_eq!(cells[6][2].tone, Tone::Green);
-    }
-
-    #[test]
-    fn chart_columns_keep_samples_in_a_scrolling_ring_buffer() {
-        let history = VecDeque::from([
-            ChartPoint::new(Some(10), Tone::Green),
-            ChartPoint::new(Some(20), Tone::Yellow),
-        ]);
-        let columns = chart_columns(&history, 6);
-        assert_eq!(
-            columns.iter().map(|point| point.value).collect::<Vec<_>>(),
-            vec![None, None, None, None, Some(10), Some(20)]
-        );
-        assert_eq!(columns[4].tone, Tone::Green);
-        assert_eq!(columns[5].tone, Tone::Yellow);
-    }
-
-    #[test]
-    fn chart_columns_keep_the_visible_tail_and_its_captured_tones() {
-        let history = VecDeque::from([
-            ChartPoint::new(Some(10), Tone::Green),
-            ChartPoint::new(Some(20), Tone::Yellow),
-            ChartPoint::new(Some(30), Tone::Red),
-        ]);
-        let columns = chart_columns(&history, 2);
-
-        assert_eq!(
-            columns.iter().map(|point| point.value).collect::<Vec<_>>(),
-            vec![Some(20), Some(30)]
-        );
-        assert_eq!(columns[0].tone, Tone::Yellow);
-        assert_eq!(columns[1].tone, Tone::Red);
-    }
-
-    #[test]
-    fn chart_columns_keep_gaps_disconnected_when_scrolled() {
-        let history = VecDeque::from([
-            ChartPoint::new(Some(10), Tone::Green),
-            ChartPoint::new(None, Tone::Muted),
-            ChartPoint::new(Some(30), Tone::Green),
-        ]);
-        let columns = chart_columns(&history, 4);
-        assert_eq!(
-            columns.iter().map(|point| point.value).collect::<Vec<_>>(),
-            vec![None, Some(10), None, Some(30)]
-        );
-        assert!(columns[2].break_before);
-        assert!(!columns[3].break_before);
-    }
-
-    #[test]
-    fn chart_columns_render_all_missing_data_without_dividing_by_zero() {
-        let history = VecDeque::from([
-            ChartPoint::new(None, Tone::Muted),
-            ChartPoint::new(None, Tone::Muted),
-            ChartPoint::new(None, Tone::Muted),
-            ChartPoint::new(None, Tone::Muted),
-            ChartPoint::new(None, Tone::Muted),
-        ]);
-        let columns = chart_columns(&history, 3);
-        assert_eq!(columns.len(), 3);
-        assert!(columns.iter().all(|point| point.value.is_none()));
-    }
-
-    #[test]
-    fn bar_chart_keeps_each_sample_tone_independent() {
-        let history = VecDeque::from([
-            ChartPoint::new(Some(69), ChartMetric::Memory.tone(69, defaults())),
-            ChartPoint::new(Some(85), ChartMetric::Memory.tone(85, defaults())),
-        ]);
-        assert_eq!(history[0].tone, Tone::Green);
-        assert_eq!(history[1].tone, Tone::Red);
-    }
-
-    #[test]
-    fn chart_smoothing_uses_dynamic_visual_resolution() {
-        let history = VecDeque::from([
-            ChartPoint::new(Some(100), Tone::Red),
-            ChartPoint::new(Some(99), Tone::Red),
-            ChartPoint::new(Some(98), Tone::Red),
-            ChartPoint::new(Some(80), Tone::Yellow),
-        ]);
-        assert_eq!(
-            chart_plot_values(&history, ChartMetric::Gpu, 10),
-            vec![Some(100), Some(100), Some(100), Some(80)]
-        );
-        assert_eq!(
-            chart_plot_values(&history, ChartMetric::Gpu, 20),
-            vec![Some(100), Some(100), Some(98), Some(80)]
-        );
-
-        let generation_history = VecDeque::from([
-            ChartPoint::new(Some(300), Tone::Cyan),
-            ChartPoint::new(Some(299), Tone::Cyan),
-            ChartPoint::new(Some(250), Tone::Cyan),
-        ]);
-        assert_eq!(
-            chart_plot_values(&generation_history, ChartMetric::Generation, 10),
-            vec![Some(300), Some(300), Some(250)]
-        );
-
-        let burst_history = VecDeque::from([
-            ChartPoint::new(Some(0), Tone::Green),
-            ChartPoint::new(Some(100), Tone::Red),
-            ChartPoint::new(Some(0), Tone::Green),
-            ChartPoint::new(Some(100), Tone::Red),
-        ]);
-        assert_eq!(
-            chart_plot_values(&burst_history, ChartMetric::Gpu, 10),
-            vec![Some(0), Some(100), Some(0), Some(100)]
-        );
-    }
-
-    #[test]
-    fn chart_smoothing_resets_after_missing_data() {
-        let history = VecDeque::from([
-            ChartPoint::new(Some(100), Tone::Red),
-            ChartPoint::new(None, Tone::Muted),
-            ChartPoint::new(Some(99), Tone::Red),
-        ]);
-
-        assert_eq!(
-            chart_plot_values(&history, ChartMetric::Gpu, 10),
-            vec![Some(100), None, Some(99)]
-        );
-    }
-
-    #[test]
-    fn rates_use_fractional_elapsed_time() {
-        assert_eq!(rate_bytes(100, 4096, Duration::from_millis(1500)), 273_067);
-        assert_eq!(signed_rate_bytes(150, 100, Duration::from_millis(2000)), 25);
-        assert_eq!(
-            signed_rate_bytes(100, 150, Duration::from_millis(2000)),
-            -25
-        );
-    }
-
-    #[test]
-    fn severity_thresholds_have_a_recovery_band() {
-        assert!(!threshold_with_hysteresis(
-            69,
-            false,
-            70,
-            defaults().gpu_warn_exit
-        ));
-        assert!(threshold_with_hysteresis(
-            75,
-            false,
-            70,
-            defaults().gpu_warn_exit
-        ));
-        assert!(threshold_with_hysteresis(
-            71,
-            true,
-            80,
-            defaults().gpu_warn_exit
-        ));
-        assert!(!threshold_with_hysteresis(
-            69,
-            true,
-            80,
-            defaults().gpu_warn_exit
-        ));
-    }
-
-    #[test]
-    fn journal_filters_use_structured_event_kinds() {
-        assert!(JournalFilter::Llm.matches(EventKind::Llm));
-        assert!(JournalFilter::Llm.matches(EventKind::Queue));
-        assert!(!JournalFilter::Llm.matches(EventKind::Gpu));
-        assert!(JournalFilter::Paging.matches(EventKind::Paging));
-    }
-
-    #[test]
-    fn telemetry_source_and_loopback_policy_are_explicit() {
-        assert_eq!(TelemetrySource::Live.label(), "live API");
-        assert_eq!(TelemetrySource::Log.label(), "completion log");
-        assert!(is_loopback_host("127.0.0.1"));
-        assert!(is_loopback_host("[::1]"));
-        assert!(!is_loopback_host("192.168.1.10"));
-    }
-
-    #[test]
-    fn classification_reports_unknown_data_and_actionable_compression() {
-        let mut sample = Sample {
-            rate_ready: true,
-            total_memory: 32 * 1024 * 1024 * 1024,
-            availability: Some(50),
-            pressure: "GREEN".into(),
-            vm_available: true,
-            swap_available: true,
-            thermal: "no warning".into(),
-            llm_count: 1,
-            ..Sample::default()
-        };
-        classify(&mut sample, None, defaults());
-        assert_eq!(sample.impact, "LLM READY");
-
-        sample.vm_available = false;
-        classify(&mut sample, None, defaults());
-        assert_eq!(sample.impact, "DATA LIMITED");
-        assert_eq!(sample.guidance_badge, "CHECK");
-
-        sample.vm_available = true;
-        sample.compress = COMPRESSION_WARN_RATE;
-        classify(&mut sample, None, defaults());
-        assert_eq!(sample.impact, "COMPRESSION ACTIVE");
-        assert_eq!(sample.guidance_badge, "WATCH");
-    }
-
-    #[test]
-    fn parses_llm_completion_stats() {
-        let stats = parse_llm_completion_line(
-            "2026-08-25 03:00:00 Chat completion: model=oQ4e-mtp, 128 tokens in 4.0s (32.0 tok/s), prompt: 4096, finish_reason=stop, max_tokens=512",
-        )
-        .expect("completion should parse");
-        assert_eq!(stats.model.as_deref(), Some("oQ4e-mtp"));
-        assert_eq!(stats.output_tokens, Some(128));
-        assert_eq!(stats.prompt_tokens, Some(4096));
-        assert_eq!(stats.tokens_per_second, Some(32.0));
-    }
-
-    #[test]
-    fn parses_omlx_responses_api_stats_without_prompt_count() {
-        let stats = parse_llm_completion_line(
-            "2026-08-25 01:08:35,903 - omlx.server - INFO - [-] - Responses API: model=Qwen3.8-27B-oQ4e-mtp, 8407 tokens in 449.88s (18.7 tok/s)",
-        )
-        .expect("oMLX completion should parse");
-        assert_eq!(stats.model.as_deref(), Some("Qwen3.8-27B-oQ4e-mtp"));
-        assert_eq!(stats.output_tokens, Some(8407));
-        assert_eq!(stats.prompt_tokens, None);
-        assert_eq!(stats.tokens_per_second, Some(18.7));
-    }
-
-    #[test]
-    fn parses_omlx_live_stats_and_active_request() {
-        let health: Value = serde_json::from_str(
-            r#"{"status":"healthy","default_model":"Qwen3.8-27B-oQ4e-mtp","engine_pool":{"final_ceiling":36507222016,"current_model_memory":16852732434}}"#,
-        )
-        .unwrap();
-        let stats: Value = serde_json::from_str(
-            r#"{
-                "avg_generation_tps": 30.7,
-                "avg_prefill_tps": 132.9,
-                "cache_efficiency": 62.1,
-                "engines": {"mlx-lm": {"version": "0.31.3"}},
-                "active_models": {
-                    "model_memory_used": 20990983024,
-                    "model_memory_max": 36507222016,
-                    "models": [{
-                        "id": "Qwen3.8-27B-oQ4e-mtp",
-                        "active_requests": 1,
-                        "waiting_requests": 0,
-                        "generating": [{"generated_tokens": 3849,"prompt_tokens": 12632,"tokens_per_second": 29.4}]
-                    }]
-                },
-                "runtime_cache": {
-                    "hot_cache_size_bytes": 388562944,
-                    "hot_cache_max_bytes": 536870912,
-                    "models": [{"cache_rates":{"cumulative":{"prefix_hit_rate":0.5471,"ssd_hot_rate":0.2772}}}]
-                }
-            }"#,
-        )
-        .unwrap();
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-        assert_eq!(telemetry.source, TelemetrySource::Live);
-        assert_eq!(telemetry.provider.as_deref(), Some("oMLX"));
-        assert_eq!(telemetry.status.as_deref(), Some("generating"));
-        assert_eq!(telemetry.model.as_deref(), Some("Qwen3.8-27B-oQ4e-mtp"));
-        assert_eq!(telemetry.generation_tps, Some(29.4));
-        assert!(telemetry.generation_tps_live);
-        assert_eq!(telemetry.prefill_tps, Some(132.9));
-        assert!(!telemetry.prefill_tps_live);
-        assert_eq!(telemetry.prompt_tokens, Some(12632));
-        assert_eq!(telemetry.prefix_hit_rate, Some(54.71));
-        assert_eq!(telemetry.mlx.version.as_deref(), Some("0.31.3"));
-    }
-
-    #[test]
-    fn parses_omlx_prefill_progress_speed_as_live_rate() {
-        let health = json!({
-            "status": "healthy",
-            "default_model": "model"
-        });
-        let stats = json!({
-            "avg_generation_tps": 23.5,
-            "avg_prefill_tps": 14.1,
-            "active_models": {
-                "models": [{
-                    "id": "model",
-                    "active_requests": 1,
-                    "waiting_requests": 0,
-                    "prefilling": [{
-                        "processed": 2048,
-                        "total": 32768,
-                        "speed": 14.1,
-                        "prompt_tokens": 32768
-                    }],
-                    "generating": []
-                }]
-            }
-        });
-
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-
-        assert_eq!(telemetry.status.as_deref(), Some("prefilling"));
-        assert_eq!(telemetry.prefill_tps, Some(14.1));
-        assert!(telemetry.prefill_tps_live);
-        assert_eq!(telemetry.prompt_tokens, Some(32768));
-    }
-
-    #[test]
-    fn rate_charts_skip_aggregate_and_log_fallbacks() {
-        let sample = Sample {
-            llm_source: TelemetrySource::Live,
-            llm_status: "prefilling".into(),
-            llm_generation_tps: Some(23.5),
-            llm_prefill_tps: Some(14.1),
-            ..Sample::default()
-        };
-        assert_eq!(chart_rate_value(&sample, ChartMetric::Generation), None);
-        assert_eq!(chart_rate_value(&sample, ChartMetric::Prefill), None);
-
-        let active = Sample {
-            llm_source: TelemetrySource::Live,
-            llm_generation_tps: Some(23.5),
-            llm_generation_tps_live: true,
-            ..Sample::default()
-        };
-        assert_eq!(
-            chart_rate_value(&active, ChartMetric::Generation),
-            Some(235)
-        );
-
-        let log_sample = Sample {
-            llm_source: TelemetrySource::Log,
-            llm_generation_tps: Some(23.5),
-            ..Sample::default()
-        };
-        assert_eq!(chart_rate_value(&log_sample, ChartMetric::Generation), None);
-    }
-
-    #[test]
-    fn cache_chart_uses_interval_counter_deltas() {
-        let first = LlmTelemetry {
-            total_prompt_tokens: Some(100),
-            total_cached_tokens: Some(20),
-            ..LlmTelemetry::default()
-        };
-        let second = LlmTelemetry {
-            total_prompt_tokens: Some(150),
-            total_cached_tokens: Some(50),
-            ..LlmTelemetry::default()
-        };
-        let mut previous = None;
-
-        assert_eq!(
-            cache_interval_efficiency(&mut previous, Some(&first), false),
-            None
-        );
-        assert_eq!(
-            cache_interval_efficiency(&mut previous, Some(&second), false),
-            Some(60.0)
-        );
-        assert_eq!(
-            cache_interval_efficiency(&mut previous, Some(&second), false),
-            None
-        );
-    }
-
-    #[test]
-    fn correlation_explains_a_generation_drop_with_contemporaneous_signals() {
-        let mut engine = CorrelationEngine::default();
-        let baseline = Sample {
-            llm_provider: "oMLX".into(),
-            llm_model: "model".into(),
-            llm_generation_tps: Some(30.0),
-            llm_generation_tps_live: true,
-            llm_prompt_tokens: Some(20_000),
-            llm_output_tokens: Some(1_000),
-            llm_active_requests: Some(1),
-            gpu_util: Some(99),
-            gpu_in_use: Some(96),
-            gpu_alloc: Some(100),
-            ..Sample::default()
-        };
-        engine.observe(&baseline, defaults());
-
-        let current = Sample {
-            llm_provider: "oMLX".into(),
-            llm_model: "model".into(),
-            llm_generation_tps: Some(25.0),
-            llm_generation_tps_live: true,
-            llm_prompt_tokens: Some(30_000),
-            llm_output_tokens: Some(3_000),
-            llm_active_requests: Some(1),
-            gpu_util: Some(99),
-            gpu_in_use: Some(96),
-            gpu_alloc: Some(100),
-            ..Sample::default()
-        };
-        let insight = engine.observe(&current, defaults());
-
-        assert_eq!(insight.direction, ThroughputDirection::Down);
-        assert_eq!(insight.cause, CorrelationCause::ContextGrowth);
-        assert!(insight.summary.contains("GEN ↓16.7%"));
-        assert!(insight.summary.contains("GPU 99% busy"));
-        assert!(insight.summary.contains("context"));
-        assert!(insight.details.contains("Metal MEM 96%"));
-        assert_eq!(
-            insight.event_key,
-            Some(CorrelationKey {
-                direction: ThroughputDirection::Down,
-                cause: CorrelationCause::ContextGrowth,
-            })
-        );
-    }
-
-    #[test]
-    fn correlation_is_honest_when_no_system_signal_moved_with_rate() {
-        let mut engine = CorrelationEngine::default();
-        engine.observe(
-            &Sample {
-                llm_provider: "oMLX".into(),
-                llm_model: "model".into(),
-                llm_generation_tps: Some(30.0),
-                llm_generation_tps_live: true,
-                ..Sample::default()
-            },
-            defaults(),
-        );
-        let insight = engine.observe(
-            &Sample {
-                llm_provider: "oMLX".into(),
-                llm_model: "model".into(),
-                llm_generation_tps: Some(25.0),
-                llm_generation_tps_live: true,
-                ..Sample::default()
-            },
-            defaults(),
-        );
-
-        assert_eq!(insight.cause, CorrelationCause::Runtime);
-        assert_eq!(insight.confidence_label(), "low");
-        assert!(insight.summary.contains("no matching system signal"));
-        assert!(insight.details.contains("workload/runtime change"));
-    }
-
-    #[test]
-    fn provider_telemetry_counts_as_an_observed_llm_without_a_matching_process() {
-        let sample = Sample {
-            llm_provider: "oMLX".into(),
-            llm_model: "model".into(),
-            llm_source: TelemetrySource::Live,
-            llm_generation_tps: Some(25.0),
-            llm_generation_tps_live: true,
-            ..Sample::default()
-        };
-
-        assert!(llm_is_observed(&sample));
-    }
-
-    #[test]
-    fn parses_omlx_waiting_prompt_tokens() {
-        let health: Value =
-            serde_json::from_str(r#"{"status":"healthy","default_model":"Qwen3.8-27B-oQ4e-mtp"}"#)
-                .unwrap();
-        let stats = json!({
-            "active_models": {"models": [{
-                "id": "Qwen3.8-27B-oQ4e-mtp",
-                "active_requests": 0,
-                "waiting_requests": 1,
-                "waiting": [{"prompt_tokens": 12632}]
-            }]}
-        });
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-        assert_eq!(telemetry.status.as_deref(), Some("waiting"));
-        assert_eq!(telemetry.prompt_tokens, Some(12632));
-    }
-
-    #[test]
-    fn omlx_headline_values_cover_every_loaded_model() {
-        let health = json!({"status": "healthy", "default_model": "a"});
-        let stats = json!({
-            "avg_generation_tps": 31.6,
-            "active_models": {
-                "total_active_requests": 3,
-                "total_waiting_requests": 2,
-                "models": [
-                    {"id": "idle", "active_requests": 0, "waiting_requests": 0},
-                    {"id": "a", "active_requests": 1, "waiting_requests": 2,
-                     "waiting": [{"request_id": "w1", "prompt_tokens": 0}],
-                     "generating": [{"request_id": "1", "generated_tokens": 40,
-                                     "prompt_tokens": 900, "tokens_per_second": 20.0}]},
-                    {"id": "b", "active_requests": 2, "waiting_requests": 0,
-                     "generating": [{"request_id": "2", "generated_tokens": 10,
-                                     "prompt_tokens": 300, "tokens_per_second": 8.5}],
-                     "prefilling": [{"request_id": "3", "speed": 150.0, "processed": 64,
-                                     "total": 2048}]}
-                ]
-            },
-            "runtime_cache": {"models": [
-                {"id": "a", "cache_rates": {"cumulative": {"prefix_hit_rate": 0.9}}}
-            ]}
-        });
-
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-
-        assert_eq!(telemetry.model.as_deref(), Some("2 models · a"));
-        assert_eq!(telemetry.status.as_deref(), Some("prefilling"));
-        assert_eq!(telemetry.active_requests, Some(3));
-        assert_eq!(telemetry.waiting_requests, Some(2));
-        assert_eq!(telemetry.generation_tps, Some(28.5));
-        assert!(telemetry.generation_tps_live);
-        assert_eq!(telemetry.prefill_tps, Some(150.0));
-        assert_eq!(telemetry.output_tokens, Some(50));
-        // Three requests are in flight, so no single prompt size or cache
-        // reuse rate describes the server.
-        assert_eq!(telemetry.prompt_tokens, None);
-        assert_eq!(telemetry.prefix_hit_rate, None);
-    }
-
-    #[test]
-    fn omlx_queue_totals_fall_back_to_complete_model_counts() {
-        let health = json!({"status": "healthy"});
-        let mut stats = json!({"active_models": {"models": [
-            {"id": "a", "active_requests": 0, "waiting_requests": 1},
-            {"id": "b", "active_requests": 2, "waiting_requests": 0}
-        ]}});
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-        assert_eq!(telemetry.active_requests, Some(2));
-        assert_eq!(telemetry.waiting_requests, Some(1));
-        assert_eq!(telemetry.status.as_deref(), Some("waiting"));
-
-        stats["active_models"]["models"][0]["is_loading"] = json!(true);
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-        assert_eq!(telemetry.status.as_deref(), Some("loading"));
-        stats["active_models"]["models"][1]["generating"] =
-            json!([{"request_id": "1", "tokens_per_second": 5.0}]);
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-        assert_eq!(telemetry.status.as_deref(), Some("generating"));
-
-        stats["active_models"]["models"][1]
-            .as_object_mut()
-            .unwrap()
-            .remove("waiting_requests");
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-        assert_eq!(telemetry.waiting_requests, None);
-    }
-
-    #[test]
-    fn omlx_concurrent_rates_are_live_only_when_every_request_reports() {
-        let health = json!({"status": "healthy"});
-        let stats = json!({
-            "avg_generation_tps": 31.6,
-            "active_models": {"models": [{"id": "a", "active_requests": 2,
-                "waiting_requests": 0,
-                "generating": [
-                    {"request_id": "1", "generated_tokens": 5, "prompt_tokens": 10,
-                     "tokens_per_second": 20.0},
-                    {"request_id": "2", "prompt_tokens": 12}
-                ]}]}
-        });
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-        assert_eq!(telemetry.model.as_deref(), Some("a"));
-        assert_eq!(telemetry.generation_tps, Some(31.6));
-        assert!(!telemetry.generation_tps_live);
-        assert_eq!(telemetry.output_tokens, None);
-    }
-
-    #[test]
-    fn omlx_cluster_rates_come_from_rank_zero_requests() {
-        let health = json!({"status": "healthy"});
-        let running = |id: &str, decode: f64| {
-            json!({"status": "running", "request_id": id, "prompt_tokens": 400,
-                "completion_tokens": 30, "decode_tps": decode,
-                "prefill_progress": {"active": false, "speed": 0.0}})
-        };
-        let stats = json!({"active_models": {"models": [{
-            "id": "dist", "active_requests": 2, "waiting_requests": 0,
-            "prefilling": [],
-            "generating": [{"request_id": "rank0", "generated_tokens": 30,
-                            "prompt_tokens": 400, "tokens_per_second": 11.0}],
-            "cluster": {"live": {"age_seconds": 0.4, "stale": false, "metrics": {
-                "active_requests": 2,
-                "active_request_metrics": [running("r1", 9.0), running("r2", 11.0)],
-                "last_request": running("r2", 11.0)}}}
-        }]}});
-
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-
-        assert_eq!(telemetry.generation_tps, Some(20.0));
-        assert!(telemetry.generation_tps_live);
-        assert_eq!(telemetry.output_tokens, Some(60));
-        assert_eq!(telemetry.prompt_tokens, None);
-        let ids: Vec<_> = telemetry.requests.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, ["r1", "r2"]);
-    }
-
-    #[test]
-    fn retained_omlx_rates_are_not_marked_live_when_idle() {
-        let health: Value =
-            serde_json::from_str(r#"{"status":"healthy","default_model":"Qwen3.8-27B-oQ4e-mtp"}"#)
-                .unwrap();
-        let stats = json!({
-            "avg_generation_tps": 31.6,
-            "avg_prefill_tps": 133.2,
-            "active_models": {"models": [{
-                "id": "Qwen3.8-27B-oQ4e-mtp",
-                "active_requests": 0,
-                "waiting_requests": 0,
-                "generating": []
-            }]}
-        });
-        let telemetry = parse_omlx_telemetry(&health, Some(&stats));
-
-        assert_eq!(telemetry.status.as_deref(), Some("idle"));
-        assert_eq!(telemetry.generation_tps, Some(31.6));
-        assert_eq!(telemetry.prefill_tps, Some(133.2));
-        assert!(!telemetry.generation_tps_live);
-        assert!(!telemetry.prefill_tps_live);
-
-        let sample = Sample {
-            llm_source: TelemetrySource::Live,
-            llm_generation_tps: telemetry.generation_tps,
-            llm_prefill_tps: telemetry.prefill_tps,
-            ..Sample::default()
-        };
-        assert_eq!(llm_generation_rate_label(&sample), "AVG GEN 31.6 tok/s");
-        assert_eq!(llm_prefill_rate_label(&sample), "AVG PREFILL 133.2 tok/s");
-    }
-
-    #[test]
-    fn log_rates_are_labeled_as_last_results() {
-        let sample = Sample {
-            llm_source: TelemetrySource::Log,
-            llm_generation_tps: Some(28.5),
-            ..Sample::default()
-        };
-
-        assert_eq!(llm_generation_rate_label(&sample), "LAST GEN 28.5 tok/s");
-    }
-
-    #[test]
-    fn correlation_ignores_retained_idle_rates() {
-        let mut engine = CorrelationEngine::default();
-        engine.observe(
-            &Sample {
-                llm_provider: "oMLX".into(),
-                llm_model: "model".into(),
-                llm_generation_tps: Some(30.0),
-                ..Sample::default()
-            },
-            defaults(),
-        );
-        let insight = engine.observe(
-            &Sample {
-                llm_provider: "oMLX".into(),
-                llm_model: "model".into(),
-                llm_generation_tps: Some(25.0),
-                ..Sample::default()
-            },
-            defaults(),
-        );
-
-        assert_eq!(insight.direction, ThroughputDirection::Unknown);
-        assert_eq!(insight.cause, CorrelationCause::None);
-        assert!(insight.summary.is_empty());
-    }
-
-    #[test]
-    fn parses_mlx_allocator_and_device_metrics_without_inference() {
-        let health = json!({
-            "status": "healthy",
-            "default_model": "Qwen3.8-27B-oQ4e-mtp",
-            "mlx_version": "0.29.3",
-            "mlx_memory": {"active_bytes": 4_000, "peak_bytes": 8_000}
-        });
-        let stats = json!({"mlx": {"cache_bytes": 2_000}});
-        let telemetry = parse_mlx_runtime_telemetry(&health, Some(&stats));
-
-        assert_eq!(telemetry.version.as_deref(), Some("0.29.3"));
-        assert_eq!(telemetry.active_memory, Some(4_000));
-        assert_eq!(telemetry.cache_memory, Some(2_000));
-        assert_eq!(telemetry.peak_memory, Some(8_000));
-    }
-
-    #[test]
-    fn parses_mlx_device_metadata_and_metal_limit() {
-        let device = json!({
-            "chip_name": "Apple M4",
-            "gpu_cores": 10,
-            "device_name": "Apple M4 GPU",
-            "architecture": "arm64",
-            "max_recommended_working_set_size": 27_000
-        });
-        let settings = json!({
-            "system": {
-                "active_memory_bytes": 18_000,
-                "omlx_phys_footprint_bytes": 12_000,
-                "iogpu_wired_limit_bytes": 24_000
-            }
-        });
-        let telemetry = parse_mlx_metadata(Some(&device), Some(&settings));
-
-        assert_eq!(telemetry.device_name.as_deref(), Some("Apple M4 GPU"));
-        assert_eq!(telemetry.architecture.as_deref(), Some("arm64"));
-        assert_eq!(telemetry.memory_size, None);
-        assert_eq!(telemetry.active_memory, None);
-        assert_eq!(telemetry.recommended_working_set, Some(27_000));
-        assert_eq!(telemetry.process_footprint, Some(12_000));
-        assert_eq!(telemetry.resource_limit, Some(24_000));
-    }
-
-    #[test]
-    fn converts_omlx_device_memory_gb_to_bytes() {
-        let device = json!({"memory_gb": 36});
-        let telemetry = parse_mlx_metadata(Some(&device), None);
-
-        assert_eq!(telemetry.memory_size, Some(36 * 1024 * 1024 * 1024));
-    }
-
-    #[test]
-    fn parses_metal_stats_without_charging_driver_memory_as_gpu_memory() {
-        let ioreg = r#"
-            "PerformanceStatistics" = {"In use system memory (driver)"=0,"Alloc system memory"=3224567808,"Tiler Utilization %"=16,"Renderer Utilization %"=15,"Device Utilization %"=16,"In use system memory"=850280448}
-            "model" = "Apple M4"
-            "gpu-core-count" = 10
-        "#;
-        assert_eq!(
-            parse_gpu(ioreg),
-            (Some(16), Some(3_224_567_808), Some(850_280_448))
-        );
-        let metal = parse_metal_hardware(ioreg);
-        assert_eq!(metal.device_name.as_deref(), Some("Apple M4"));
-        assert_eq!(metal.gpu_cores, Some(10));
-        assert_eq!(metal.renderer_util, Some(15));
-        assert_eq!(metal.tiler_util, Some(16));
-    }
-
-    #[test]
-    fn diagnostic_fields_are_single_line_and_bounded() {
-        let field = log_field("model name\nwith\tunsafe=characters/and a very long suffix");
-
-        assert!(!field.contains('\n'));
-        assert!(!field.contains('\r'));
-        assert!(!field.contains('\t'));
-        assert!(!field.contains(' '));
-        assert!(field.chars().count() <= 160);
-        assert!(field.contains("model_name_with"));
-    }
-
-    #[test]
-    fn panic_payload_formats_string_and_static_string_panics() {
-        let owned: Box<dyn Any + Send> = Box::new(String::from("owned panic"));
-        let static_text: Box<dyn Any + Send> = Box::new("static panic");
-
-        assert_eq!(panic_payload(owned.as_ref()), "owned panic");
-        assert_eq!(panic_payload(static_text.as_ref()), "static panic");
-    }
-
-    #[test]
-    fn config_defaults_when_file_missing() {
-        let config = Config::default();
-        assert_eq!(config.interval, None);
-        assert_eq!(config.history, None);
-        assert_eq!(config.omx, None);
-        assert_eq!(config.memory_warn_load, None);
-        assert_eq!(config.gpu_critical_load, None);
-    }
-
-    #[test]
-    fn config_parses_from_json() {
-        let json_str = r#"{"interval":5,"history":500,"omx":{"host":"0.0.0.0","port":9090},"memory_warn_load":80,"memory_critical_load":90,"gpu_warn_load":85,"gpu_critical_load":95,"swap_warn_rate":1048576,"swap_critical_rate":16777216}"#;
-        let config: Config = serde_json::from_str(json_str).expect("valid json should parse");
-        assert_eq!(config.interval, Some(5));
-        assert_eq!(config.history, Some(500));
-        assert_eq!(
-            config.omx.as_ref().unwrap().host.as_deref(),
-            Some("0.0.0.0")
-        );
-        assert_eq!(config.omx.as_ref().unwrap().port, Some(9090));
-        assert_eq!(config.memory_warn_load, Some(80));
-        assert_eq!(config.memory_critical_load, Some(90));
-        assert_eq!(config.gpu_warn_load, Some(85));
-        assert_eq!(config.gpu_critical_load, Some(95));
-        assert_eq!(config.swap_warn_rate, Some(1048576));
-        assert_eq!(config.swap_critical_rate, Some(16777216));
-    }
-
-    #[test]
-    fn config_omlx_defaults_when_missing() {
-        let json_str = r#"{"interval":2}"#;
-        let config: Config = serde_json::from_str(json_str).unwrap();
-        assert_eq!(config.interval, Some(2));
-        assert_eq!(config.omx, None);
-    }
-
-    #[test]
-    fn configured_thresholds_replace_the_built_in_defaults() {
-        let config: Config = serde_json::from_str(
-            r#"{"memory_warn_load":60,"memory_critical_load":75,
-                "gpu_warn_load":50,"gpu_critical_load":65,"gpu_warn_exit":40,
-                "swap_warn_rate":2097152,"swap_critical_rate":33554432,
-                "swap_warn_exit":1048576,
-                "compression_warn_rate":134217728,"compression_warn_exit":67108864}"#,
-        )
-        .expect("valid json should parse");
-        let thresholds = Thresholds::from_config(&config);
-
-        assert_eq!(
-            thresholds,
-            Thresholds {
-                memory_warn_load: 60,
-                memory_critical_load: 75,
-                gpu_warn_load: 50,
-                gpu_critical_load: 65,
-                gpu_warn_exit: 40,
-                swap_warn_rate: 2 * MIB,
-                swap_critical_rate: 32 * MIB,
-                swap_warn_exit: MIB,
-                compression_warn_rate: 128 * MIB,
-                compression_warn_exit: 64 * MIB,
-            }
-        );
-        assert_eq!(Thresholds::from_config(&Config::default()), defaults());
-    }
-
-    #[test]
-    fn configured_memory_thresholds_move_the_severity_band() {
-        let config: Config = serde_json::from_str(r#"{"memory_critical_load":95}"#)
-            .expect("valid json should parse");
-        let thresholds = Thresholds::from_config(&config);
-
-        /* 85% is critical with the built-in default and only a warning once
-         * the user raises the critical level to 95. */
-        assert_eq!(ChartMetric::Memory.tone(85, defaults()), Tone::Red);
-        assert_eq!(ChartMetric::Memory.tone(85, thresholds), Tone::Yellow);
-        assert_eq!(ChartMetric::Memory.tone(95, thresholds), Tone::Red);
-        assert_eq!(ChartMetric::Memory.tone(69, thresholds), Tone::Green);
-    }
-
-    #[test]
-    fn configured_gpu_thresholds_change_the_reported_load_label() {
-        let config: Config = serde_json::from_str(r#"{"gpu_warn_load":85,"gpu_critical_load":95}"#)
-            .expect("valid json should parse");
-        let thresholds = Thresholds::from_config(&config);
-
-        assert_eq!(gpu_load_label(Some(80), defaults()), "loaded");
-        assert_eq!(gpu_load_label(Some(80), thresholds), "within target");
-        assert_eq!(gpu_load_label(Some(90), thresholds), "loaded");
-        assert_eq!(gpu_load_label(Some(96), thresholds), "saturated");
-    }
-
-    #[test]
-    fn configured_swap_rates_change_the_classified_impact() {
-        let template = Sample {
-            rate_ready: true,
-            total_memory: 32 * 1024 * 1024 * 1024,
-            availability: Some(50),
-            pressure: "GREEN".into(),
-            vm_available: true,
-            swap_available: true,
-            thermal: "no warning".into(),
-            llm_count: 1,
-            swap_in: 16 * MIB,
-            swap_out: 16 * MIB,
-            ..Sample::default()
-        };
-
-        let mut sample = template.clone();
-        classify(&mut sample, None, defaults());
-        assert_eq!(sample.impact, "SWAP THRASHING");
-
-        let config: Config =
-            serde_json::from_str(r#"{"swap_warn_rate":67108864,"swap_critical_rate":134217728}"#)
-                .expect("valid json should parse");
-        let mut sample = template;
-        classify(&mut sample, None, Thresholds::from_config(&config));
-        assert_ne!(sample.impact, "SWAP THRASHING");
-        assert_eq!(sample.impact, "PAGING ACTIVE");
-    }
-
-    #[test]
-    fn configured_compression_rate_changes_the_classified_impact() {
-        let template = Sample {
-            rate_ready: true,
-            total_memory: 32 * 1024 * 1024 * 1024,
-            availability: Some(50),
-            pressure: "GREEN".into(),
-            vm_available: true,
-            swap_available: true,
-            thermal: "no warning".into(),
-            llm_count: 1,
-            compress: COMPRESSION_WARN_RATE,
-            ..Sample::default()
-        };
-
-        let mut sample = template.clone();
-        classify(&mut sample, None, defaults());
-        assert_eq!(sample.impact, "COMPRESSION ACTIVE");
-
-        let config: Config = serde_json::from_str(r#"{"compression_warn_rate":268435456}"#)
-            .expect("valid json should parse");
-        let mut sample = template;
-        classify(&mut sample, None, Thresholds::from_config(&config));
-        assert_eq!(sample.impact, "LLM READY");
-    }
-
-    #[test]
-    fn configured_gpu_threshold_changes_correlation_attribution() {
-        let current = CorrelationObservation {
-            provider: "oMLX".into(),
-            model: "model".into(),
-            generation_tps: Some(20.0),
-            gpu_util: Some(78),
-            ..CorrelationObservation::default()
-        };
-        let previous = CorrelationObservation {
-            provider: "oMLX".into(),
-            model: "model".into(),
-            generation_tps: Some(30.0),
-            gpu_util: Some(10),
-            ..CorrelationObservation::default()
-        };
-
-        let with_defaults =
-            correlate_observations(&current, Some(&previous), Some(30.0), defaults());
-        assert_ne!(with_defaults.cause, CorrelationCause::GpuSaturation);
-
-        let config: Config = serde_json::from_str(r#"{"gpu_warn_load":60,"gpu_critical_load":70}"#)
-            .expect("valid json should parse");
-        let with_lower_ceiling = correlate_observations(
-            &current,
-            Some(&previous),
-            Some(30.0),
-            Thresholds::from_config(&config),
-        );
-        assert_eq!(with_lower_ceiling.cause, CorrelationCause::GpuSaturation);
-        assert!(with_lower_ceiling.details.contains("GPU 78% busy"));
-    }
-
-    #[test]
-    fn inverted_or_out_of_range_thresholds_are_clamped_into_usable_bands() {
-        let config: Config = serde_json::from_str(
-            r#"{"memory_warn_load":90,"memory_critical_load":40,
-                "gpu_warn_load":250,"gpu_critical_load":10,
-                "swap_warn_rate":1000,"swap_critical_rate":10,
-                "compression_warn_rate":100,"compression_warn_exit":900}"#,
-        )
-        .expect("valid json should parse");
-        let thresholds = Thresholds::from_config(&config);
-
-        assert_eq!(thresholds.memory_warn_load, 90);
-        assert_eq!(thresholds.memory_critical_load, 90);
-        assert_eq!(thresholds.gpu_warn_load, 100);
-        assert_eq!(thresholds.gpu_critical_load, 100);
-        assert_eq!(thresholds.swap_warn_rate, 1000);
-        assert_eq!(thresholds.swap_critical_rate, 1000);
-        assert_eq!(thresholds.compression_warn_exit, 100);
-        /* The warning band is never silently removed by bad input. */
-        assert_eq!(ChartMetric::Memory.tone(89, thresholds), Tone::Green);
-        assert_eq!(ChartMetric::Memory.tone(90, thresholds), Tone::Red);
-    }
-
-    #[test]
-    fn explicit_endpoint_settings_win_over_discovery() {
-        let discovered = parse_omlx_server_env("HOST=10.0.0.5\nPORT=9000\n");
-        assert_eq!(discovered.host.as_deref(), Some("10.0.0.5"));
-        assert_eq!(discovered.port, Some(9000));
-
-        let config: Config = serde_json::from_str(r#"{"omx":{"host":"192.168.1.20","port":8123}}"#)
-            .expect("valid json should parse");
-        assert_eq!(
-            resolve_omlx_endpoint(&discovered, &config),
-            ("192.168.1.20".to_owned(), 8123)
-        );
-    }
-
-    #[test]
-    fn partially_specified_endpoint_settings_keep_discovered_values() {
-        let discovered = parse_omlx_server_env("OMLX_HOST=10.0.0.5\nOMLX_PORT=9000\n");
-
-        let host_only: Config = serde_json::from_str(r#"{"omx":{"host":"192.168.1.20"}}"#)
-            .expect("valid json should parse");
-        assert_eq!(
-            resolve_omlx_endpoint(&discovered, &host_only),
-            ("192.168.1.20".to_owned(), 9000)
-        );
-
-        let port_only: Config =
-            serde_json::from_str(r#"{"omx":{"port":8123}}"#).expect("valid json should parse");
-        assert_eq!(
-            resolve_omlx_endpoint(&discovered, &port_only),
-            ("10.0.0.5".to_owned(), 8123)
-        );
-    }
-
-    #[test]
-    fn endpoint_falls_back_to_discovery_then_built_in_defaults() {
-        let discovered = parse_omlx_server_env("HOST=10.0.0.5\nPORT=9000\n");
-        assert_eq!(
-            resolve_omlx_endpoint(&discovered, &Config::default()),
-            ("10.0.0.5".to_owned(), 9000)
-        );
-        assert_eq!(
-            resolve_omlx_endpoint(&DiscoveredEndpoint::default(), &Config::default()),
-            (DEFAULT_OMLX_HOST.to_owned(), DEFAULT_OMLX_PORT)
-        );
-
-        let port_only: Config =
-            serde_json::from_str(r#"{"omx":{"port":8123}}"#).expect("valid json should parse");
-        assert_eq!(
-            resolve_omlx_endpoint(&DiscoveredEndpoint::default(), &port_only),
-            (DEFAULT_OMLX_HOST.to_owned(), 8123)
-        );
-    }
-
-    #[test]
-    fn server_env_discovery_ignores_wildcard_hosts_and_invalid_ports() {
-        let discovered =
-            parse_omlx_server_env("# oMLX server\nOMLX_HOST=\"0.0.0.0\"\nOMLX_PORT=not-a-port\n");
-        assert_eq!(discovered, DiscoveredEndpoint::default());
-
-        let blank_host: Config =
-            serde_json::from_str(r#"{"omx":{"host":"  "}}"#).expect("valid json should parse");
-        assert_eq!(
-            resolve_omlx_endpoint(&parse_omlx_server_env("HOST=10.0.0.5\n"), &blank_host),
-            ("10.0.0.5".to_owned(), DEFAULT_OMLX_PORT)
-        );
-    }
-
-    #[test]
-    fn out_of_range_config_values_fall_back_instead_of_refusing_to_start() {
-        let valid: Config = serde_json::from_str(r#"{"interval":5,"history":500}"#)
-            .expect("valid json should parse");
-        assert_eq!(config_interval(&valid), (5, false));
-        assert_eq!(config_history(&valid), (500, false));
-
-        let out_of_range: Config =
-            serde_json::from_str(r#"{"interval":0,"history":5}"#).expect("valid json should parse");
-        assert_eq!(config_interval(&out_of_range), (INTERVAL_DEFAULT, true));
-        assert_eq!(config_history(&out_of_range), (HISTORY_DEFAULT, true));
-
-        assert_eq!(
-            config_interval(&Config::default()),
-            (INTERVAL_DEFAULT, false)
-        );
-        assert_eq!(config_history(&Config::default()), (HISTORY_DEFAULT, false));
-    }
-
-    /**
-     * Every field in `Config` must reach the value mlxtop actually runs with.
-     *
-     * The destructuring below is exhaustive on purpose: adding a field to
-     * `Config` stops this test from compiling until the field is named here,
-     * and an unused binding fails `clippy -D warnings`, so a new setting
-     * cannot be merged without an assertion that something reads it.
-     */
-    #[test]
-    fn every_config_field_reaches_the_resolved_settings() {
-        let config: Config =
-            serde_json::from_str(CONFIG_WITH_EVERY_FIELD_SET).expect("the fixture should parse");
-
-        let Config {
-            interval,
-            history,
-            omx,
-            memory_warn_load,
-            memory_critical_load,
-            gpu_warn_load,
-            gpu_critical_load,
-            swap_warn_rate,
-            swap_critical_rate,
-            compression_warn_rate,
-            swap_warn_exit,
-            compression_warn_exit,
-            gpu_warn_exit,
-        } = config.clone();
-        let OmxConfig { host, port } = omx.expect("the fixture sets omx");
-
-        assert_eq!(
-            config_interval(&config).0,
-            interval.expect("the fixture sets interval")
-        );
-        assert_eq!(
-            config_history(&config).0,
-            history.expect("the fixture sets history")
-        );
-        assert_eq!(
-            resolve_omlx_endpoint(&DiscoveredEndpoint::default(), &config),
-            (
-                host.expect("the fixture sets omx.host"),
-                port.expect("the fixture sets omx.port")
-            )
-        );
-
-        let thresholds = Thresholds::from_config(&config);
-        assert_eq!(
-            thresholds,
-            Thresholds {
-                memory_warn_load: memory_warn_load.expect("fixture"),
-                memory_critical_load: memory_critical_load.expect("fixture"),
-                gpu_warn_load: gpu_warn_load.expect("fixture"),
-                gpu_critical_load: gpu_critical_load.expect("fixture"),
-                gpu_warn_exit: gpu_warn_exit.expect("fixture"),
-                swap_warn_rate: swap_warn_rate.expect("fixture"),
-                swap_critical_rate: swap_critical_rate.expect("fixture"),
-                swap_warn_exit: swap_warn_exit.expect("fixture"),
-                compression_warn_rate: compression_warn_rate.expect("fixture"),
-                compression_warn_exit: compression_warn_exit.expect("fixture"),
-            },
-            "a Config field was parsed but never reached Thresholds"
-        );
-    }
-
-    /**
-     * Every field in `Thresholds` must change something the user can see.
-     *
-     * This is the regression guard for the "deserialized and then ignored"
-     * class of bug: each probe reports an observable result — a chart tone, a
-     * load label, a classified impact — and the test fails unless configuring
-     * the field changes it. Reverting any field to a hard-coded constant
-     * fails here even though parsing still succeeds.
-     *
-     * The destructuring and the `all_fields` array are exhaustive on purpose:
-     * a new `Thresholds` field stops the test compiling, and the length
-     * assertion then fails until the field is given a probe below.
-     */
-    #[test]
-    fn every_threshold_field_changes_an_observable_result() {
-        struct Probe {
-            field: &'static str,
-            config: &'static str,
-            observe: fn(Thresholds) -> String,
-        }
-
-        fn tone_name(tone: Tone) -> String {
-            format!("{tone:?}")
-        }
-
-        fn impact_after_classify(
-            thresholds: Thresholds,
-            previous_impact: Option<&str>,
-            prepare: fn(&mut Sample),
-        ) -> String {
-            let mut sample = Sample {
-                rate_ready: true,
-                total_memory: 32 * 1024 * 1024 * 1024,
-                availability: Some(50),
-                pressure: "GREEN".into(),
-                vm_available: true,
-                swap_available: true,
-                thermal: "no warning".into(),
-                llm_count: 1,
-                ..Sample::default()
-            };
-            prepare(&mut sample);
-            let previous = previous_impact.map(|impact| Sample {
-                impact: impact.into(),
-                ..Sample::default()
-            });
-            classify(&mut sample, previous.as_ref(), thresholds);
-            sample.impact
-        }
-
-        let probes = [
-            Probe {
-                field: "memory_warn_load",
-                config: r#"{"memory_warn_load":55}"#,
-                observe: |thresholds| tone_name(ChartMetric::Memory.tone(60, thresholds)),
-            },
-            Probe {
-                field: "memory_critical_load",
-                config: r#"{"memory_critical_load":95}"#,
-                observe: |thresholds| tone_name(ChartMetric::Memory.tone(85, thresholds)),
-            },
-            Probe {
-                field: "gpu_warn_load",
-                config: r#"{"gpu_warn_load":70}"#,
-                observe: |thresholds| gpu_load_label(Some(72), thresholds).to_owned(),
-            },
-            Probe {
-                field: "gpu_critical_load",
-                config: r#"{"gpu_warn_load":70,"gpu_critical_load":85}"#,
-                observe: |thresholds| gpu_load_label(Some(88), thresholds).to_owned(),
-            },
-            Probe {
-                field: "gpu_warn_exit",
-                config: r#"{"gpu_warn_exit":60}"#,
-                observe: |thresholds| {
-                    impact_after_classify(thresholds, Some("GPU BUSY"), |sample| {
-                        sample.gpu_util = Some(65);
-                    })
-                },
-            },
-            Probe {
-                field: "swap_warn_rate",
-                config: r#"{"swap_warn_rate":4194304}"#,
-                observe: |thresholds| tone_name(ChartMetric::Swap.tone(2 * MIB, thresholds)),
-            },
-            Probe {
-                field: "swap_critical_rate",
-                config: r#"{"swap_critical_rate":33554432}"#,
-                observe: |thresholds| tone_name(ChartMetric::Swap.tone(16 * MIB, thresholds)),
-            },
-            Probe {
-                field: "swap_warn_exit",
-                config: r#"{"swap_warn_exit":4194304}"#,
-                observe: |thresholds| {
-                    impact_after_classify(thresholds, Some("PAGING ACTIVE"), |sample| {
-                        sample.swap_in = 3 * MIB;
-                    })
-                },
-            },
-            Probe {
-                field: "compression_warn_rate",
-                config: r#"{"compression_warn_rate":134217728}"#,
-                observe: |thresholds| {
-                    impact_after_classify(thresholds, None, |sample| {
-                        sample.compress = 64 * MIB;
-                    })
-                },
-            },
-            Probe {
-                field: "compression_warn_exit",
-                config: r#"{"compression_warn_exit":50331648}"#,
-                observe: |thresholds| {
-                    impact_after_classify(thresholds, Some("COMPRESSION ACTIVE"), |sample| {
-                        sample.compress = 40 * MIB;
-                    })
-                },
-            },
-        ];
-
-        let Thresholds {
-            memory_warn_load,
-            memory_critical_load,
-            gpu_warn_load,
-            gpu_critical_load,
-            gpu_warn_exit,
-            swap_warn_rate,
-            swap_critical_rate,
-            swap_warn_exit,
-            compression_warn_rate,
-            compression_warn_exit,
-        } = defaults();
-        let all_fields = [
-            memory_warn_load,
-            memory_critical_load,
-            gpu_warn_load,
-            gpu_critical_load,
-            gpu_warn_exit,
-            swap_warn_rate,
-            swap_critical_rate,
-            swap_warn_exit,
-            compression_warn_rate,
-            compression_warn_exit,
-        ];
-        assert_eq!(
-            probes.len(),
-            all_fields.len(),
-            "every field in Thresholds needs a probe proving it changes behaviour"
-        );
-
-        for probe in probes {
-            let config: Config = serde_json::from_str(probe.config)
-                .unwrap_or_else(|error| panic!("{} fixture should parse: {error}", probe.field));
-            let configured = (probe.observe)(Thresholds::from_config(&config));
-            let built_in = (probe.observe)(defaults());
-            assert_ne!(
-                configured, built_in,
-                "setting {} changed nothing observable — it is parsed but not applied",
-                probe.field
-            );
-        }
-    }
-}
+#[path = "tests/app.rs"]
+mod app_tests;
+#[cfg(test)]
+#[path = "tests/collector.rs"]
+mod collector_tests;
+#[cfg(test)]
+#[path = "tests/support.rs"]
+mod test_support;
+#[cfg(test)]
+#[path = "tests/main.rs"]
+mod tests;
