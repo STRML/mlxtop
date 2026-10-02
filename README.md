@@ -4,15 +4,16 @@
 
 See which models are running, how much memory they use, and how busy your
 GPUs are. Linux NVIDIA systems show each card's utilization, VRAM and temperature
-in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, you can
+in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, vLLM or SGLang, you can
 also follow generation speed and request activity as your model responds.
 
-![mlxtop Overview prioritizing memory pressure, process footprint and paging, with compact token rates and a readable recent Journal](docs/screenshots/overview.png)
+![mlxtop Overview prioritizing memory pressure and paging, with token rates and a readable recent Journal](docs/screenshots/overview.png)
 
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
 
-The current source version is **1.2.1-rc.8**, a fix candidate for the 1.2 series.
+The current source version is **2.0.0-rc.1**, the first candidate for the 2.0
+major release, developed on `release/2.0`.
 The stable installer follows the latest published release. Use the
 [private RC workflow](docs/USER_GUIDE.md#private-rc-testing-over-ssh) to test
 this checkout on a compatible remote host.
@@ -159,7 +160,7 @@ larger model or work through a longer conversation.
 
 | View | What it shows |
 | --- | --- |
-| Overview | Memory pressure, process footprint and paging, with model status, compact token rates, prompt history, GPU, queue activity and recent events |
+| Overview | Memory pressure and paging, with model status, token rates, prompt history, GPU, queue activity and recent events |
 | MLX Top | Running model processes and the resources they use |
 | Journal | Request activity and changes in resource use during the session |
 
@@ -224,23 +225,30 @@ build from source with `cargo install --path . --locked`.
 | oMLX | Models, processes, prompt and response speed, requests, cache activity, and extra memory counters when available |
 | llama.cpp / llama-server | Active slots and summed output counts; average rates and active/deferred queue counts when `/metrics` is enabled. Optional usage file adds full prompt history alongside native polling. |
 | KoboldCpp | Last reported input/output counts and rates through `/api/extra/perf` |
-| MLX-LM, Ollama, LM Studio, LocalAI | Process detection (including Python entrypoints, LM Studio's `llmster`, and the Bionic app); completed request counts through an optional client-written usage file |
+| Ollama | Loaded models, resident VRAM and context capacity from `/api/ps`; completed counts and decode speed through the usage recorder |
+| LM Studio / llmster | Loaded instances and context capacity from native APIs, with older API fallback; completed counts, speed and first-token timing through the usage recorder |
+| vLLM, SGLang | Prometheus active/waiting queues, sampled server token rates, cache statistics, KV occupancy and cumulative mean first-token timing |
+| MLX-LM, LocalAI, Jan, GPT4All | Process detection and available-model catalogue; completed request counts and explicitly supplied timing through the usage recorder |
+
+Provider URLs, bearer authentication, default ports and client setup are covered
+in the [provider guide](docs/USER_GUIDE.md#provider-endpoints).
+The dashboard monitors one selected server at a time. Native model catalogues
+cannot provide live generation speed; completed usage requires client integration.
 
 Overview uses flat charts with one border each. SYSINFO holds model/state and
 hardware details; generation, prefill, memory, GPU, paging, Cache and Queue
 have independent plots. SWAP usage is a horizontal capacity bar. Numeric axes
 fit visible measurements in their actual units; only percentages use 0–100.
 GPU and paging retain their captured severity colors. RAM readings and history
-use the captured OS pressure state; resident occupancy includes reclaimable
-file cache and does not establish a warning by itself.
+use cyan; the separate pressure label carries OS severity. Resident occupancy
+includes reclaimable file cache and does not establish a warning by itself.
 **Prompt load means prompt size in input tokens, including cached tokens.**
 The headline gives the selected request's exact size; each bar represents one
 observed request and shows its own compact size label, such as `12.0k` for
 12,000 tokens. The panel also shows the change from the previous observed
 request, freshness, and cached/uncached segments when reported. Selected prompts
 also show output counts and request-specific decode speed: `LIVE`, a completed
-request's `AVG`, or the retained `LAST` sample. Queue and OS
-process-footprint charts complement the system metrics. First-token latency appears only when
+request's `AVG`, or the retained `LAST` sample. Queue charts complement the system metrics; OS process-memory details live in Top. First-token latency appears only when
 explicitly measured client timings are supplied. See the
 [operator charts](docs/USER_GUIDE.md#operator-charts) for scales and data sources.
 Prompt counts also appear in the static report. Journal records each

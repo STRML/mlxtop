@@ -1,6 +1,6 @@
 [package]
 name = "mlxtop"
-version = "1.2.1-rc.8"
+version = "2.0.0-rc.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Full-screen memory and local-LLM performance monitor"
@@ -27,6 +27,7 @@ crossterm = "0.28"
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14.11"

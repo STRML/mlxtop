@@ -463,8 +463,8 @@ fn memory_chart_colors_follow_pressure_even_with_high_cache_occupancy() {
         assert_eq!(buffer[(2, 12)].fg, tone.color());
         assert_eq!(
             buffer[(44, 0)].fg,
-            tone.color(),
-            "resident percentage must agree with captured pressure"
+            CYAN,
+            "resident percentage is occupancy; pressure has a separate severity label"
         );
         let sample_cells: Vec<_> = buffer
             .content
@@ -472,7 +472,7 @@ fn memory_chart_colors_follow_pressure_even_with_high_cache_occupancy() {
             .filter(|cell| cell.symbol() == "●")
             .collect();
         assert!(!sample_cells.is_empty());
-        assert!(sample_cells.iter().all(|cell| cell.fg == tone.color()));
+        assert!(sample_cells.iter().all(|cell| cell.fg == CYAN));
         let mut compact = Terminal::new(ratatui::backend::TestBackend::new(40, 4)).unwrap();
         compact
             .draw(|frame| {
@@ -490,7 +490,7 @@ fn memory_chart_colors_follow_pressure_even_with_high_cache_occupancy() {
             .buffer()
             .content
             .iter()
-            .any(|cell| cell.fg == tone.color() && cell.symbol().contains('█')));
+            .any(|cell| cell.fg == CYAN && cell.symbol().contains('█')));
     }
 }
 
@@ -580,7 +580,7 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
         )
     });
     assert!(screen.contains("TOTAL 61.9%"));
-    assert!(screen.contains("No interval history"));
+    assert!(screen.contains("No interval cache data"));
 }
 
 #[test]
@@ -602,10 +602,7 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
             ChartMetric::Generation,
             "generation",
             Some(400),
-            vec![
-                "LAST SAMPLE 40.0 tok/s · 25s old",
-                "SERVER AVG GEN 35.7 tok/s",
-            ],
+            vec!["LAST SAMPLE 40.0 tok/s · 25s old", "tok/s · auto"],
         ),
         (
             ChartMetric::Cache,
@@ -622,10 +619,7 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
             ChartMetric::Prefill,
             "prefill",
             None,
-            vec![
-                "Idle · no live rate samples",
-                "SERVER AVG PREFILL 120.6 tok/s",
-            ],
+            vec!["Idle · no live rate samples", "tok/s · auto"],
         ),
     ] {
         let mut point = ChartPoint::new(last, Tone::Cyan);
@@ -1092,7 +1086,7 @@ fn chart_stats_use_normalized_values_and_keep_the_window_label_honest() {
     );
     assert_eq!(
         chart_window_label(history.len(), Duration::from_secs(60)),
-        "3m"
+        "window 3m"
     );
 }
 
@@ -1111,7 +1105,6 @@ fn overview_renders_the_first_glance_cards_at_reference_size() {
         "prefill",
         "cache",
         "queue",
-        "process memory",
         "pause",
     ] {
         assert!(rendered.contains(label), "missing rendered label: {label}");
@@ -1268,7 +1261,6 @@ fn nvidia_dashboard_requires_linux_and_detected_cards() {
             app.gpu_chart_title(),
             if expected { "GPU max" } else { "GPU" }
         );
-        assert_eq!(app.show_process_footprint(), !expected);
         app.help = true;
         assert_eq!(render_app(&app, 100, 40).contains("[ / ] GPUs"), expected);
     }
@@ -1469,7 +1461,7 @@ fn mouse_targets_visible_charts_and_resize_replaces_hit_regions() {
         app.handle_mouse(mouse(MouseEventKind::ScrollUp));
     }
     assert_eq!(app.charts.zoom(Chart::Queue), 8);
-    assert_eq!(app.charts.zoom(Chart::Gpu), 1);
+    assert_eq!(app.charts.zoom(Chart::Gpu), 8);
     for _ in 0..10 {
         app.handle_mouse(mouse(MouseEventKind::ScrollDown));
     }
@@ -1706,32 +1698,19 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
 }
 
 #[test]
-fn overview_labels_os_process_memory_and_growth() {
+fn overview_omits_process_memory_chart_even_when_available() {
     let mut app = test_app(0);
     app.collector.current.process_memory = Some(process_memory::Reading {
         pid: 37966,
         started: 1,
-        resident: 16 * 1024 * 1024 * 1024,
-        footprint: 17 * 1024 * 1024 * 1024,
-        peak: 29 * 1024 * 1024 * 1024,
+        resident: 16 * 1024 * MIB,
+        footprint: 17 * 1024 * MIB,
+        peak: 29 * 1024 * MIB,
         at: Instant::now(),
     });
-    app.collector.current.process_memory_growth = Some(-1024 * 1024);
     let screen = render_app(&app, 180, 50);
-    for label in [
-        "PID 37966",
-        "process memory",
-        "17.0 GiB",
-        "peak 29.0 GiB",
-        "growth -1.0 MiB/s",
-        "OS",
-    ] {
-        assert!(screen.contains(label), "missing {label}");
-    }
-    app.collector.current.process_memory = None;
-    let screen = render_app(&app, 180, 50);
-    assert!(!screen.contains("PID 37966"));
-    assert!(!screen.contains("growth -1.0 MiB/s"));
+    assert!(!screen.contains("process memory"));
+    assert!(!screen.contains("OS footprint"));
 }
 
 #[test]
@@ -1808,7 +1787,7 @@ fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
         render_app(&app, width, height);
         let empty_regions = app.charts.regions.borrow().clone();
         let region = |chart| empty_regions.iter().find(|(id, _)| *id == chart).unwrap().1;
-        assert!((7..=8).contains(&region(Chart::Prompt).height));
+        assert!((7..=13).contains(&region(Chart::Prompt).height));
         assert_eq!(region(Chart::Generation).y, region(Chart::Prefill).y);
         assert_eq!(
             region(Chart::Generation).height,
@@ -1818,17 +1797,16 @@ fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
         assert!(region(Chart::Generation).bottom() <= region(Chart::Prompt).y);
         assert_eq!(region(Chart::Prompt).y, region(Chart::Cache).y);
         assert_eq!(region(Chart::Cache).y, region(Chart::Queue).y);
-        for chart in [Chart::Memory, Chart::Footprint, Chart::Paging] {
+        for chart in [Chart::Memory, Chart::Paging] {
             assert!(region(chart).bottom() <= region(Chart::Generation).y);
-            assert!(region(chart).height >= 2 * region(Chart::Prefill).height);
-            let cells = |area: Rect| u32::from(area.width) * u32::from(area.height);
-            assert!(cells(region(chart)) >= 2 * cells(region(Chart::Prefill)));
+            assert!(region(chart).height <= 8);
         }
         assert_eq!(region(Chart::Generation).y, region(Chart::Gpu).y);
         assert!(region(Chart::Generation).width > region(Chart::Prefill).width);
-        assert!(region(Chart::Prefill).height <= 6);
-        assert!(region(Chart::Footprint).width >= 24);
-        assert!(region(Chart::Paging).width > region(Chart::Footprint).width);
+        if height >= 40 {
+            assert!(region(Chart::Prefill).height >= 8);
+            assert!(region(Chart::Prompt).height >= 9);
+        }
         populate_dashboard_fixture(&mut app);
         render_app(&app, width, height);
         assert_eq!(
@@ -1870,7 +1848,7 @@ fn prompt_counts_are_visible_and_request_events_use_the_llm_filter() {
 }
 
 #[test]
-fn overview_journal_has_room_for_eight_events_at_screenshot_size() {
+fn overview_journal_retains_five_recent_events_at_screenshot_size() {
     let mut app = test_app(0);
     for index in 0..12 {
         app.collector.signals.push_back(SignalEvent {
@@ -1883,11 +1861,11 @@ fn overview_journal_has_room_for_eight_events_at_screenshot_size() {
         });
     }
     let screen = render_app(&app, 170, 42);
-    for index in 4..12 {
+    for index in 7..12 {
         assert!(screen.contains(&format!("Event {index:02}")), "{screen}");
     }
-    assert!(!screen.contains("Event 03"), "capacity is eight event rows");
-    assert!(screen.find("Event 11") < screen.find("Event 04"));
+    assert!(!screen.contains("Event 06"), "capacity is five event rows");
+    assert!(screen.find("Event 11") < screen.find("Event 07"));
     assert!(screen.contains("3 open"));
     let compact = render_app(&app, 80, 24);
     assert!(
@@ -3687,4 +3665,254 @@ fn every_threshold_field_changes_an_observable_result() {
             probe.field
         );
     }
+}
+
+#[test]
+fn shared_history_stretch_keeps_every_spike_gap_and_captured_tone() {
+    let history = VecDeque::from([
+        ChartPoint::new(Some(10), Tone::Green),
+        ChartPoint::new(None, Tone::Muted),
+        ChartPoint::new(Some(99), Tone::Red),
+        ChartPoint::new(Some(20), Tone::Yellow),
+    ]);
+    let points = chart_columns(&history, 6);
+    for width in [6, 17, 60] {
+        let stretched = stretch_chart_columns(&points, width);
+        assert_eq!(stretched.len(), width);
+        for (column, point) in stretched.iter().enumerate() {
+            let original = &points[column * 6 / width];
+            assert_eq!(point.value, original.value);
+            assert_eq!(point.tone, original.tone);
+            assert_eq!(point.break_before, original.break_before);
+        }
+        assert!(stretched
+            .iter()
+            .any(|p| p.value == Some(99) && p.tone == Tone::Red));
+        assert_eq!(stretched.last().unwrap().value, Some(20));
+    }
+    assert!(stretch_chart_columns(&[], 12).is_empty());
+    assert!(stretch_chart_columns(&points, 0).is_empty());
+}
+
+#[test]
+fn overview_time_series_share_window_and_zoom_while_request_bars_stay_independent() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    for (width, height) in [(80, 24), (100, 40), (170, 42), (240, 60)] {
+        for zoom in [1, 2, 4, 8] {
+            app.charts.focused = Chart::Generation;
+            app.charts.reset_zoom();
+            while app.charts.zoom(Chart::Generation) < zoom {
+                app.charts.change_zoom(true);
+            }
+            render_app(&app, width, height);
+            let shared = app
+                .charts
+                .overview_samples
+                .get()
+                .unwrap()
+                .div_ceil(usize::from(zoom));
+            for (chart, area) in app.charts.regions.borrow().iter() {
+                let gutter = match chart {
+                    Chart::Generation | Chart::Prefill => 8,
+                    Chart::Paging => 14,
+                    Chart::Memory | Chart::Gpu | Chart::Cache => 7,
+                    Chart::Queue => {
+                        area.width
+                            - operator_charts::queue_plot_width(
+                                &app.collector.operator_history,
+                                area.width,
+                            )
+                    }
+                    _ => continue,
+                };
+                assert_eq!(
+                    app.charts
+                        .visible_samples(*chart, usize::from(area.width - gutter)),
+                    shared,
+                    "{chart:?} at {width}x{height}"
+                );
+                assert_eq!(app.charts.zoom(*chart), zoom);
+            }
+            assert_eq!(app.charts.zoom(Chart::Prompt), 1);
+            assert_eq!(app.interval, Duration::from_secs(1));
+        }
+    }
+}
+
+#[test]
+fn cache_never_replaces_missing_interval_samples_with_cumulative_gauge() {
+    let mut app = test_app(0);
+    app.collector.current.llm_cache_efficiency = Some(62.7);
+    app.collector.current.llm_prefix_hit_rate = Some(40.5);
+    for missing in [0, 4, 80] {
+        let mut history = VecDeque::from([ChartPoint::new(Some(0), Tone::Cyan)]);
+        history.extend(std::iter::repeat_n(
+            ChartPoint::new(None, Tone::Muted),
+            missing,
+        ));
+        let text = render_view(45, 10, |frame| {
+            app.render_indicator_chart(frame, frame.area(), "cache", &history, ChartMetric::Cache)
+        });
+        assert!(text.contains("TOTAL 62.7% · PREFIX HIT 40.5%"), "{text}");
+        assert!(
+            !text.contains('█'),
+            "aggregate must never become a gauge: {text}"
+        );
+        assert!(text.contains(if missing == 0 {
+            "interval 0%"
+        } else {
+            "interval —"
+        }));
+        if missing == 80 {
+            assert!(text.contains("No samples in view"));
+        }
+    }
+}
+
+#[test]
+fn server_rate_averages_are_secondary_details_in_expanded_charts() {
+    let mut app = test_app(0);
+    app.collector.current.llm_generation_tps = Some(35.7);
+    app.collector.current.llm_source = TelemetrySource::Live;
+    app.collector.current.llm_status = "idle".into();
+    let history = VecDeque::from([
+        ChartPoint::new(Some(247), Tone::Cyan),
+        ChartPoint::new(None, Tone::Muted),
+    ]);
+    for expanded in [false, true] {
+        app.charts.expanded = expanded;
+        let text = render_view(90, 10, |frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "generation",
+                &history,
+                ChartMetric::Generation,
+            )
+        });
+        assert!(text.contains("LAST SAMPLE 24.7 tok/s"));
+        assert_eq!(
+            text.contains("SERVER AVG GEN 35.7 tok/s"),
+            expanded,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn overview_review_fixtures_keep_readouts_visible_at_supported_sizes() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    for state in ["live", "idle", "missing"] {
+        if state == "idle" {
+            populate_single_idle_fixture(&mut app);
+        }
+        if state == "missing" {
+            app = test_app(0);
+        }
+        for (width, height) in [(80, 24), (170, 42), (240, 60)] {
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let screen = (0..height)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            for label in [
+                "memory",
+                "generation",
+                "prefill",
+                "GPU",
+                "cache",
+                "queue",
+                "? help q quit",
+            ] {
+                assert!(
+                    screen.contains(label),
+                    "missing {label} at {width}x{height}: {screen}"
+                );
+            }
+            assert!(!screen.contains("process memory"));
+            if let Ok(directory) = std::env::var("MLXTOP_REVIEW_DIR") {
+                std::fs::create_dir_all(&directory).unwrap();
+                let cells: Vec<_> = buffer.content.iter().map(|cell| serde_json::json!({
+                    "text": cell.symbol(), "fg": cell.fg.to_string(), "bg": cell.bg.to_string(),
+                    "bold": cell.modifier.contains(Modifier::BOLD),
+                })).collect();
+                let json = serde_json::json!({"width": width, "height": height, "cells": cells});
+                std::fs::write(
+                    format!("{directory}/{state}-{width}x{height}.json"),
+                    json.to_string(),
+                )
+                .unwrap();
+                std::fs::write(format!("{directory}/{state}-{width}x{height}.txt"), screen)
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn recognizes_new_server_processes_and_keeps_jan_worker_ownership() {
+    for (name, command, provider) in [
+        (
+            "python",
+            "python -m vllm.entrypoints.openai.api_server --model test",
+            "vLLM",
+        ),
+        (
+            "python",
+            "python -m sglang.launch_server --model test",
+            "SGLang",
+        ),
+        ("vllm", "vllm serve test", "vLLM"),
+        (
+            "GPT4All",
+            "/Applications/GPT4All.app/Contents/MacOS/GPT4All",
+            "GPT4All",
+        ),
+        ("jan", "jan serve", "Jan"),
+        (
+            "llama-server",
+            "/Users/test/.jan/engines/llama-server --port 1337",
+            "Jan",
+        ),
+    ] {
+        assert_eq!(process_provider(name, command).as_deref(), Some(provider));
+    }
+    assert_eq!(
+        process_provider("python", "python client.py --model vllm"),
+        None
+    );
+    assert_eq!(process_provider("january", "january"), None);
+}
+
+#[test]
+fn remote_api_rates_are_not_correlated_with_local_gpu_or_memory() {
+    let mut engine = CorrelationEngine::default();
+    let sample = Sample {
+        llm_remote: true,
+        llm_generation_tps: Some(20.0),
+        llm_generation_tps_live: true,
+        gpu_util: Some(100),
+        ..Sample::default()
+    };
+    assert_eq!(engine.observe(&sample, defaults()).confidence, 0);
+    assert!(engine.observations.is_empty());
+}
+
+#[test]
+fn provider_capacity_details_appear_in_top_without_becoming_prompt_counts() {
+    let mut app = test_app(1);
+    app.collector.current.llm_details =
+        Some("1 loaded models · context capacity 8192 tokens".into());
+    let text = render_app(&app, 120, 30);
+    assert!(text.contains("context capacity 8192 tokens"));
+    assert_eq!(app.collector.current.llm_prompt_tokens, None);
 }

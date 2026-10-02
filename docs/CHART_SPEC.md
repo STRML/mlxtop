@@ -14,30 +14,21 @@ metric an equal rectangle. SYSINFO is a dense full-width strip, not a tall card.
 | Row | Space allocation |
 | --- | --- |
 | Context | Three-row SYSINFO; compact selectable NVIDIA device table when present |
-| Resources | First and largest history row: memory/pressure 30%, process memory 30%, paging 40%; without process memory use memory 40% and paging 60% |
-| Supporting rates | Generation 50%, prefill 30%, GPU 20%; cap the row at six rows |
-| Requests | Prompt load takes half of an eight-row row; separate Cache and Queue take one quarter each |
-| Recent events | Journal gets about one quarter of terminal height, seven to twelve rows including borders |
+| Resources | Memory/pressure and paging each use half the width, capped at eight rows; process footprint stays in MLX Top and the static report |
+| Throughput | Generation 40%, prefill 35%, GPU 25%; use the remaining height for readable traces |
+| Requests | Prompt load takes half the width; Cache and Queue take one quarter each; nine to thirteen rows on regular terminals |
+| Recent events | Seven rows including borders (five event lines); three rows on compact macOS terminals |
 
-After the fixed context, request and Journal rows, give resources at least twice
-the height of the supporting rate row. At 170×42, resources get thirteen rows
-and supporting rates get six. Each memory/paging panel has at least twice the
-area of prefill at supported macOS sizes. Resource history appears before the
-rate and request rows; GPU belongs with the supporting rate charts.
-Prompt load never grows beyond eight rows in Overview. It uses seven rows on
-short macOS terminals and six with a compact NVIDIA table. Expanding a chart
-makes its full history available.
-At 170×42 the Journal has eight event rows. At 80×24 it retains the newest event;
-a compact NVIDIA table may consume this preview budget, with Journal available
-through `3`. Journal messages may wrap to a second line and are explicitly
-shortened if needed. Show newest events first, with aligned time and state
-columns. Measured latency may take 30% of a wide Journal row; it must not
-replace the Journal.
+Keep a stable layout across workload changes. At 170×42, resources use eight
+rows, throughput twelve, requests ten and Journal seven. Compact terminals
+retain six/seven request rows and exact readings when history cannot fit.
+A compact NVIDIA device table may consume the Journal preview budget; the full
+Journal remains available with `3`. Measured latency may take 30% of a wide
+Journal row. It must not replace Journal.
 
 An empty state explains the absence of samples without fabricated bars or axes.
 Request arrival, idle transitions, pressure and queue spikes must not rearrange
 panels. Use the existing critical banner and semantic colors to emphasize pressure.
-Keep system and process memory adjacent with independent percent/byte scales.
 NVIDIA identity and per-device readings retain a selectable table budget.
 
 | Panel | Contents |
@@ -45,10 +36,10 @@ NVIDIA identity and per-device readings retain a selectable table budget.
 | SYSINFO | Model/state, source/age, device/cores, RAM, LLM CPU/RSS, thermal and GPU allocation |
 | generation / prefill | Separate tok/s histories with independent axes; no outer throughput box |
 | prompt load | One labeled bar per observed request, cache split when reported |
-| memory / process memory | Adjacent percent/byte histories with independent axes; no outer memory box |
+| memory | Resident RAM occupancy in cyan, with separate pressure severity |
 | GPU | Utilization history and load state; hardware metadata belongs in SYSINFO |
 | paging / I/O | Paging-rate history, IN/OUT rates and a horizontal SWAP used/total capacity bar |
-| cache | Interval history, explicitly labeled average fallback and prefix hit reading |
+| cache | Interval history with cumulative TOTAL and prefix hit readings kept in fixed text positions |
 | queue | Independent active/waiting request history and counts |
 
 Cache and Queue must remain separate, independently selectable panels; never
@@ -61,8 +52,8 @@ On short terminals, show percentage capacity bars and exact readings rather
 than misleading one-row traces with 0/100 axes. Queue retains both counts even
 when history cannot fit. Enter expands a selected compact panel into history.
 Swap's capacity bar stays visible independently of paging-rate availability.
-Cache may show an **TOTAL** gauge when only aggregate reuse is available; this
-must never become interval history. A visible history window containing only
+Cache never substitutes an aggregate gauge for its interval history. When
+interval data is absent, show an empty state and retain TOTAL/prefix hit text. A visible history window containing only
 gaps must explain the missing samples, even if older off-screen data exists.
 
 ## Units and automatic ranges
@@ -74,7 +65,6 @@ fits its visible observations and labels the axis in the measured unit.**
 | --- | --- |
 | Generation and prefill | tok/s; independent ranges with readable rounded ticks and headroom |
 | Prompt size | tokens; zero-based automatic ceiling, size label on every visible bar |
-| Process memory | B/KiB/MiB/GiB; fitted lower and upper bounds with labeled ticks, distinct from system RAM percentage |
 | Paging / I/O | B/s, KiB/s or MiB/s; automatic ceiling, never a normalized 0–100 score |
 | Queue | requests; zero-based automatic ceiling shared by active and waiting |
 | First-token latency | measured milliseconds; zero-based automatic ceiling |
@@ -109,18 +99,17 @@ The current configured defaults are:
 
 | Metric | Green | Yellow | Red |
 | --- | --- | --- | --- |
-| Resident RAM (color follows pressure) | normal pressure | warning pressure | critical pressure |
+| PRESSURE label | normal pressure | warning pressure | critical pressure |
 | GPU utilization | below 75% | 75% to below 90% | 90% or more |
 | Paging rate | below 1 MiB/s | 1 MiB/s to below 16 MiB/s | 16 MiB/s or more |
 
 RAM percentage and bytes still measure physical occupancy including file cache.
-Its current value, compact gauge and trace all use captured pressure severity,
-with muted color for unknown pressure. Native macOS pressure is authoritative.
-Linux derives pressure from unavailable memory (`100 - MemAvailable%`) using
-configured 70/85 defaults, with full PSI stalls of 1%/5% escalating to watch/
-critical. These bands apply to unavailable memory, never resident occupancy.
-Memory connectors use the new sample's pressure and preserve endpoint colors;
-passing a percentage tick cannot synthesize a warning or recolor history.
+Its current value, compact gauge and trace use cyan for occupancy. Missing
+occupancy remains muted. The separate PRESSURE label uses the reported
+severity, so cyan occupancy does not imply healthy pressure. Native macOS
+pressure is authoritative. Linux derives pressure from unavailable memory
+(`100 - MemAvailable%`) using configured 70/85 defaults, with full PSI stalls
+of 1%/5% escalating to watch/critical. Occupancy is never a pressure threshold.
 
 Use resolved configuration thresholds, not duplicated constants in renderers.
 GPU bands mean utilization/load; red GPU utilization alone does not establish
@@ -138,9 +127,10 @@ and measured zero usage.
 Series without a defined health threshold must not invent one from their
 display range: a fast token rate, large prompt or large footprint is not by
 itself a fault. Use labeled identity/measurement colors for those series:
-generation/prefill and process footprint use cyan; a measured generation drop
+generation/prefill and resident occupancy use cyan; a measured generation drop
 can carry its recorded warning tone. Queue identifies active and waiting
-series and marks overlap. Prompt bars distinguish reported cached tokens
+series and marks exact equality with white `═`; overlapping connectors use muted continuous strokes and proper junctions.
+Unequal values rounded to one row use muted `≈`. Prompt bars distinguish reported cached tokens
 (green) from live/retained uncached tokens (cyan/blue); size changes stay
 numeric. Defining a new severity band requires recording its metric-specific
 meaning and thresholds here, with boundary tests.
@@ -151,9 +141,9 @@ System memory labels its physical occupancy as resident, with bytes/total and
 Includes file cache. macOS uses total RAM minus free and speculative pages;
 Linux uses MemTotal minus MemFree. Neither includes swapped-out bytes.
 Missing counters yield a gap, never 0% or 100%. Resident occupancy does not
-establish memory pressure. The PRESSURE label and newest numeric reading agree
-on severity, including critical pressure at low occupancy and normal pressure
-at high occupancy. Each earlier chart sample retains its own captured state.
+establish memory pressure. The PRESSURE label remains authoritative, including critical pressure at low
+occupancy and normal pressure at high occupancy. GPU, paging and measured
+throughput warnings retain their captured severity colors.
 
 ## Navigation
 
@@ -166,11 +156,15 @@ its zoom, while expanded views expose detailed window statistics.
 
 ## History, labels and review
 
-- Process memory puts the current byte reading and OS/PID attribution above
-  the trace. Show lifetime peak and add the complete signed growth field when
-  it fits. Missing current memory must not retain a stale growth value.
-- Keep one captured observation per time-series column at 1×; higher zoom
-  widens observations. Never interpolate a gap or recolor earlier samples.
+- Overview time-series panels share the same trailing sample window and zoom.
+  Size the window to fit the narrowest plot, then widen the same samples across
+  larger plots without dropping spikes or averaging observations. Missing data
+  stays disconnected. Relative horizontal positions refer to the same sample.
+  Label the common window explicitly, e.g. `window 34s` (sampling cadence
+  times sample slots). This is a rolling span, not elapsed runtime; it remains
+  fixed while the chart scrolls.
+  Expanded charts use the available width for a longer history. Prompt/latency
+  bars remain ordinal, with independent zoom; sampling cadence is unchanged.
 - Selected prompt history identifies its provider/model when it differs from
   SYSINFO, so retained requests cannot be mistaken for the current model.
 - Prompt bars reserve enough width for every size label at every zoom level.
@@ -191,7 +185,7 @@ its zoom, while expanded views expose detailed window statistics.
   treat that placeholder as missing, retaining the separately labeled average.
 - Distinguish Cache's interval reading and last interval age from aggregate
   `TOTAL` reuse. Label chart statistics `window avg`; provider averages use
-  `SERVER AVG` where space permits. Explain trailing gaps with the last sample
+  `SERVER AVG` in expanded views; keep Overview focused on LIVE and LAST. Explain trailing gaps with the last sample
   and age, and mark isolated observations with a visible dot. Counter resets,
   stale intervals and inconsistent cache deltas leave gaps, never false zeros.
 - Round traces to the nearest terminal row. Short Queue panels without at least

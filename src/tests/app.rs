@@ -292,6 +292,7 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
         ..Sample::default()
     };
     sample.mlx.version = Some("0.29".into());
+    sample.llm_details = Some("remote API · context capacity 8192 tokens".into());
     let text = report(&sample, Platform::MacOs);
     assert!(text.starts_with("mlxtop · static report (2s sample)\n\n"));
     assert!(text.contains("SIGNAL       LLM READY · HEALTHY"));
@@ -299,6 +300,7 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
     assert!(text.contains("PAGING       1.0 GiB / 4.0 GiB · 25% used · in 2.0 KiB/s · out 0 B/s"));
     assert!(text.contains("METAL        Apple M3 · 10 cores · GPU 45% · renderer 40%"));
     assert!(text.contains("LLM          oMLX · ready"));
+    assert!(text.contains("PROVIDER     remote API · context capacity 8192 tokens"));
     assert!(text.contains("active 1"));
     assert!(text.contains("TOKENS       PROMPT 1.2k · OUT 30"));
     assert!(text.contains("REQUEST      "));
@@ -747,7 +749,6 @@ fn overview_keys_scroll_requests_zoom_and_cycle_expanded_charts() {
         Chart::Cache,
         Chart::Memory,
         Chart::Paging,
-        Chart::Footprint,
         Chart::Queue,
     ] {
         assert!(visited.contains(&chart), "{chart:?} is reachable");
@@ -774,7 +775,6 @@ fn expanded_charts_render_each_metric_with_its_own_title() {
         (Chart::Gpu, "GPU"),
         (Chart::Memory, "MEMORY"),
         (Chart::Paging, "PAGING"),
-        (Chart::Footprint, "PROCESS"),
         (Chart::Queue, "QUEUE"),
         (Chart::Latency, "FIRST TOKEN"),
     ] {

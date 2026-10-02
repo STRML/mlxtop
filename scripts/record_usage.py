@@ -9,6 +9,7 @@ script. It performs no network requests and never writes response content.
 import argparse
 import fcntl
 import json
+import math
 import os
 import sys
 import time
@@ -21,6 +22,8 @@ PROVIDERS = {
     "llama.cpp": "llama.cpp", "llama-server": "llama.cpp",
     "lmstudio": "LM Studio", "lm studio": "LM Studio",
     "koboldcpp": "KoboldCpp", "localai": "LocalAI",
+    "vllm": "vLLM", "sglang": "SGLang", "jan": "Jan", "gpt4all": "GPT4All",
+    "llmster": "LM Studio",
 }
 
 
@@ -60,7 +63,7 @@ def usage_record(provider, response, *, request_id=None, model=None,
                 break
     if "prompt_tokens" not in counters:
         raise ValueError("Missing full prompt count; enable final streaming usage")
-    cached = usage.get("cached_tokens")
+    cached = usage.get("cached_tokens", usage.get("prompt_eval_cached_count"))
     for key in ("input_tokens_details", "prompt_tokens_details"):
         if isinstance(usage.get(key), dict):
             cached = usage[key].get("cached_tokens", cached)
@@ -78,10 +81,41 @@ def usage_record(provider, response, *, request_id=None, model=None,
     model = model if model is not None else response.get("model", response.get("model_instance_id"))
     if model is not None:
         record["model"] = _identifier(model)
+    timings = {}
+    supplied = response.get("timings", {})
+    if not isinstance(supplied, dict):
+        raise ValueError("Invalid timings")
+    speed = supplied.get("output_tokens_per_second")
+    if speed is None and provider == "LM Studio":
+        speed = usage.get("tokens_per_second")
+    if speed is None and provider == "Ollama":
+        duration = usage.get("eval_duration")
+        count = usage.get("eval_count")
+        if duration is not None and not _count(duration):
+            raise ValueError("Invalid decode duration")
+        if duration and _count(count):
+            speed = count / duration * 1_000_000_000
+    if speed is None and provider == "llama.cpp":
+        speed = supplied.get("predicted_per_second")
+    if speed is not None:
+        if type(speed) not in (int, float) or not math.isfinite(speed) or speed < 0:
+            raise ValueError("Invalid output throughput")
+        timings["output_tokens_per_second"] = speed
+    if ttft_ms is None:
+        ttft_ms = supplied.get("time_to_first_token_ms")
+    if ttft_ms is None and provider == "LM Studio":
+        seconds = usage.get("time_to_first_token_seconds")
+        if seconds is not None:
+            if (type(seconds) not in (int, float) or not math.isfinite(seconds)
+                    or seconds < 0 or seconds * 1000 >= 2**64):
+                raise ValueError("Invalid first-token timing")
+            ttft_ms = int(seconds * 1000)
     if ttft_ms is not None:
         if not _count(ttft_ms):
             raise ValueError("TTFT must be an explicitly measured integer in milliseconds")
-        record["timings"] = {"time_to_first_token_ms": ttft_ms}
+        timings["time_to_first_token_ms"] = ttft_ms
+    if timings:
+        record["timings"] = timings
     return record
 
 

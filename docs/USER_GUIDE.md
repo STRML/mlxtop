@@ -8,20 +8,22 @@ Detailed controls, runtime setup, and explanations of the dashboard readings.
 
 | View | Question answered | Key information |
 | --- | --- | --- |
-| Overview | Is memory or paging limiting inference? | Memory pressure, process footprint and paging first; supporting throughput, GPU, prompt history, cache, queue and recent events |
+| Overview | Is memory or paging limiting inference? | Memory pressure and paging, readable throughput, GPU, prompt history, cache, queue and recent events |
 | MLX Top | Which process owns the workload? | PID, command, CPU, memory %, RSS, page-ins, OS state and selected runtime details |
 | Journal | What changed during this session? | Request lifecycle, provider/model changes, paging, pressure, compression, GPU, thermal and recovery events |
 
-Overview starts with a dense full-width **SYSINFO** strip. The largest history
-row shows **memory / pressure**, **process memory** and **paging**. Below it,
-**generation**, **prefill** and **GPU** share a supporting row capped at six rows;
-prefill gets 30% of its width. Select a chart and press Enter for its full view.
+Overview starts with a dense full-width **SYSINFO** strip. **Memory / pressure**
+and **paging** share a compact first row. **Generation**, **prefill** and **GPU**
+use the next row, with enough height to show rate changes clearly. Select a
+chart and press Enter for its full view. OS process footprint is available in
+MLX Top and the static report; Overview has no process-memory chart.
 System memory shows **resident** physical RAM, its byte count/total, and
 **Includes file cache**. This is occupied RAM, including reclaimable cache.
 On macOS it is total RAM minus free and speculative pages; on Linux it is
 `MemTotal - MemFree`. It is independent of **PRESSURE**, which retains OS severity.
-Its reading, trace and compact gauge use the pressure state captured with each
-sample: green for normal, yellow for watch, red for critical, muted for unknown.
+Its reading, trace and compact gauge use cyan for occupancy. The separate
+PRESSURE label uses green for normal, yellow for watch, red for critical and
+muted for unknown.
 A full cache alone does not establish memory pressure. Linux derives pressure
 from unavailable memory (`MemTotal - MemAvailable`) and full PSI stalls;
 `memory_warn_load` and `memory_critical_load` configure those Linux bands.
@@ -30,12 +32,13 @@ application pages in its reported percentage and is not used as RAM usage.
 
 A compact row holds **prompt load**, **Cache** and **Queue**. The bottom **recent
 Journal** shows timestamped changes, newest first. At 170×42 the resource row is
-thirteen rows high and the Journal has eight event rows, with long messages
+eight rows high, throughput twelve and Journal has five event rows, with long messages
 wrapping to a second line. Press `3` for the full Journal.
 
-Prompt load stays within eight rows in Overview. Each panel keeps its place
+Prompt load uses nine to thirteen rows on regular terminals. Each panel keeps its place
 when requests arrive or the model becomes idle. Each chart has one border and
-independent selection, zoom and expansion controls. Hardware, RAM, CPU/RSS,
+independent selection and expansion controls. Time-series panels share zoom;
+request bars retain independent zoom. Hardware, RAM, CPU/RSS,
 thermal and GPU allocation live in SYSINFO alongside model and telemetry age.
 The top bar holds view navigation and sampling state; the bottom bar shows
 controls for the current view and selected chart. Detailed chart statistics
@@ -47,7 +50,8 @@ paging traffic. A measured all-zero window says **No paging traffic** and keeps
 its zero trace without inventing a 1 B/s ceiling. Missing samples remain gaps.
 On short terminals, percentage panels show a capacity bar and
 exact reading; Enter opens the full history. If only aggregate cache reuse is
-available, Cache shows an explicitly labeled TOTAL bar and no interval trace.
+available, Cache retains its interval empty state and TOTAL/prefix hit text.
+It never switches to a cumulative gauge.
 Idle models can show the latest observed prompt with its age. Selected prompt
 history identifies a different provider/model when browsing retained requests.
 
@@ -59,19 +63,22 @@ history recalculates these ranges. The current axis is labeled; its limits are
 display ranges, not hardware or model limits. See the
 [chart specification](CHART_SPEC.md) for the rules shared by every chart.
 
-Each time series is a stepped trace: at 1×, one column represents one captured
-sample, newest at the right. Rate traces contain only active-request
+Each time series is a stepped trace, newest at the right. Overview uses the
+same trailing sample window for every time-series panel. Wider plots widen
+those same observations; no samples are dropped. Window labels describe
+sample slots at the selected sampling cadence. Expanded charts show more history. Rate traces contain only active-request
 telemetry. Server averages and retained results stay explicitly labeled
 `AVG` or `LAST`; they are never plotted as live samples. Missing, stale, idle
 and completion-log-only rate samples leave gaps. A provider/model change
 starts a new throughput history.
 An isolated observation appears as a dot. When recent samples are missing, the
 chart labels the last visible reading and its age. `window avg` summarizes the
-visible captured samples; `SERVER AVG` is the separate provider average, which may predate mlxtop.
+visible captured samples; `SERVER AVG` in expanded views is the separate
+provider average, which may predate mlxtop. Overview prioritizes LIVE and LAST.
 Cache labels interval samples independently from its cumulative `TOTAL` reuse.
 oMLX's initial prefill speed placeholder leaves a gap until a measured rate is
 available. A short prefill can finish between polls without producing a live
-rate sample; its server average remains visible. Short Queue panels show exact
+rate sample; its server average remains available in the expanded chart. Short Queue panels show exact
 counts; Enter expands their history with a readable request scale.
 A trace keeps the severity tone recorded with its sample, so a later refresh
 cannot recolor or rewrite history. For readability, the plotted position uses
@@ -156,10 +163,7 @@ report retains `—` for missing fields. RSS, GPU load and model memory are neve
 substituted for allocator readings. mlxtop reads existing provider interfaces
 and operating-system metrics; it does not patch or restart serving runtimes.
 
-On macOS, **process memory** puts the current OS footprint above its trace,
-with **OS · PID**, labeled byte ticks and a fitted range. Its footer shows
-lifetime **peak** and adds signed **growth** when it fits; expand the panel for
-all details. These values come
+On macOS, MLX Top and the static report show OS process memory. Values come
 directly from `proc_pid_rusage` for the detected LLM process with the largest
 RSS. They describe that one process, not the sum of all model servers; the PID
 identifies the scope.
@@ -232,8 +236,8 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 | --- | --- |
 | Arrow keys | Select a neighboring chart |
 | Mouse click | Select the chart under the pointer |
-| `+` / `-` or mouse wheel | Zoom history in / out on that chart, from 1× to 8× |
-| `0` | Reset the selected chart to 1× |
+| `+` / `-` or mouse wheel | Zoom time series together, or selected request bars, from 1× to 8× |
+| `0` | Reset time-series zoom, or selected request bars, to 1× |
 | `Enter` / `Esc` | Enlarge / restore the selected chart |
 | Right-click | Toggle enlarged view |
 | `Shift-↑` / `Shift-↓` | Inspect newer / older prompt observations |
@@ -241,7 +245,7 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 | `PgUp` / `PgDn` | Move through prompt history by ten requests |
 | `[` / `]` | Select an NVIDIA card on Linux |
 
-Each chart retains its own zoom. Zoom widens captured observations and shows a
+Time-series charts share zoom. Prompt and latency bars retain their own zoom. Zoom widens captured observations and shows a
 shorter history range; it does not change the sampling interval or the values.
 Expanded charts keep sampling, and Enter/Esc restores the dashboard. Hold the
 terminal's selection modifier (usually Shift) to select text with the mouse.
@@ -334,7 +338,7 @@ request's size.
 
 The summary also shows the change from the previous observed request and the
 observation's freshness. Prompt load uses half the width of a compact row,
-beside Cache and Queue. It is eight rows high, or seven on short macOS terminals
+beside Cache and Queue. It is nine to thirteen rows high, or seven on short macOS terminals
 and six with a compact NVIDIA device table. Enter expands it for a larger view.
 Newest requests stay at the right with fixed spacing, including a single bar.
 Every visible bar has a size label beneath it,
@@ -415,37 +419,29 @@ observation, and past requests stay available. Use **Shift-↑ / Shift-↓** or
 
 ## Operator charts
 
-**Memory** shows system memory percentage. **Process memory** has its own byte
-scale when space permits; compact layouts keep the process footprint as a
-reading. **GPU** shows utilization history, with hardware and allocation
-details in SYSINFO. **Paging / I/O** shows actual byte rates with a matching
-automatic axis, separate input/output rates, and a SWAP used/total capacity
-bar. **Cache** and **Queue** are separate charts with independent selection and
-zoom. Smaller panels keep exact readings when there is insufficient room for
-history.
+**Memory** shows system resident occupancy in cyan, with a separate pressure
+severity label. **GPU** shows utilization history, with hardware and allocation
+details in SYSINFO. **Paging / I/O** shows byte rates, separate input/output
+rates and a SWAP capacity bar. **Cache** always shows interval history with
+cumulative reuse kept in text. **Queue** shows active and waiting requests.
+All time-series panels share a visible sample window and zoom in Overview.
 
-GPU and paging traces retain green/yellow/red value bands. System-memory
-traces retain the pressure color captured with each sample.
+Chart labels such as `window 34s` describe the rolling history span, not elapsed
+runtime. The span stays fixed while new samples enter on the right. Resize the
+terminal, expand a chart or change zoom to change the visible span.
+
+GPU and paging traces retain green/yellow/red value bands.
 GPU defaults are green below 75%, yellow from 75% and red from 90%; these are
 load bands, not proof of a bottleneck. Configured thresholds apply consistently
 to numeric readings, traces and device meters. Percentage axes stay at 0–100;
 all other axes use the real measured unit and fit the visible data.
 
 **Queue** plots active requests in cyan and waiting requests in yellow on one
-shared, labeled zero baseline. A white `═` marks overlapping trace cells,
-including equal values and values that coincide at terminal resolution. Exact
+shared, labeled zero baseline. A white `═` marks equal measured counts. Overlapping connectors merge into continuous muted lines and junctions.
+Muted `≈` marks unequal values that coincide at terminal resolution. Exact
 counts remain visible in the panel. Both series share an automatic request-count scale based on their visible
 maximum. Idle zeros are valid; stale, missing and client-reported values
 produce gaps. Queue length is a demand signal, not a latency measurement.
-
-**Process memory** plots the OS physical footprint against an automatic
-byte scale based on visible samples. The current byte reading and PID appear
-above the plot, with labeled upper, middle and lower ticks. The axis can start
-above zero to show changes clearly; its range is not the process's configured
-memory limit. Missing samples and
-process-instance changes break the trace. Both time-series charts retain one
-captured sample per column at 1×, newest at the right; resetting history clears
-them. The process-memory footer shows lifetime peak and signed growth.
 
 **First token** appears only after an explicit client timing is supplied in the
 existing usage JSONL envelope:
@@ -486,19 +482,50 @@ rates from completed requests are historical and do not enter live rate charts.
 The age on KoboldCpp results is time since first observed, because its performance
 endpoint does not provide the completion timestamp.
 
-Automatic selection follows the detected provider. To select a particular local
-server, use one of these commands:
+### Provider endpoints
+
+Automatic selection follows the detected provider. Explicit `MLXTOP_PROVIDER`
+selection takes priority and also works when the server runs on another host.
+The dashboard monitors one selected server at a time; use separate terminal
+sessions to monitor independent endpoints concurrently.
+
+| Provider name | Default port | Read-only endpoints |
+| --- | --- | --- |
+| `ollama` | 11434 | `/api/ps` |
+| `lmstudio` or `llmster` | 1234 | `/api/v1/models`, fallback `/api/v0/models`, then `/v1/models` |
+| `vllm` | 8000 | `/metrics` |
+| `sglang` | 30000 | `/metrics` (requires `--enable-metrics`) |
+| `llama.cpp` | 8080 | `/slots`, `/metrics` (requires `--metrics`) |
+| `koboldcpp` | 5001 | `/api/extra/perf` |
+| `mlx-lm`, `localai` | 8080 | `/v1/models` |
+| `jan` | 6767 | `/v1/models`; for older desktop servers set port 1337 |
+| `gpt4all` | 4891 | `/v1/models`; enable the local API server in GPT4All |
 
 ```sh
-MLXTOP_PROVIDER=koboldcpp ./target/release/mlxtop
-MLXTOP_PROVIDER=llama.cpp MLXTOP_PROVIDER_PORT=8081 ./target/release/mlxtop
+MLXTOP_PROVIDER=ollama mlxtop
+MLXTOP_PROVIDER=llama.cpp MLXTOP_PROVIDER_PORT=8081 mlxtop
+MLXTOP_PROVIDER=vllm MLXTOP_PROVIDER_URL=https://inference.example.net mlxtop
 ```
 
-Native adapters use loopback only: KoboldCpp defaults to port 5001 and
-llama-server to port 8080. `MLXTOP_PROVIDER_PORT` overrides those ports. No API
-keys are sent by these adapters. oMLX retains its existing endpoint and login
-configuration. Explicit provider selection takes priority over process detection.
-The dashboard selects one provider; it does not merge unrelated servers.
+`MLXTOP_PROVIDER_PORT` overrides the default loopback port.
+`MLXTOP_PROVIDER_URL` overrides host/port and can include a reverse-proxy path
+prefix. Supply the server root (for example `https://host/llm`), **without** the
+endpoint suffix such as `/v1` or `/metrics`. HTTP and HTTPS are supported;
+HTTPS certificates are verified. Set `MLXTOP_PROVIDER_API_KEY` in the environment
+when the server requires bearer authentication. Remote credentials also require
+`MLXTOP_ALLOW_REMOTE_AUTH=1`, preserving the existing authentication opt-in.
+Keys are never printed or stored
+in usage reports. Redirects and environment proxies are disabled; credentials
+are sent only to the configured server. Requests time out, response sizes are
+bounded and failures back off. Cached readings keep their original age and
+become stale after five seconds. Invalid URLs or rejected authentication leave
+telemetry unavailable; there is no unauthenticated fallback to another server.
+
+oMLX retains its existing endpoint and login configuration; these provider
+variables apply to the other adapters. API details appear in **Top** and
+`--once` reports. With a remote URL, OS memory, GPU and process readings still
+belong to the machine running mlxtop. Remote rates are excluded from local
+hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
 
 - **oMLX:** reads active request IDs and prompt counts from admin statistics.
   Some engines/phases do not expose counts; untokenized queued zeros are skipped
@@ -520,9 +547,28 @@ The dashboard selects one provider; it does not merge unrelated servers.
   Slot capacity, processed prefill
   work and retained context are not treated as full request prompt counts. Use
   the usage-file integration below for exact completion usage.
-- **MLX-LM, Ollama, LM Studio and LocalAI:** their response usage needs client
-  integration. Without it, prompt counts remain unavailable. LocalAI's aggregate
-  usage API is not treated as individual requests.
+- **Ollama:** `/api/ps` supplies loaded models, summed resident VRAM and a single
+  model's configured context capacity. Residency does not establish request
+  activity. The native completion recorder preserves decode speed and cached
+  prompt tokens; total request duration is not used as decode time or TTFT.
+- **LM Studio:** native v1 supplies loaded instances and their context capacity;
+  v0 supplies loaded model identity. The final fallback supplies an available-model
+  catalogue. Download size is never reported as allocated RAM. Native completion
+  stats supply output speed and explicitly reported first-token time through the
+  usage recorder.
+- **vLLM/SGLang:** Prometheus polling sums active/waiting requests and computes
+  server-wide generation/prompt-token rates from successive counter samples.
+  These are sampled server rates, not per-request averages. The first sample,
+  counter resets, changed series and gaps longer than five seconds produce no
+  rate. vLLM also supplies interval and cumulative prefix-token cache reuse;
+  SGLang supplies prefix hit rate when a single series is unambiguous.
+  Top shows maximum reported KV occupancy across engines and cumulative mean
+  TTFT. Aggregate latency is never inserted into individual request history.
+  No per-request prompt counts or IDs are inferred from aggregate counters.
+- **MLX-LM, LocalAI, Jan and GPT4All:** `/v1/models` supplies the available model
+  catalogue. This is not proof that models are loaded or processing a request.
+  Completion usage needs client integration, and missing counts/rates stay
+  unavailable. LocalAI aggregate usage is not treated as individual requests.
 
 ### Client-reported usage file
 
@@ -533,12 +579,12 @@ local JSONL file, then launch mlxtop with:
 MLXTOP_USAGE_FILE=/absolute/path/usage.jsonl ./target/release/mlxtop
 ```
 
-For llama-server, the file supplements native polling: completed requests appear
+For all live native adapters, the file supplements polling: completed requests appear
 in prompt history while live slots and queue counts remain available. Completed
 prompt counts are never combined with an active slot's output to estimate context.
 For other runtimes, valid file records take priority over native last-result
 reports (and over oMLX polling). An empty or invalid file does not disable
-llama-server or KoboldCpp polling.
+native polling.
 
 mlxtop only reads the file; your client must write the records. Explicit or
 detected provider selection filters the file to that runtime. If no runtime is
@@ -553,7 +599,7 @@ optional. Example shape (replace the timestamp with the completion time):
 
 Supported provider names: `omlx`, `mlx-lm` (also `mlx_lm.server`), `ollama`,
 `llama.cpp` (also `llama-server`), `lmstudio` (also `LM Studio`), `koboldcpp`,
-and `localai`.
+`localai`, `vllm`, `sglang`, `jan`, and `gpt4all`.
 
 Copy only usage counters from the response, with the required envelope above:
 
@@ -561,8 +607,8 @@ Copy only usage counters from the response, with the required envelope above:
 | --- | --- |
 | OpenAI-compatible usage, including MLX-LM | `usage.prompt_tokens`, `usage.completion_tokens`, optional `usage.prompt_tokens_details.cached_tokens` |
 | Responses-style usage | `usage.input_tokens`, `usage.output_tokens`, optional `usage.input_tokens_details.cached_tokens` |
-| Ollama native | `prompt_eval_count`, `eval_count` at record top level |
-| LM Studio native | `stats.input_tokens`, `stats.total_output_tokens`; `model_instance_id` is accepted as the model |
+| Ollama native | `prompt_eval_count`, `eval_count`, optional `prompt_eval_cached_count`; decode speed from `eval_count / eval_duration` (nanoseconds) |
+| LM Studio native | `stats.input_tokens`, `stats.total_output_tokens`, `stats.tokens_per_second`, `stats.time_to_first_token_seconds`; `model_instance_id` is accepted as the model |
 
 For MLX-LM streaming, request `stream_options: {"include_usage": true}` and copy
 the final usage chunk. Other streaming APIs may likewise require usage to be
@@ -579,7 +625,8 @@ from scripts.record_usage import append_usage
 append_usage("/absolute/path/usage.jsonl", "ollama", response)
 ```
 
-It accepts the response formats in the table for every listed provider. For SDK
+It accepts the response formats in the table for every listed provider, normalizes
+native timings into the allowlisted `timings` envelope and excludes response text. For SDK
 objects, pass their dictionary representation (for example, `model_dump()`).
 For streaming, pass only the final usage-bearing chunk, or LM Studio's final
 aggregated response. The helper generates a unique request ID and completion
@@ -634,7 +681,7 @@ llama-server router mode and authenticated monitoring endpoints are not supporte
 mlxtop reads macOS counters from `sysctl`, `memory_pressure`, `vm_stat`,
 `ioreg`, `pmset` and `ps`. On Linux it reads `/proc/meminfo`, `/proc/vmstat`,
 `/proc/pressure/memory`, `/sys/class/thermal`, `nvidia-smi` (when present)
-and `ps`. It reads local provider endpoints and logs only for
+and `ps`. It reads configured provider endpoints and local logs only for
 supported adapters. The application does not contain analytics, upload
 collected metrics, modify model state or send synthetic inference requests.
 
@@ -760,3 +807,13 @@ The Terminal installer in `scripts/install.sh` downloads the same DMG, verifies
 its checksum, and extracts the package to install the command in `~/.local/bin`
 without sudo. Use the installer linked from the current README; the original
 installer in the historical v1.0.0 source tag used the superseded tarball.
+
+### Provider API references
+
+The adapters follow the documented read-only APIs:
+[Ollama running models](https://docs.ollama.com/api/ps),
+[LM Studio model inventory](https://lmstudio.ai/docs/developer/rest/list),
+[vLLM metrics](https://github.com/vllm-project/vllm/blob/main/vllm/v1/metrics/loggers.py),
+[SGLang production metrics](https://docs.sglang.io/docs/references/production_metrics),
+[Jan CLI](https://www.jan.ai/docs/desktop/cli), and
+[GPT4All API server](https://docs.gpt4all.io/gpt4all_api_server/home.html).

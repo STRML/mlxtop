@@ -31,24 +31,20 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 - Use one border per chart. Place a dense full-width SYSINFO strip above the
   histories; do not wrap charts in another throughput box.
   SYSINFO owns hardware identity, cores, RAM, CPU/RSS, thermal and GPU allocation.
-  The first and largest history row holds system memory/pressure, process
-  footprint and paging at 30/30/40 percent widths. Without process footprint,
-  memory/paging use 40/60. Give this row at least twice the height of the rate
-  row. Generation, prefill and GPU share a supporting row at 50/30/20 percent
-  widths, capped at six rows. Prefill stays selectable and expandable.
-  Below these rows, use half the width for compact prompt history and one
-  quarter each for Cache and Queue. Preserve separate scales and selectable
-  charts. Paging combines traffic history with a swap capacity bar.
-  Show measured latency beside the Journal when space permits.
+  Memory/pressure and paging share the first row equally, capped at eight rows.
+  Generation, prefill and GPU use 40/35/25 percent widths and receive the
+  remaining height. Prompt history takes half of the next row, with Cache and
+  Queue taking one quarter each. Paging includes the swap capacity bar.
+  OS footprint remains in MLX Top and the static report, without a chart.
+  Show measured latency beside Journal when space permits.
 - At very short chart heights, use percentage capacity bars and exact readings
   instead of one-row traces with misleading axes. Preserve units on standalone
   narrow rate charts. Keep an accessible help hint and separate chart/view keys.
-- Cap prompt history at eight rows in Overview (seven on short macOS terminals,
-  six with a compact NVIDIA table). Give the Journal about one quarter of the
-  height, bounded to seven–twelve rows on regular terminals. It shows eight
-  event rows at 170×42. A short macOS terminal retains one recent event; full
-  Journal is always available with `3`. Wrap summaries to at most two rows,
-  align time/state columns, and mark shortened messages with an ellipsis.
+- Give prompt history nine to thirteen rows on regular terminals, seven on
+  short macOS terminals and six with a compact NVIDIA table. Journal gets
+  seven rows on regular terminals (five event lines), three on compact macOS
+  terminals; the full Journal is available with `3`. Wrap summaries to at most
+  two rows, align time/state columns, and mark shortened messages.
 - Keep a one-row header for views and sampling state, and contextual controls
   in a bottom bar. Show current readings in chart headers, moving detailed
   window statistics into expanded views. Help and quit remain accessible.
@@ -84,7 +80,7 @@ Use the existing palette; do not introduce per-widget color schemes.
 | Live request in prompt history | Cyan plus LIVE |
 | Historical request in prompt history | Blue plus LAST SEEN or REPORTED and age |
 | Prompt size changes | Muted numeric comparison; never warning markers on bars |
-| Resident RAM | Height shows occupancy including file cache; color follows captured pressure, with an explicit PRESSURE label |
+| Resident RAM | Cyan shows occupancy including file cache; the separate PRESSURE label carries OS severity |
 | GPU utilization | Green/yellow/red configured load bands, with a numeric reading and load label |
 | Supporting text, unknown data, historical advice | Muted |
 
@@ -104,7 +100,7 @@ colors in time-series history instead of recoloring old samples on refresh.
 - State chart units and scales. Only percentage charts use 0–100; numeric
   axes automatically fit visible observations in their actual units. These
   display ranges are not model or hardware limits. Retain exact selected
-  values. Keep time-series gaps disconnected and one column per sample at 1×.
+  values. Keep time-series gaps disconnected and never drop captured samples to fit a plot.
 - Compare like-for-like provider/model observations. Say previous observed
   request; do not assume conversation membership or a tool loop.
 - Show cache reuse only when reported for that request. Do not substitute an
@@ -123,13 +119,8 @@ colors in time-series history instead of recoloring old samples on refresh.
   Cache availability must not alter bar height. Partial cells that cannot fit
   both segment colors and empty space use the dominant segment; the selected
   readout retains the precise count and reported cache reuse.
-- Label OS process memory with its PID and source. Put the current byte value
-  above a trace with labeled lower/middle/upper ticks. Fit the range to visible
-  values; it may start above zero and never implies a process memory limit.
-  Keep peak and complete growth fields in the footer when space permits. Keep process footprint,
-  RSS and allocator counters distinct. Lifetime peak must not be confused with
-  a peak observed only during monitoring. Growth requires consecutive readings
-  of the same process instance; positive growth alone does not imply severity.
+- Keep OS process memory in MLX Top and the static report, attributed to its
+  PID and source. Keep footprint, RSS and allocator counters distinct.
 - Suggestions must follow visible evidence. Prompt history emphasizes actual
   token counts, recent median and range. GPU utilization alone establishes
   neither a slowdown nor a compute bottleneck. Diagnostics should pair a
@@ -147,10 +138,10 @@ colors in time-series history instead of recoloring old samples on refresh.
 - Tab/Shift-Tab switch views globally, including from an expanded chart or
   an active process filter. In Overview, arrow keys select charts. Mouse clicks select,
   the wheel and +/− zoom the selected history, and Enter/Esc enlarge/restore.
-  Keep each chart's zoom independent and sampling cadence unchanged. At 1×,
-  time-series charts use one column per observation, while prompt bars reserve
-  space for each size label. 2×/4×/8× widen observations without inventing
-  intermediate readings. Show selection with border shape as well as color.
+  Time-series charts share their window and zoom in Overview, widening the
+  same observations to fit different panel widths. Prompt and latency bars
+  retain independent ordinal zoom. Sampling cadence remains unchanged.
+  Show selection with border shape as well as color.
 - MLX Top prioritizes the process table and selected-process details. Show
   filtered aggregate CPU/RSS and full commands. OS readings must belong to
   the selected PID; label provider-wide telemetry as runtime data rather than

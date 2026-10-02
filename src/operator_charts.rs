@@ -6,8 +6,6 @@ use super::*;
 struct Point {
     active: Option<u64>,
     waiting: Option<u64>,
-    footprint: Option<u64>,
-    process: Option<(u32, u64)>,
     provider: String,
 }
 
@@ -29,8 +27,6 @@ impl History {
         self.points.push_back(Point {
             active: fresh.then_some(sample.llm_active_requests).flatten(),
             waiting: fresh.then_some(sample.llm_waiting_requests).flatten(),
-            footprint: sample.process_memory.as_ref().map(|m| m.footprint),
-            process: sample.process_memory.as_ref().map(|m| (m.pid, m.started)),
             provider: sample.llm_provider.clone(),
         });
         while self.points.len() > limit {
@@ -173,10 +169,18 @@ fn queue_tick(value: u64) -> String {
     format!("{:.1}{suffix}", value as f64 / divisor as f64)
 }
 
-fn queue_axis(history: &History, width: u16, zoom: u16) -> (u16, u64, usize) {
+fn queue_axis(
+    history: &History,
+    width: u16,
+    zoom: u16,
+    window: Option<usize>,
+) -> (u16, u64, usize) {
     let mut label_width = 3.min(width.saturating_sub(1));
     loop {
-        let visible = width.saturating_sub(label_width).div_ceil(zoom.max(1)) as usize;
+        let visible = window
+            .unwrap_or(usize::from(width.saturating_sub(label_width)))
+            .div_ceil(usize::from(zoom.max(1)))
+            .max(1);
         let ceiling = chart_scale::ceiling(
             history
                 .points
@@ -199,12 +203,51 @@ fn queue_axis(history: &History, width: u16, zoom: u16) -> (u16, u64, usize) {
     }
 }
 
+// Merge actual stroke directions instead of stamping a cross into every
+// occupied cell. Coincident vertical connectors must remain vertical lines.
+fn queue_junction(active: char, waiting: char) -> char {
+    if active == '↑' || waiting == '↑' {
+        return '↑';
+    }
+    if active == '━' && waiting == '━' {
+        return '≈';
+    }
+    let directions = |glyph| match glyph {
+        '━' => 0b1010, // left + right
+        '┃' => 0b0101, // up + down
+        '┏' => 0b0110,
+        '┓' => 0b1100,
+        '┗' => 0b0011,
+        '┛' => 0b1001,
+        _ => 0,
+    };
+    match directions(active) | directions(waiting) {
+        0b0101 => '┃',
+        0b0110 => '┏',
+        0b1100 => '┓',
+        0b0011 => '┗',
+        0b1001 => '┛',
+        0b0111 => '┣',
+        0b1101 => '┫',
+        0b1110 => '┳',
+        0b1011 => '┻',
+        _ => '╋',
+    }
+}
+
+pub(super) fn queue_plot_width(history: &History, width: u16) -> u16 {
+    let inner = width.saturating_sub(2);
+    let (gutter, _, _) = queue_axis(history, inner, 1, None);
+    inner.saturating_sub(gutter)
+}
+
 pub(super) fn queue(
     frame: &mut Frame,
     area: Rect,
     history: &History,
     interval: Duration,
     zoom: u16,
+    window: Option<usize>,
 ) {
     let last = history.points.back();
     let active = last.and_then(|p| p.active);
@@ -247,17 +290,31 @@ pub(super) fn queue(
         return;
     }
     let narrow = area.width < 38;
-    let (label_width, ceiling, visible) = queue_axis(history, area.width.saturating_sub(2), zoom);
+    let (label_width, ceiling, visible) =
+        queue_axis(history, area.width.saturating_sub(2), zoom, window);
     let ceiling_label = queue_tick(ceiling);
     let counts = format!("active {} waiting {}", count(active), count(waiting));
     let split_counts = narrow && counts.len() > usize::from(area.width.saturating_sub(2));
-    let window = chart_window_label(history.points.len().min(visible), interval);
+    let window = chart_window_label(
+        if window.is_some() {
+            visible
+        } else {
+            history.points.len().min(visible)
+        },
+        interval,
+    );
     let subtitle = if split_counts {
         format!("active {}", count(active))
-    } else if area.width < 26 {
-        format!("0–{ceiling_label} req · {window}")
     } else {
-        format!("0–{ceiling_label} req · auto · {window}")
+        [
+            format!("0–{ceiling_label} req · auto · {window}"),
+            format!("0–{ceiling_label} req · {window}"),
+            format!("req · {window}"),
+            window,
+        ]
+        .into_iter()
+        .find(|text| Line::from(text.as_str()).width() <= usize::from(area.width.saturating_sub(2)))
+        .unwrap_or_default()
     };
     let plot = panel_area(
         frame,
@@ -271,14 +328,6 @@ pub(super) fn queue(
         subtitle,
         None,
     );
-    let active_values: Vec<_> = history.points.iter().map(|p| p.active).collect();
-    let waiting_values: Vec<_> = history.points.iter().map(|p| p.waiting).collect();
-    let breaks: Vec<_> = history
-        .points
-        .iter()
-        .enumerate()
-        .map(|(i, p)| i > 0 && p.provider != history.points[i - 1].provider)
-        .collect();
     if plot.height < 2 || plot.width <= label_width {
         return;
     }
@@ -303,7 +352,7 @@ pub(super) fn queue(
                 Style::default().fg(YELLOW),
             ),
             Span::styled(
-                if narrow { "" } else { "═ overlap" },
+                if narrow { "" } else { "═ equal" },
                 Style::default().fg(Color::White),
             ),
         ])),
@@ -333,31 +382,65 @@ pub(super) fn queue(
             .set_symbol("─")
             .set_fg(DIM);
     }
-    trace(frame, graph, &active_values, &breaks, ceiling, CYAN, zoom);
+    // Expand the shared ordinal sample window across this graph, retaining gaps.
+    let indices: Vec<_> = (0..usize::from(graph.width))
+        .map(|column| {
+            let offset = column * visible / usize::from(graph.width);
+            history.points.len().checked_sub(visible - offset)
+        })
+        .collect();
+    let active_values: Vec<_> = indices
+        .iter()
+        .map(|i| i.and_then(|i| history.points[i].active))
+        .collect();
+    let waiting_values: Vec<_> = indices
+        .iter()
+        .map(|i| i.and_then(|i| history.points[i].waiting))
+        .collect();
+    let breaks: Vec<_> = indices
+        .iter()
+        .enumerate()
+        .map(|(column, i)| {
+            i.is_some_and(|i| i > 0 && history.points[i].provider != history.points[i - 1].provider)
+                && (column == 0 || indices[column - 1] != *i)
+        })
+        .collect();
+    trace(frame, graph, &active_values, &breaks, ceiling, CYAN, 1);
     let active_cells: Vec<_> = (graph.y..graph.bottom())
         .flat_map(|y| (graph.x..graph.right()).map(move |x| (x, y)))
         .filter_map(|(x, y)| {
             let cell = &frame.buffer_mut()[(x, y)];
-            (cell.fg == CYAN).then_some((x, y, cell.symbol() == "↑"))
+            (cell.fg == CYAN).then_some((x, y, cell.symbol().chars().next().unwrap_or(' ')))
         })
         .collect();
-    trace(
-        frame,
-        graph,
-        &waiting_values,
-        &breaks,
-        ceiling,
-        YELLOW,
-        zoom,
-    );
-    // Preserve both series wherever their rasterized traces share a cell.
-    // This includes equal values and values indistinguishable at terminal resolution.
-    for (x, y, active_overflow) in active_cells {
+    trace(frame, graph, &waiting_values, &breaks, ceiling, YELLOW, 1);
+    // Equality is a fact about the samples, not an intersection of rasterized
+    // connectors. Preserve stroke geometry and mark rounded collisions separately.
+    for (x, y, active_glyph) in active_cells {
         if frame.buffer_mut()[(x, y)].fg == YELLOW {
-            let overflow = active_overflow || frame.buffer_mut()[(x, y)].symbol() == "↑";
+            let column = usize::from(x - graph.x);
+            let equal = active_values[column]
+                .zip(waiting_values[column])
+                .filter(|(active, waiting)| active == waiting)
+                .is_some_and(|(value, _)| {
+                    let scaled = ((u128::from(value.min(ceiling)) * u128::from(graph.height - 1)
+                        + u128::from(ceiling) / 2)
+                        / u128::from(ceiling)) as u16;
+                    y == graph.bottom() - 1 - scaled
+                });
+            let waiting_glyph = frame.buffer_mut()[(x, y)]
+                .symbol()
+                .chars()
+                .next()
+                .unwrap_or(' ');
+            let glyph = if equal && active_glyph != '↑' && waiting_glyph != '↑' {
+                '═'
+            } else {
+                queue_junction(active_glyph, waiting_glyph)
+            };
             frame.buffer_mut()[(x, y)]
-                .set_symbol(if overflow { "↑" } else { "═" })
-                .set_fg(Color::White);
+                .set_symbol(&glyph.to_string())
+                .set_fg(if equal { Color::White } else { MUTED });
         }
     }
     if active_values
@@ -370,160 +453,6 @@ pub(super) fn queue(
             graph,
         );
     }
-}
-
-fn footprint_axis(history: &History, width: u16, zoom: u16) -> (u16, u64, u64) {
-    let mut gutter = 9.min(width.saturating_sub(1));
-    loop {
-        let visible = width.saturating_sub(gutter).div_ceil(zoom.max(1)) as usize;
-        let (low, high) = chart_scale::range(
-            history
-                .points
-                .iter()
-                .rev()
-                .take(visible)
-                .filter_map(|p| p.footprint),
-            MIB,
-        );
-        let required =
-            (bytes(low).len().max(bytes(high).len()) as u16 + 1).min(width.saturating_sub(1));
-        if required <= gutter {
-            return (gutter, low, high);
-        }
-        gutter = required;
-    }
-}
-
-pub(super) fn footprint(
-    frame: &mut Frame,
-    area: Rect,
-    history: &History,
-    sample: &Sample,
-    zoom: u16,
-) {
-    let last = sample.process_memory.as_ref();
-    let mut block = panel("process memory", Tone::Cyan);
-    if area.width >= 28 && area.height >= 6 {
-        block = block.title(
-            Line::from(Span::styled(" auto ", Style::default().fg(MUTED)))
-                .alignment(Alignment::Right),
-        );
-    }
-    let mut footer = last
-        .map(|m| format!("peak {}", bytes(m.peak)))
-        .unwrap_or_else(|| "OS footprint".into());
-    if let Some(growth) = last.and(sample.process_memory_growth) {
-        let detailed = format!("{footer} · growth {}", signed_rate(growth));
-        if Line::from(detailed.as_str()).width() + 2 <= usize::from(area.width.saturating_sub(2)) {
-            footer = detailed;
-        }
-    }
-    block = block.title_bottom(Line::from(Span::styled(
-        format!(" {footer} "),
-        Style::default().fg(MUTED),
-    )));
-    let mut inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.is_empty() {
-        return;
-    }
-    let reading = last
-        .map(|m| bytes(m.footprint))
-        .unwrap_or_else(|| "—".into());
-    let mut headline = Line::from(Span::styled(
-        reading,
-        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-    ));
-    let source = last
-        .map(|m| {
-            [
-                format!("OS footprint · PID {}", m.pid),
-                format!("OS · PID {}", m.pid),
-                format!("OS PID {}", m.pid),
-                format!("PID {}", m.pid),
-            ]
-            .into_iter()
-            .find(|label| headline.width() + label.len() + 2 <= usize::from(inner.width))
-            .unwrap_or_else(|| format!("PID {}", m.pid))
-        })
-        .unwrap_or_else(|| "OS unavailable".into());
-    let source_in_headline = headline.width() + source.len() + 2 <= usize::from(inner.width);
-    if source_in_headline {
-        headline.spans.push(Span::raw(
-            " ".repeat(usize::from(inner.width) - headline.width() - source.len()),
-        ));
-        headline
-            .spans
-            .push(Span::styled(source.clone(), Style::default().fg(MUTED)));
-    }
-    frame.render_widget(
-        Paragraph::new(headline),
-        Rect::new(inner.x, inner.y, inner.width, 1),
-    );
-    inner.y += 1;
-    inner.height = inner.height.saturating_sub(1);
-    if inner.height < 3 {
-        frame.render_widget(
-            Paragraph::new(if source_in_headline {
-                "Enter: history".into()
-            } else {
-                source
-            })
-            .style(Style::default().fg(MUTED)),
-            inner,
-        );
-        return;
-    }
-    let (gutter, low, high) = footprint_axis(history, inner.width, zoom);
-    let plot = Rect::new(
-        inner.x + gutter,
-        inner.y,
-        inner.width.saturating_sub(gutter),
-        inner.height,
-    );
-    let visible = plot.width.div_ceil(zoom.max(1)) as usize;
-    if history
-        .points
-        .iter()
-        .rev()
-        .take(visible)
-        .all(|p| p.footprint.is_none())
-    {
-        frame.render_widget(
-            Paragraph::new("No footprint samples").style(Style::default().fg(MUTED)),
-            inner,
-        );
-        return;
-    }
-    for (row, value) in [
-        (0, high),
-        ((plot.height - 1) / 2, low + (high - low) / 2),
-        (plot.height - 1, low),
-    ] {
-        frame.render_widget(
-            Paragraph::new(bytes(value))
-                .alignment(Alignment::Right)
-                .style(Style::default().fg(MUTED)),
-            Rect::new(inner.x, plot.y + row, gutter.saturating_sub(1), 1),
-        );
-        for x in plot.x..plot.right() {
-            frame.buffer_mut()[(x, plot.y + row)]
-                .set_symbol(if row + 1 == plot.height { "─" } else { "┄" })
-                .set_fg(DIM);
-        }
-    }
-    let values: Vec<_> = history
-        .points
-        .iter()
-        .map(|p| p.footprint.map(|v| v.saturating_sub(low)))
-        .collect();
-    let breaks: Vec<_> = history
-        .points
-        .iter()
-        .enumerate()
-        .map(|(i, p)| i > 0 && p.process != history.points[i - 1].process)
-        .collect();
-    trace(frame, plot, &values, &breaks, high - low, CYAN, zoom);
 }
 
 pub(super) fn latency(frame: &mut Frame, area: Rect, history: &History, zoom: u16) {

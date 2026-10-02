@@ -2,6 +2,9 @@
 //! Read-only provider adapters. Only counters and identifiers cross into samples.
 use super::*;
 
+#[path = "provider_native.rs"]
+mod native;
+
 const MAX_USAGE_BYTES: u64 = 256 * 1024;
 
 #[derive(Clone, Debug)]
@@ -283,9 +286,13 @@ fn canonical_provider(name: &str) -> Option<&'static str> {
         "mlx-lm" | "mlx_lm.server" | "mlx_lm" => Some("mlx-lm"),
         "ollama" => Some("Ollama"),
         "llama.cpp" | "llama-server" => Some("llama.cpp"),
-        "lm studio" | "lmstudio" => Some("LM Studio"),
+        "lm studio" | "lmstudio" | "llmster" => Some("LM Studio"),
         "koboldcpp" => Some("KoboldCpp"),
         "localai" => Some("LocalAI"),
+        "vllm" => Some("vLLM"),
+        "sglang" => Some("SGLang"),
+        "jan" => Some("Jan"),
+        "gpt4all" => Some("GPT4All"),
         _ => None,
     }
 }
@@ -300,6 +307,8 @@ pub(super) struct Adapter {
     backoff: Duration,
     kobold_uptime: Option<f64>,
     kobold_session: u64,
+    endpoint: native::Endpoint,
+    metrics: native::MetricsHistory,
 }
 
 impl Adapter {
@@ -317,6 +326,8 @@ impl Adapter {
             backoff: Duration::from_secs(1),
             kobold_uptime: None,
             kobold_session: 0,
+            endpoint: native::Endpoint::from_env(),
+            metrics: native::MetricsHistory::default(),
         }
     }
 
@@ -332,9 +343,14 @@ impl Adapter {
             self.next_poll = Instant::now();
             self.backoff = Duration::from_secs(1);
             self.kobold_uptime = None;
+            self.metrics = native::MetricsHistory::default();
             self.kobold_session = self.kobold_session.saturating_add(1);
         }
         self.usage_file.is_some() || self.selected.as_deref().is_some_and(|s| s != "oMLX")
+    }
+
+    pub fn provider(&self) -> Option<&str> {
+        self.selected.as_deref()
     }
 
     pub fn poll(&mut self) -> Option<LlmTelemetry> {
@@ -345,6 +361,27 @@ impl Adapter {
         let result = match self.selected.as_deref() {
             Some("KoboldCpp") => self.poll_kobold(),
             Some("llama.cpp") => self.poll_llama(),
+            Some("vLLM" | "SGLang") => {
+                let provider = self.selected.as_deref().unwrap();
+                let port = if provider == "vLLM" { 8000 } else { 30000 };
+                let body = self.get(port, "/metrics");
+                body.and_then(|body| self.metrics.observe(provider, &body, now))
+            }
+            Some("Ollama") => self
+                .get_json(11434, "/api/ps")
+                .and_then(|value| native::ollama(&value)),
+            Some("LM Studio") => self
+                .get_json(1234, "/api/v1/models")
+                .and_then(|value| native::lm_studio(&value))
+                .or_else(|| {
+                    self.get_json(1234, "/api/v0/models")
+                        .and_then(|value| native::lm_studio_legacy(&value))
+                })
+                .or_else(|| self.poll_models("LM Studio", 1234)),
+            Some("mlx-lm") => self.poll_models("mlx-lm", 8080),
+            Some("LocalAI") => self.poll_models("LocalAI", 8080),
+            Some("Jan") => self.poll_models("Jan", 6767),
+            Some("GPT4All") => self.poll_models("GPT4All", 4891),
             _ => None,
         };
         if let Some(mut result) = result {
@@ -357,6 +394,11 @@ impl Adapter {
                         result.observed_at = previous.observed_at;
                     }
                 }
+            }
+            result.remote = self.endpoint.is_remote();
+            if result.remote {
+                let details = result.details.get_or_insert_with(String::new);
+                *details = format!("remote API · {details}");
             }
             self.cached = Some(result);
             self.backoff = Duration::from_secs(1);
@@ -384,15 +426,15 @@ impl Adapter {
     }
 
     fn get(&self, port: u16, path: &str) -> Option<String> {
-        let response = http_request(
-            "127.0.0.1",
-            self.port.unwrap_or(port),
-            "GET",
-            path,
-            &[],
-            None,
-        )?;
-        (response.status == 200).then_some(response.body)
+        self.endpoint.get(self.port.unwrap_or(port), path)
+    }
+
+    fn get_json(&self, port: u16, path: &str) -> Option<Value> {
+        serde_json::from_str(&self.get(port, path)?).ok()
+    }
+
+    fn poll_models(&self, provider: &str, port: u16) -> Option<LlmTelemetry> {
+        native::models(provider, &self.get_json(port, "/v1/models")?)
     }
 
     fn poll_kobold(&mut self) -> Option<LlmTelemetry> {
@@ -469,18 +511,7 @@ fn metric_count(text: &str, name: &str) -> Option<u64> {
 }
 
 fn metric(text: &str, name: &str) -> Option<f64> {
-    text.lines().find_map(|line| {
-        let mut fields = line.split_whitespace();
-        let key = fields.next()?;
-        if key != name {
-            return None;
-        }
-        fields
-            .next()?
-            .parse::<f64>()
-            .ok()
-            .filter(|n| n.is_finite() && *n >= 0.0)
-    })
+    native::metric_sum(text, name)
 }
 
 fn parse_llama_slots(slots: &Value) -> Option<LlmTelemetry> {
@@ -596,6 +627,7 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
     let cached = counter(usage, &["prompt_tokens_details", "cached_tokens"])
         .or_else(|| counter(usage, &["input_tokens_details", "cached_tokens"]))
         .or_else(|| counter(usage, &["cached_tokens"]))
+        .or_else(|| counter(usage, &["prompt_eval_cached_count"]))
         .filter(|n| *n <= prompt);
     let model = identifier(record, "model")
         .or_else(|| identifier(record, "model_instance_id"))
@@ -603,6 +635,11 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
     let output_tps = record
         .get("timings")
         .and_then(|timings| request_rate(timings, &["output_tokens_per_second"]))
+        .or_else(|| {
+            (provider == "LM Studio")
+                .then(|| request_rate(usage, &["tokens_per_second"]))
+                .flatten()
+        })
         .or_else(|| {
             // Ollama reports decode time in nanoseconds. Queue time, total
             // duration and prefill duration cannot substitute for it.
@@ -630,7 +667,14 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
             output_tps,
             cached,
             completed: true,
-            ttft_ms: counter(record, &["timings", "time_to_first_token_ms"]),
+            ttft_ms: counter(record, &["timings", "time_to_first_token_ms"]).or_else(|| {
+                (provider == "LM Studio")
+                    .then(|| {
+                        request_rate(usage, &["time_to_first_token_seconds"])
+                            .and_then(native::seconds_to_ms)
+                    })
+                    .flatten()
+            }),
             observed_at: Some(observed_at),
         }],
         ..LlmTelemetry::default()

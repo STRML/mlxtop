@@ -971,6 +971,9 @@ struct LlmTelemetry {
     waiting_requests: Option<u64>,
     model_memory: Option<u64>,
     model_memory_max: Option<u64>,
+    details: Option<String>,
+    remote: bool,
+    cache_interval_efficiency: Option<f64>,
     mlx: MlxTelemetry,
 }
 
@@ -1047,6 +1050,8 @@ struct Sample {
     llm_waiting_requests: Option<u64>,
     llm_model_memory: Option<u64>,
     llm_model_memory_max: Option<u64>,
+    llm_details: Option<String>,
+    llm_remote: bool,
     correlation: CorrelationInsight,
     llm_top: String,
     llm_pid: u32,
@@ -1125,6 +1130,8 @@ impl Default for Sample {
             llm_waiting_requests: None,
             llm_model_memory: None,
             llm_model_memory_max: None,
+            llm_details: None,
+            llm_remote: false,
             correlation: CorrelationInsight::default(),
             llm_top: "none".into(),
             llm_pid: 0,
@@ -1551,6 +1558,8 @@ impl Collector {
             LlmLogStats::default()
         };
         let llm_stats = live_stats.as_ref();
+        sample.llm_remote = llm_stats.is_some_and(|stats| stats.remote);
+        sample.llm_details = llm_stats.and_then(|stats| stats.details.clone());
         sample.mlx = llm_stats.map(|stats| stats.mlx.clone()).unwrap_or_default();
         sample.metal.resource_limit = sample.metal.resource_limit.or(sample.mlx.resource_limit);
         sample.llm_requests = llm_stats
@@ -1569,8 +1578,8 @@ impl Collector {
         sample.llm_provider = llm_stats
             .and_then(|stats| stats.provider.clone())
             .unwrap_or_else(|| {
-                if let Some(provider) = detected_provider.clone() {
-                    provider
+                if let Some(provider) = self.llm_client.provider_adapter.provider() {
+                    provider.to_owned()
                 } else if use_omlx_log {
                     "oMLX".into()
                 } else {
@@ -1651,7 +1660,12 @@ impl Collector {
         });
         sample.llm_cache_efficiency = llm_stats.and_then(|stats| stats.cache_efficiency);
         sample.llm_cache_interval_efficiency =
-            cache_interval_efficiency(&mut self.previous_llm_cache, llm_stats, live_is_stale);
+            cache_interval_efficiency(&mut self.previous_llm_cache, llm_stats, live_is_stale)
+                .or_else(|| {
+                    (!live_is_stale)
+                        .then(|| llm_stats.and_then(|s| s.cache_interval_efficiency))
+                        .flatten()
+                });
         sample.llm_prefix_hit_rate = llm_stats.and_then(|stats| stats.prefix_hit_rate);
         sample.llm_active_requests = llm_stats.and_then(|stats| stats.active_requests);
         sample.llm_waiting_requests = llm_stats.and_then(|stats| stats.waiting_requests);
@@ -2460,6 +2474,7 @@ impl App {
     fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         self.charts.regions.borrow_mut().clear();
+        self.charts.overview_samples.set(None);
         if area.width < 72 || area.height < 24 {
             self.draw_compact_warning(frame, area);
             return;
@@ -2486,6 +2501,7 @@ impl App {
         if self.tab == 0 {
             if self.charts.expanded {
                 frame.render_widget(Clear, outer[1]);
+                self.charts.overview_samples.set(None);
                 self.draw_selected_chart(frame, outer[1]);
             }
             self.charts.decorate(frame);
@@ -2618,19 +2634,13 @@ impl App {
         self.charts.register(chart, area);
         let zoom = self.charts.zoom(chart);
         match chart {
-            Chart::Footprint => operator_charts::footprint(
-                frame,
-                area,
-                &self.collector.operator_history,
-                &self.collector.current,
-                zoom,
-            ),
             Chart::Queue => operator_charts::queue(
                 frame,
                 area,
                 &self.collector.operator_history,
                 self.interval,
                 zoom,
+                self.charts.overview_samples.get(),
             ),
             Chart::Latency => {
                 operator_charts::latency(frame, area, &self.collector.operator_history, zoom)
@@ -2642,9 +2652,7 @@ impl App {
     fn draw_selected_chart(&self, frame: &mut Frame, area: Rect) {
         match self.charts.focused {
             Chart::Prompt => self.draw_request_chart(frame, area),
-            chart @ (Chart::Footprint | Chart::Queue | Chart::Latency) => {
-                self.draw_operator_chart(frame, area, chart)
-            }
+            chart @ (Chart::Queue | Chart::Latency) => self.draw_operator_chart(frame, area, chart),
             chart => {
                 let (name, history, metric) = match chart {
                     Chart::Generation => (
@@ -2695,15 +2703,14 @@ impl App {
         } else {
             0
         };
-        // Memory pressure and paging lead the view. Give resources at least
-        // twice the rate-row height; supporting rates never exceed six rows.
-        // Request and Journal budgets stay stable across workload changes.
+        // Keep idle geometry stable, but give throughput and request bars enough
+        // vertical resolution. Resources remain visible in a compact first row.
         let journal_height = if compact && devices {
             0
         } else if compact {
             3
         } else {
-            (area.height / 4).clamp(7, 12)
+            7
         };
         let request_height = if compact {
             if devices {
@@ -2712,16 +2719,52 @@ impl App {
                 7
             }
         } else {
-            8
+            (area.height / 4).clamp(9, 13)
         };
         let remaining = area
             .height
             .saturating_sub(info_height + device_height + journal_height + request_height);
-        let rates_height = (remaining / 3).clamp(3, 6).min(remaining);
+        let resource_height = (remaining / 2).clamp(4, 8).min(remaining);
+        let rates_height = remaining.saturating_sub(resource_height);
+        // Fit every captured observation into even the narrowest plot, then
+        // widen those same observations across larger panels. No decimation.
+        let resources =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(area);
+        let rates = Layout::horizontal([
+            Constraint::Percentage(40),
+            Constraint::Percentage(35),
+            Constraint::Percentage(25),
+        ])
+        .split(area);
+        let supporting = Layout::horizontal([
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ])
+        .split(area);
+        let queue_width = operator_charts::queue_plot_width(
+            &self.collector.operator_history,
+            supporting[2].width,
+        );
+        let samples = [
+            resources[0].width.saturating_sub(7),
+            resources[1].width.saturating_sub(14),
+            rates[0].width.saturating_sub(8),
+            rates[1].width.saturating_sub(8),
+            rates[2].width.saturating_sub(7),
+            supporting[1].width.saturating_sub(7),
+            queue_width,
+        ]
+        .into_iter()
+        .min()
+        .unwrap_or(1)
+        .max(1);
+        self.charts.overview_samples.set(Some(usize::from(samples)));
         let rows = Layout::vertical([
             Constraint::Length(info_height),
             Constraint::Length(device_height),
-            Constraint::Length(remaining.saturating_sub(rates_height)),
+            Constraint::Length(resource_height),
             Constraint::Length(rates_height),
             Constraint::Length(request_height),
             Constraint::Length(journal_height),
@@ -2759,17 +2802,8 @@ impl App {
     }
 
     fn draw_resource_charts(&self, frame: &mut Frame, area: Rect) {
-        let footprint = self.show_process_footprint();
-        let widths = if footprint {
-            vec![
-                Constraint::Percentage(30),
-                Constraint::Percentage(30),
-                Constraint::Percentage(40),
-            ]
-        } else {
-            vec![Constraint::Percentage(40), Constraint::Percentage(60)]
-        };
-        let columns = Layout::horizontal(widths).split(area);
+        let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area);
         self.render_indicator_chart(
             frame,
             columns[0],
@@ -2777,12 +2811,9 @@ impl App {
             &self.collector.load_history,
             ChartMetric::Memory,
         );
-        if footprint {
-            self.draw_operator_chart(frame, columns[1], Chart::Footprint);
-        }
         self.render_indicator_chart(
             frame,
-            columns[if footprint { 2 } else { 1 }],
+            columns[1],
             "paging / I/O",
             &self.collector.swap_history,
             ChartMetric::Swap,
@@ -2809,9 +2840,9 @@ impl App {
 
     fn draw_workload_charts(&self, frame: &mut Frame, area: Rect) {
         let columns = Layout::horizontal([
-            Constraint::Percentage(50),
-            Constraint::Percentage(30),
-            Constraint::Percentage(20),
+            Constraint::Percentage(40),
+            Constraint::Percentage(35),
+            Constraint::Percentage(25),
         ])
         .split(area);
         self.render_indicator_chart(
@@ -2845,10 +2876,6 @@ impl App {
         }
     }
 
-    fn show_process_footprint(&self) -> bool {
-        !self.collector.current.has_nvidia_gpus() || self.collector.current.process_memory.is_some()
-    }
-
     fn render_indicator_chart(
         &self,
         frame: &mut Frame,
@@ -2866,7 +2893,7 @@ impl App {
                     if area.width < 38 {
                         format!("{:.1}", value as f64 / 10.0)
                     } else {
-                        format!("{:.1} tok/s", value as f64 / 10.0)
+                        format!("LIVE {:.1} tok/s", value as f64 / 10.0)
                     }
                 })
                 .unwrap_or_else(|| {
@@ -2911,6 +2938,11 @@ impl App {
             .back()
             .map(|point| point.tone)
             .unwrap_or(Tone::Muted);
+        let current_tone = if metric == ChartMetric::Memory && current.is_some() {
+            Tone::Cyan
+        } else {
+            current_tone
+        };
         let rate_chart = matches!(metric, ChartMetric::Generation | ChartMetric::Prefill);
         let label_width = if metric == ChartMetric::Swap {
             12
@@ -2921,7 +2953,7 @@ impl App {
         }
         .min(area.width.saturating_sub(2) as usize);
         let plot_width = (area.width.saturating_sub(2) as usize).saturating_sub(label_width);
-        let visible_count = plot_width.div_ceil(zoom);
+        let visible_count = self.charts.visible_samples(Chart::from(metric), plot_width);
         let visible_missing = history
             .iter()
             .rev()
@@ -2973,6 +3005,17 @@ impl App {
                 "older → now".into(),
             ]);
         }
+        if !self.charts.expanded {
+            let span = Span::styled(
+                format!("· {} ", chart_window_label(visible_count, self.interval)),
+                Style::default().fg(MUTED),
+            );
+            if title.width() + span.width() + reading.width() + 2
+                <= usize::from(area.width.saturating_sub(2))
+            {
+                title.spans.push(span);
+            }
+        }
         if self.charts.expanded && area.width >= 38 {
             for detail in details {
                 let span = Span::styled(format!(" · {detail}"), Style::default().fg(MUTED));
@@ -2992,27 +3035,20 @@ impl App {
         let sample = &self.collector.current;
         let summary = match metric {
             ChartMetric::Generation
-                if sample.llm_generation_tps.is_some() && !sample.llm_generation_tps_live =>
+                if self.charts.expanded
+                    && sample.llm_generation_tps.is_some()
+                    && !sample.llm_generation_tps_live =>
             {
                 Some(llm_generation_rate_label(sample))
             }
             ChartMetric::Prefill
-                if sample.llm_prefill_tps.is_some() && !sample.llm_prefill_tps_live =>
+                if self.charts.expanded
+                    && sample.llm_prefill_tps.is_some()
+                    && !sample.llm_prefill_tps_live =>
             {
                 Some(llm_prefill_rate_label(sample))
             }
-            ChartMetric::Generation | ChartMetric::Prefill => {
-                let mut summary = "tok/s".to_string();
-                for detail in ["auto".to_string(), window.clone()] {
-                    let candidate = format!("{summary} · {detail}");
-                    if Line::from(candidate.as_str()).width() + 2
-                        <= usize::from(area.width.saturating_sub(2))
-                    {
-                        summary = candidate;
-                    }
-                }
-                Some(summary)
-            }
+            ChartMetric::Generation | ChartMetric::Prefill => Some("tok/s · auto".into()),
             ChartMetric::Memory => Some(if area.width < 24 {
                 pressure_state_label(sample).into()
             } else {
@@ -3036,9 +3072,7 @@ impl App {
                     "—".into()
                 }
             )),
-            ChartMetric::Cache => Some(if visible_missing {
-                format!("PREFIX HIT {}", percent(sample.llm_prefix_hit_rate))
-            } else if area.width < 38 {
+            ChartMetric::Cache => Some(if area.width < 38 {
                 format!("TOTAL {}", percent(sample.llm_cache_efficiency))
             } else {
                 format!(
@@ -3084,7 +3118,13 @@ impl App {
                 .resident_memory
                 .map(|used| format!("{} / {}", bytes(used), bytes(sample.total_memory)))
                 .unwrap_or_else(|| "RAM reading unavailable".into());
-            for text in [usage, "Includes file cache".into()] {
+            let combined = format!("{usage} · Includes file cache");
+            let lines = if Line::from(combined.as_str()).width() <= usize::from(inner.width) {
+                vec![combined]
+            } else {
+                vec![usage, "Includes file cache".into()]
+            };
+            for text in lines {
                 frame.render_widget(
                     Paragraph::new(text).style(Style::default().fg(MUTED)),
                     Rect::new(inner.x, inner.y, inner.width, 1),
@@ -3116,11 +3156,7 @@ impl App {
                 return;
             }
         }
-        let average_cache = (metric == ChartMetric::Cache && visible_missing)
-            .then_some(sample.llm_cache_efficiency)
-            .flatten();
-        if metric == ChartMetric::Cache && !visible_missing && area.width < 38 && inner.height >= 4
-        {
+        if metric == ChartMetric::Cache && area.width < 38 && inner.height >= 4 {
             frame.render_widget(
                 Paragraph::new(format!(
                     "PREFIX HIT {}",
@@ -3137,12 +3173,8 @@ impl App {
                 metric,
                 ChartMetric::Memory | ChartMetric::Gpu | ChartMetric::Cache
             );
-        if average_cache.is_some() || compact_percent {
-            let measured = current
-                .map(|value| (value as f64, format!("{value}%"), current_tone))
-                .or_else(|| {
-                    average_cache.map(|value| (value, format!("TOTAL {value:.1}%"), Tone::Cyan))
-                });
+        if compact_percent {
+            let measured = current.map(|value| (value as f64, format!("{value}%"), current_tone));
             if let Some((value, label, tone)) = measured {
                 frame.render_widget(
                     Gauge::default()
@@ -3154,16 +3186,7 @@ impl App {
                 );
                 if inner.height > 1 {
                     frame.render_widget(
-                        Paragraph::new(if average_cache.is_some() {
-                            if history.iter().any(|point| point.value.is_some()) {
-                                "No samples in view"
-                            } else {
-                                "No interval history"
-                            }
-                        } else {
-                            "Enter: history"
-                        })
-                        .style(Style::default().fg(MUTED)),
+                        Paragraph::new("Enter: history").style(Style::default().fg(MUTED)),
                         Rect::new(inner.x, inner.y + 1, inner.width, 1),
                     );
                 }
@@ -3261,11 +3284,14 @@ impl App {
         // resolution. Auto-scaling changes coordinates, never captured values,
         // ordering or colors; there is no future-sample smoothing.
         let points = chart_columns_for_plot(history, visible_count, metric, plot_height, scale);
-        let visible_points: Vec<_> = points
-            .into_iter()
-            .flat_map(|point| std::iter::repeat_n(point, zoom))
-            .skip(visible_count * zoom - plot_width)
-            .collect();
+        let mut visible_points = stretch_chart_columns(&points, plot_width);
+        if metric == ChartMetric::Memory {
+            for point in &mut visible_points {
+                if point.value.is_some() {
+                    point.tone = Tone::Cyan;
+                }
+            }
+        }
         let mut cells = vec![
             vec![
                 TraceCell {
@@ -3547,8 +3573,9 @@ impl App {
     }
 
     fn draw_llm_top(&self, frame: &mut Frame, area: Rect) {
+        let details = self.collector.current.llm_details.as_deref();
         let rows = Layout::vertical([
-            Constraint::Length(4),
+            Constraint::Length(if details.is_some() { 5 } else { 4 }),
             Constraint::Min(6),
             Constraint::Length(7),
         ])
@@ -3563,33 +3590,43 @@ impl App {
             format!("filter /{}", self.top_filter)
         };
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    format!(
-                        " {} of {} processes · RSS {} · CPU {:.1}% · sort {}",
-                        filtered.len(),
-                        sample.llm_processes.len(),
-                        bytes(total_rss),
-                        total_cpu,
-                        self.top_sort.label()
-                    ),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(Span::styled(
-                    format!(
-                        " {}{}",
-                        filter_label,
-                        if self.top_filtering {
-                            " · typing · Enter/Esc finish"
-                        } else {
-                            " · ↑↓ select · s sort · / filter · c clear"
-                        }
-                    ),
-                    Style::default().fg(if self.top_filtering { YELLOW } else { MUTED }),
-                )),
-            ])
+            Paragraph::new(
+                [
+                    Line::from(Span::styled(
+                        format!(
+                            " {} of {} processes · RSS {} · CPU {:.1}% · sort {}",
+                            filtered.len(),
+                            sample.llm_processes.len(),
+                            bytes(total_rss),
+                            total_cpu,
+                            self.top_sort.label()
+                        ),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(Span::styled(
+                        format!(
+                            " {}{}",
+                            filter_label,
+                            if self.top_filtering {
+                                " · typing · Enter/Esc finish"
+                            } else {
+                                " · ↑↓ select · s sort · / filter · c clear"
+                            }
+                        ),
+                        Style::default().fg(if self.top_filtering { YELLOW } else { MUTED }),
+                    )),
+                ]
+                .into_iter()
+                .chain(details.map(|text| {
+                    Line::from(Span::styled(
+                        format!(" API · {text}"),
+                        Style::default().fg(CYAN),
+                    ))
+                }))
+                .collect::<Vec<_>>(),
+            )
             .block(panel("PROCESS MONITOR · LOCAL OS READINGS", Tone::Cyan)),
             rows[0],
         );
@@ -4032,7 +4069,7 @@ impl App {
         text.extend(match self.tab {
             0 => vec![
                 Line::from("Arrow keys      select a neighboring chart"),
-                Line::from("+ / - / wheel   zoom chart history; 0 resets zoom"),
+                Line::from("+ / - / wheel   zoom (time series linked); 0 reset"),
                 Line::from("Enter / Esc     enlarge / restore chart"),
                 Line::from("Mouse click     select chart; right-click enlarge"),
                 Line::from("Shift-↑↓        newer / older prompt"),
@@ -4531,9 +4568,9 @@ fn chart_display_value(metric: ChartMetric, value: u64, scale: (u64, u64)) -> u6
 fn chart_window_label(samples: usize, interval: Duration) -> String {
     let seconds = (samples as u64).saturating_mul(interval.as_secs().max(1));
     if seconds >= 60 {
-        format!("{}m", seconds / 60)
+        format!("window {}m", seconds / 60)
     } else {
-        format!("{seconds}s")
+        format!("window {seconds}s")
     }
 }
 
@@ -4561,6 +4598,17 @@ fn chart_columns(history: &VecDeque<ChartPoint>, width: usize) -> Vec<RenderPoin
         };
     }
     columns
+}
+
+// Spread an identical sample window over any plot width without averaging,
+// skipping spikes, or connecting across absent observations.
+fn stretch_chart_columns(points: &[RenderPoint], width: usize) -> Vec<RenderPoint> {
+    if points.is_empty() {
+        return Vec::new();
+    }
+    (0..width)
+        .map(|column| points[column * points.len() / width])
+        .collect()
 }
 
 fn chart_columns_for_plot(
@@ -4983,6 +5031,10 @@ fn process_count_label(sample: &Sample) -> String {
 
 impl CorrelationEngine {
     fn observe(&mut self, sample: &Sample, thresholds: Thresholds) -> CorrelationInsight {
+        if sample.llm_remote {
+            self.observations.clear();
+            return CorrelationInsight::default();
+        }
         let current = CorrelationObservation::from_sample(sample);
         let previous = self.observations.back().cloned();
         let comparable_previous = previous
@@ -5995,6 +6047,19 @@ fn process_provider(name: &str, command: &str) -> Option<String> {
         "KoboldCpp"
     } else if has("localai") {
         "LocalAI"
+    } else if has("vllm") {
+        "vLLM"
+    } else if has("sglang") {
+        "SGLang"
+    } else if has("gpt4all") {
+        "GPT4All"
+    } else if candidates
+        .iter()
+        .any(|token| token == "jan" || token == "janexe")
+        || prefix.contains("/jan.app/")
+        || prefix.contains("/.jan/")
+    {
+        "Jan"
     } else if has("llamaserver") || has("llamacpp") {
         "llama.cpp"
     } else if has("mlxlm") {
@@ -6032,7 +6097,8 @@ impl LlmTelemetryClient {
             return self.cached.clone();
         }
         let telemetry = self.poll_once();
-        if let Some(telemetry) = telemetry {
+        if let Some(mut telemetry) = telemetry {
+            telemetry.remote = !is_loopback_host(&self.host);
             self.cached = Some(telemetry);
             self.retry_backoff = Duration::from_secs(1);
             self.next_poll = now + self.retry_backoff;
@@ -7353,6 +7419,9 @@ fn write_static(
         telemetry_source(sample),
         llm_model_label(sample, 40)
     )?;
+    if let Some(details) = &sample.llm_details {
+        writeln!(out, "PROVIDER     {details}")?;
+    }
     writeln!(
         out,
         "SERVING      {} · {} · active {} · cache {}",

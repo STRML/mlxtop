@@ -82,6 +82,8 @@ fn usage_file_supplements_live_slots_and_filters_other_providers() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        endpoint: native::Endpoint::default(),
+        metrics: native::MetricsHistory::default(),
     };
     let result = adapter.with_usage().unwrap();
     assert_eq!(result.source, TelemetrySource::Live);
@@ -139,6 +141,8 @@ fn llama_http_polls_metrics_even_when_slots_are_disabled() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        endpoint: native::Endpoint::default(),
+        metrics: native::MetricsHistory::default(),
     };
     let result = adapter.poll().unwrap();
     assert_eq!(result.waiting_requests, Some(2));
@@ -432,6 +436,8 @@ fn kobold_restart_does_not_reuse_request_identity() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        endpoint: native::Endpoint::default(),
+        metrics: native::MetricsHistory::default(),
     };
     let first = adapter
         .kobold_result(&json!({"total_gens":1,"last_input_count":100,"uptime":500.5}))
@@ -506,6 +512,8 @@ fn provider_switch_drops_cached_counts() {
         backoff: Duration::from_secs(30),
         kobold_uptime: None,
         kobold_session: 0,
+        endpoint: native::Endpoint::default(),
+        metrics: native::MetricsHistory::default(),
     };
     assert!(adapter.selected(Some("Ollama")));
     assert!(adapter.cached.is_none());
@@ -549,6 +557,8 @@ fn native_poll_uses_get_and_preserves_last_result_age() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        endpoint: native::Endpoint::default(),
+        metrics: native::MetricsHistory::default(),
     };
     let first = adapter.poll().unwrap();
     adapter.next_poll = Instant::now();
@@ -596,7 +606,7 @@ fn identifiers_accept_numbers_and_reject_structures_or_empty_text() {
     assert_eq!(identifier(&json!({"id": {"nested": 1}}), "id"), None);
     assert_eq!(identifier(&json!({"id": "\u{0007}"}), "id"), None);
     assert_eq!(identifier(&json!({}), "id"), None);
-    assert_eq!(canonical_provider("vLLM"), None);
+    assert_eq!(canonical_provider("vLLM"), Some("vLLM"));
 }
 
 #[test]
@@ -662,4 +672,121 @@ fn future_usage_records_are_ignored() {
     assert!(parse_usage(&future).is_none());
     let unfinished = json!({"done": false, "provider": "ollama"});
     assert!(parse_usage(&unfinished).is_none());
+}
+
+#[test]
+fn every_new_adapter_polls_its_native_read_only_endpoint() {
+    for (provider, paths) in [
+        (
+            "Ollama",
+            vec![("/api/ps", r#"{"models":[{"name":"test","size_vram":1}]}"#)],
+        ),
+        (
+            "LM Studio",
+            vec![(
+                "/api/v1/models",
+                r#"{"models":[{"loaded_instances":[{"id":"test"}]}]}"#,
+            )],
+        ),
+        (
+            "LM Studio",
+            vec![
+                ("/api/v1/models", "{}"),
+                (
+                    "/api/v0/models",
+                    r#"{"data":[{"id":"test","state":"loaded"}]}"#,
+                ),
+            ],
+        ),
+        (
+            "LM Studio",
+            vec![
+                ("/api/v1/models", "{}"),
+                ("/api/v0/models", "{}"),
+                ("/v1/models", r#"{"data":[{"id":"test"}]}"#),
+            ],
+        ),
+        (
+            "mlx-lm",
+            vec![("/v1/models", r#"{"data":[{"id":"test"}]}"#)],
+        ),
+        (
+            "LocalAI",
+            vec![("/v1/models", r#"{"data":[{"id":"test"}]}"#)],
+        ),
+        ("Jan", vec![("/v1/models", r#"{"data":[{"id":"test"}]}"#)]),
+        (
+            "GPT4All",
+            vec![("/v1/models", r#"{"data":[{"id":"test"}]}"#)],
+        ),
+        ("vLLM", vec![("/metrics", "vllm:num_requests_running 1\n")]),
+        ("SGLang", vec![("/metrics", "sglang:num_running_reqs 1\n")]),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            for (path, body) in paths {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut data = [0; 4096];
+                let n = stream.read(&mut data).unwrap();
+                assert!(String::from_utf8_lossy(&data[..n])
+                    .starts_with(&format!("GET {path} HTTP/1.1")));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let mut adapter = Adapter {
+            configured: Some(provider.into()),
+            usage_file: None,
+            selected: None,
+            port: Some(port),
+            cached: None,
+            next_poll: Instant::now(),
+            backoff: Duration::from_secs(1),
+            kobold_uptime: None,
+            kobold_session: 0,
+            endpoint: native::Endpoint::default(),
+            metrics: native::MetricsHistory::default(),
+        };
+        assert!(adapter.selected(Some("oMLX")));
+        let result = adapter.poll().unwrap();
+        assert_eq!(result.provider.as_deref(), Some(provider));
+        assert_eq!(result.source, TelemetrySource::Live);
+        let observed = result.observed_at;
+        assert_eq!(
+            adapter.poll().unwrap().observed_at,
+            observed,
+            "cached polls retain age"
+        );
+        server.join().unwrap();
+        adapter.next_poll = Instant::now();
+        assert_eq!(
+            adapter.poll().unwrap().observed_at,
+            observed,
+            "connection failure retains age"
+        );
+        assert_eq!(adapter.backoff, Duration::from_secs(2));
+    }
+}
+
+#[test]
+fn lm_native_usage_preserves_decode_and_explicit_first_token_timing() {
+    let mut record = record(
+        "lmstudio",
+        json!({"input_tokens":40,"total_output_tokens":10,
+        "tokens_per_second":25.0,"time_to_first_token_seconds":0.25}),
+    );
+    let result = parse_usage(&record).unwrap();
+    assert_eq!(result.requests[0].output_tps, Some(25.0));
+    assert_eq!(result.requests[0].ttft_ms, Some(250));
+    assert!(!result.generation_tps_live);
+    record["usage"]["time_to_first_token_seconds"] = json!(-1);
+    assert_eq!(parse_usage(&record).unwrap().requests[0].ttft_ms, None);
 }

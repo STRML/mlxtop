@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 use super::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Chart {
@@ -12,7 +12,6 @@ pub(super) enum Chart {
     Gpu,
     Memory,
     Paging,
-    Footprint,
     Queue,
     Latency,
 }
@@ -40,7 +39,6 @@ impl Chart {
             Self::Gpu => "GPU",
             Self::Memory => "memory",
             Self::Paging => "paging",
-            Self::Footprint => "process memory",
             Self::Queue => "queue",
             Self::Latency => "first token",
         }
@@ -50,7 +48,8 @@ impl Chart {
 pub(super) struct Navigation {
     pub focused: Chart,
     pub expanded: bool,
-    zoom: [u16; 10],
+    zoom: [u16; 9],
+    pub overview_samples: Cell<Option<usize>>,
     pub regions: RefCell<Vec<(Chart, Rect)>>,
 }
 
@@ -59,7 +58,8 @@ impl Default for Navigation {
         Self {
             focused: Chart::Prompt,
             expanded: false,
-            zoom: [1; 10],
+            zoom: [1; 9],
+            overview_samples: Cell::new(None),
             regions: RefCell::new(Vec::new()),
         }
     }
@@ -86,12 +86,30 @@ impl Navigation {
         })
     }
 
+    // Time-series panels share zoom so their horizontal positions stay comparable.
+    // Request-sized bars keep independent ordinal zoom.
+    fn zoom_index(chart: Chart) -> usize {
+        match chart {
+            Chart::Prompt | Chart::Latency => chart as usize,
+            _ => Chart::Generation as usize,
+        }
+    }
+
     pub fn zoom(&self, chart: Chart) -> u16 {
-        self.zoom[chart as usize]
+        self.zoom[Self::zoom_index(chart)]
+    }
+
+    pub fn visible_samples(&self, chart: Chart, width: usize) -> usize {
+        self.overview_samples
+            .get()
+            .unwrap_or(width)
+            .min(width)
+            .div_ceil(usize::from(self.zoom(chart)))
+            .max(1)
     }
 
     pub fn change_zoom(&mut self, inward: bool) {
-        let zoom = &mut self.zoom[self.focused as usize];
+        let zoom = &mut self.zoom[Self::zoom_index(self.focused)];
         *zoom = if inward {
             (*zoom * 2).min(8)
         } else {
@@ -100,7 +118,7 @@ impl Navigation {
     }
 
     pub fn reset_zoom(&mut self) {
-        self.zoom[self.focused as usize] = 1;
+        self.zoom[Self::zoom_index(self.focused)] = 1;
     }
 
     pub fn cycle(&mut self, backwards: bool) {
@@ -160,7 +178,7 @@ impl Navigation {
                     ),
                     _ => (
                         !(area.x < current.right() && current.x < area.right()),
-                        (x - cx).abs() * 4 + (y - cy).abs(),
+                        (y - cy).abs() * 4 + (x - cx).abs(),
                     ),
                 }
             })

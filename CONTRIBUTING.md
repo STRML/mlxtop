@@ -100,8 +100,9 @@ use 0–100. Consolidate related readings instead of duplicating summary cards.
 - Never display historical provider values as live telemetry.
 - Show telemetry provenance and age whenever a provider API is unavailable.
 - Use fixed-width stepped time-series traces for indicator history. One
-  displayed column maps to one captured sample; new samples enter on the right
-  and old samples leave on the left once the viewport is full. Gaps must remain
+  displayed column maps to one captured sample. Overview shares a trailing
+  window and zoom across time series, widening samples for larger panels
+  without decimation. New samples enter on the right. Gaps must remain
   disconnected, and a sample's recorded severity tone must not be recolored by
   a later refresh. If smoothing is needed for readability, make it causal and
   derive it from the current drawable resolution using only the samples up to

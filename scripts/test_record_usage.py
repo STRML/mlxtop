@@ -10,7 +10,7 @@ from record_usage import append_usage, usage_record
 
 class UsageWriterTests(unittest.TestCase):
     def test_all_runtimes_and_response_content_is_excluded(self):
-        for provider in ("omlx", "mlx_lm.server", "llama-server", "koboldcpp", "localai"):
+        for provider in ("omlx", "mlx_lm.server", "llama-server", "koboldcpp", "localai", "vllm", "sglang", "jan", "gpt4all"):
             response = {"usage": {"prompt_tokens": 1024, "completion_tokens": 12},
                         "messages": ["private"], "choices": ["secret"], "api_key": "key"}
             record = usage_record(provider, response, request_id="req-1", observed_at=1700000000)
@@ -41,6 +41,32 @@ class UsageWriterTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     append_usage(path, "ollama", response)
             self.assertFalse(path.exists())
+
+    def test_native_timings_are_normalized_without_response_content(self):
+        ollama = usage_record("ollama", {"done": True, "prompt_eval_count": 100,
+            "prompt_eval_cached_count": 60, "eval_count": 80, "eval_duration": 2_000_000_000,
+            "total_duration": 99_000_000_000, "response": "private"})
+        self.assertEqual(ollama["timings"], {"output_tokens_per_second": 40.0})
+        self.assertEqual(ollama["usage"]["prompt_tokens_details"]["cached_tokens"], 60)
+        lm = usage_record("lmstudio", {"stats": {"input_tokens": 100, "total_output_tokens": 80,
+            "tokens_per_second": 32.5, "time_to_first_token_seconds": 0.125}, "output": "private"})
+        self.assertEqual(lm["timings"], {"output_tokens_per_second": 32.5, "time_to_first_token_ms": 125})
+        self.assertNotIn("private", json.dumps(lm))
+        llama = usage_record("llama.cpp", {"usage": {"prompt_tokens": 1},
+            "timings": {"predicted_per_second": 12.5, "time_to_first_token_ms": 25}})
+        self.assertEqual(llama["timings"]["output_tokens_per_second"], 12.5)
+        zero = usage_record("ollama", {"prompt_eval_count": 0, "eval_count": 0, "eval_duration": 0})
+        self.assertNotIn("timings", zero)
+
+    def test_invalid_native_timings_are_rejected(self):
+        for value in (-1, True, float("nan"), float("inf"), "bad"):
+            for key in ("tokens_per_second", "time_to_first_token_seconds"):
+                with self.assertRaises(ValueError):
+                    usage_record("lmstudio", {"stats": {"input_tokens": 1, key: value}})
+        with self.assertRaises(ValueError):
+            usage_record("ollama", {"prompt_eval_count": 1, "eval_duration": -1})
+        with self.assertRaises(ValueError):
+            usage_record("vllm", {"usage": {"prompt_tokens": 1}, "timings": []})
 
     def test_concurrent_appends_are_complete_and_unique(self):
         with tempfile.TemporaryDirectory() as tmp:

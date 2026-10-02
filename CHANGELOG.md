@@ -1,12 +1,39 @@
 # Changelog
 
-## Unreleased
+## 2.0.0-rc.1 — 2026-10-02
 
+- Expand native monitoring to eleven local LLM runtimes. Add Ollama loaded
+  models, resident VRAM and context capacity, and LM Studio loaded instances
+  with native v1, v0 and OpenAI-compatible API fallback.
+- Add vLLM and SGLang process detection and Prometheus polling: active/waiting
+  requests, sampled server token rates, cache statistics, KV occupancy and
+  cumulative mean first-token timing. Preserve gaps across resets, changed
+  series and outages; never infer per-request history from aggregate counters.
+- Add explicit Jan/GPT4All detection and model-catalogue polling, plus native
+  catalogue polling for MLX-LM and LocalAI. Keep unavailable performance data
+  unknown. Monitor one selected endpoint per session.
+- Support configured HTTP/HTTPS provider URLs and bearer tokens with verified
+  certificates, bounded reads and timeouts, and no redirects or environment
+  proxies. Preserve the remote-authentication opt-in and exclude remote API
+  rates from local hardware slowdown correlation.
+- Preserve Ollama and LM Studio completion speeds, cached tokens and explicit
+  first-token timings in the counters-only usage recorder. Extend usage reports
+  to all eleven runtimes. Show native API details in Top and text reports.
+- Synchronize Overview time-series windows and zoom across panel widths without
+  dropping samples. Keep independent zoom for request bars and label rolling
+  durations explicitly, for example `window 34s`.
+- Remove the process-memory chart and give throughput and prompt bars more
+  vertical space. Retain OS process readings in Top and the static report.
+- Render resident RAM occupancy in cyan with a separate pressure-severity label.
+  Keep cache interval history stable when data is missing; show cumulative reuse
+  as text. Move server averages to expanded charts and label live rates.
+- Draw overlapping queue connectors as continuous lines with proper junctions.
+  Mark equality only for equal measured counts; distinguish crossings and
+  unequal values rounded to the same row. Keep arrow navigation adjacent.
 - Add a 90% production Rust line-coverage gate on macOS and Linux, with
-  per-file reports and test code excluded from the denominator.
-- Move tests into dedicated files and make collector inputs, diagnostics,
-  static reports and terminal events controllable in tests. Cover missing
-  telemetry, provider failures, request speeds, navigation and journal events.
+  per-file reports and tests excluded from the denominator. Move tests into
+  dedicated files and cover missing telemetry, provider failures, request
+  speeds, navigation, rendering and journal events.
 
 ## 1.2.1-rc.8 — 2026-10-01
 
