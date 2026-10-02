@@ -21,8 +21,9 @@ model output, hostnames and other private workload data.
 The most sensitive boundaries are provider authentication, intentionally remote
 provider endpoints, parsing of local process/log data and the optional SSH
 deployment helper. mlxtop sends provider credentials only to loopback endpoints
-unless `MLXTOP_ALLOW_REMOTE_AUTH=1` is explicitly set. Remote HTTP transport is
-not encrypted by mlxtop; use a trusted tunnel or protected network.
+unless `MLXTOP_ALLOW_REMOTE_AUTH=1` is explicitly set. Native provider adapters support verified HTTPS and do not follow redirects or
+environment proxies. Plain HTTP, including the existing oMLX transport, is not
+encrypted; use HTTPS, a trusted tunnel or a protected network for remote access.
 
 mlxtop writes local diagnostic logs to `~/Library/Logs/mlxtop/mlxtop.log` by
 default. These logs may contain system counters and model/provider names, but

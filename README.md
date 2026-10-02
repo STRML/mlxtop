@@ -4,13 +4,42 @@
 
 See which models are running, how much memory they use, and how busy your
 GPUs are. Linux NVIDIA systems show each card's utilization, VRAM and temperature
-in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, you can
-also follow generation speed and request activity as your model responds.
+in Overview, with `[` / `]` navigation for larger GPU sets. With oMLX, vLLM or
+SGLang, you can also follow generation speed and request activity as your model
+responds.
 
-![mlxtop Overview showing per-request prompt load, generation and prefill rates, process memory, queue activity, GPU use, and recent events](docs/screenshots/overview.png)
+![mlxtop Overview prioritizing memory pressure and paging, with token rates and a readable recent Journal](docs/screenshots/overview.png)
 
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
+
+**mlxtop 2.0.0** is the stable major release for Apple Silicon macOS and Linux
+(x86_64 and ARM64). [Download 2.0.0](https://github.com/maximpri/mlxtop/releases/tag/v2.0.0)
+or use the installer below.
+
+## What's new in 2.0
+
+- **Eleven runtimes:** oMLX, Ollama, LM Studio, llama.cpp, KoboldCpp, MLX-LM,
+  LocalAI, vLLM, SGLang, Jan and GPT4All. The [runtime table](#runtime-support-and-limitations)
+  distinguishes live metrics, model inventory and client-reported usage.
+- **Remote monitoring:** configured HTTP/HTTPS endpoints and bearer authentication,
+  with verified HTTPS certificates and explicit opt-in for remote credentials.
+- **Clearer charts:** synchronized rolling windows, linked time-series zoom,
+  readable queue crossings and explicit `window 34s` labels. Resident memory
+  stays cyan; pressure severity has its own label. Process-memory readings live
+  in Top and text reports.
+- **Accurate request history:** the counters-only recorder preserves native
+  output speeds, cached tokens and explicit first-token timing. Completed
+  results remain separate from live serving metrics.
+
+### Upgrading from 1.x
+
+Run the installer again and restart any open mlxtop session. Existing
+`~/.config/mlxtop/config.json`, oMLX settings and usage JSONL files remain
+compatible. The dashboard monitors one selected server per session; use
+`MLXTOP_PROVIDER` to choose it. New runtimes need their monitoring APIs enabled,
+and some require the [client usage recorder](docs/USER_GUIDE.md#client-reported-usage-file)
+for request statistics.
 
 ## Try it
 
@@ -44,7 +73,7 @@ Linux downloads are static binaries with no runtime dependencies. Then run:
 
 Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
-example `curl -fsSL … | MLXTOP_VERSION=1.1.2 sh`.
+example `curl -fsSL … | MLXTOP_VERSION=2.0.0 sh`.
 
 ## Configuration
 
@@ -78,9 +107,9 @@ and anything you leave out keeps its built-in default.
 | `history` | integer | 300 | Chart/journal history size (20–3600) |
 | `omx.host` | string | "127.0.0.1" | oMLX server host |
 | `omx.port` | integer | 8080 | oMLX server port |
-| `memory_warn_load` | integer | 70 | Memory load (%) that turns the memory indicator yellow |
-| `memory_critical_load` | integer | 85 | Memory load (%) that turns it red |
-| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "loaded"; utilization stays neutral blue |
+| `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
+| `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
+| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "loaded" and shown in yellow |
 | `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and considered in slowdown correlation; never an alarm by itself |
 | `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
 | `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
@@ -154,7 +183,7 @@ larger model or work through a longer conversation.
 
 | View | What it shows |
 | --- | --- |
-| Overview | Model status, per-request prompt load, generation and prefill rates when available, process memory, queue activity, and GPU use |
+| Overview | Memory pressure and paging, with model status, token rates, prompt history, GPU, queue activity and recent events |
 | MLX Top | Running model processes and the resources they use |
 | Journal | Request activity and changes in resource use during the session |
 
@@ -162,13 +191,14 @@ Here’s the Journal during an oMLX session:
 
 ![mlxtop Journal showing timestamped model requests, queue changes, and GPU events](docs/screenshots/journal.jpg)
 
-Both screenshots show oMLX workloads. The numbers illustrate the display and
-aren’t benchmarks.
+The Overview screenshot uses an illustrative oMLX fixture; the Journal shows
+an oMLX session. These numbers illustrate the display and aren’t benchmarks.
 
 | Key | Action |
 | --- | --- |
 | `1` / `2` / `3` | Open Overview / MLX Top / Journal |
-| `Tab` / arrows / click | Select a chart in Overview |
+| `Tab` / `Shift-Tab` | Next / previous view |
+| Arrows / click | Select a chart in Overview |
 | `p` / `Space` | Pause or resume sampling |
 | `+` / `-` / mouse wheel | Zoom the selected chart’s history |
 | `Enter` / `Esc` | Enlarge / restore a chart |
@@ -218,14 +248,31 @@ build from source with `cargo install --path . --locked`.
 | oMLX | Models, processes, prompt and response speed, requests, cache activity, and extra memory counters when available |
 | llama.cpp / llama-server | Active slots and summed output counts; average rates and active/deferred queue counts when `/metrics` is enabled. Optional usage file adds full prompt history alongside native polling. |
 | KoboldCpp | Last reported input/output counts and rates through `/api/extra/perf` |
-| MLX-LM, Ollama, LM Studio, LocalAI | Process detection (including Python entrypoints, LM Studio's `llmster`, and the Bionic app); completed request counts through an optional client-written usage file |
+| Ollama | Loaded models, resident VRAM and context capacity from `/api/ps`; completed counts and decode speed through the usage recorder |
+| LM Studio / llmster | Loaded instances and context capacity from native APIs, with older API fallback; completed counts, speed and first-token timing through the usage recorder |
+| vLLM, SGLang | Prometheus active/waiting queues, sampled server token rates, cache statistics, KV occupancy and cumulative mean first-token timing |
+| MLX-LM, LocalAI, Jan, GPT4All | Process detection and available-model catalogue; completed request counts and explicitly supplied timing through the usage recorder |
 
-Overview integrates prompt load with generation and prefill on wide terminals.
+Provider URLs, bearer authentication, default ports and client setup are covered
+in the [provider guide](docs/USER_GUIDE.md#provider-endpoints).
+The dashboard monitors one selected server at a time. Native model catalogues
+cannot provide live generation speed; completed usage requires client integration.
+
+Overview uses flat charts with one border each. SYSINFO holds model/state and
+hardware details; generation, prefill, memory, GPU, paging, Cache and Queue
+have independent plots. SWAP usage is a horizontal capacity bar. Numeric axes
+fit visible measurements in their actual units; only percentages use 0–100.
+GPU and paging retain their captured severity colors. RAM readings and history
+use cyan; the separate pressure label carries OS severity. Resident occupancy
+includes reclaimable file cache and does not establish a warning by itself.
 **Prompt load means prompt size in input tokens, including cached tokens.**
 The headline gives the selected request's exact size; each bar represents one
-observed request. The panel also shows the change from the previous observed
-request, freshness, and cached/uncached segments when reported. Queue and OS
-process-footprint charts complement the system metrics. First-token latency appears only when
+observed request and shows its own compact size label, such as `12.0k` for
+12,000 tokens. The panel also shows the change from the previous observed
+request, freshness, and cached/uncached segments when reported. Selected prompts
+also show output counts and request-specific decode speed: `LIVE`, a completed
+request's `AVG`, or the retained `LAST` sample. Queue charts complement the system
+metrics; OS process-memory details live in Top. First-token latency appears only when
 explicitly measured client timings are supplied. See the
 [operator charts](docs/USER_GUIDE.md#operator-charts) for scales and data sources.
 Prompt counts also appear in the static report. Journal records each
@@ -235,6 +282,11 @@ See [request telemetry setup](docs/USER_GUIDE.md#request-token-telemetry) for
 provider selection, custom ports and response-only integrations. The optional
 [Python client helper](scripts/record_usage.py) extracts counters from completed
 responses and appends them to the usage file without storing response content.
+
+To test unpublished RCs between this checkout and an oMLX server, use
+`python3 scripts/rc.py push SSH_HOST`, then `python3 scripts/rc.py run SSH_HOST`.
+Use `fetch SSH_HOST` to download the staged RC back to a compatible Mac.
+See [private RC testing](docs/USER_GUIDE.md#private-rc-testing-over-ssh).
 
 The oMLX connection defaults to `127.0.0.1:8080` and reads settings from
 `~/.config/omlx-coding/server.env`. If you’re missing live readings, check the
@@ -247,7 +299,8 @@ is unavailable, it may use recent completion logs and show how old those reading
 are.
 
 The dashboard can help you spot a slowdown and the conditions around it, but
-it can’t prove what caused it. The Journal only covers the current session.
+it can’t prove what caused it. Charts, prompt history and the Journal cover
+the current session; restarting mlxtop begins a new history.
 
 ## Privacy and local access
 
@@ -280,6 +333,9 @@ Use [SECURITY.md](SECURITY.md) to report a vulnerability.
 Documentation fixes, bug reports, and provider adapters are welcome. If a setup
 step tripped you up, improving it is a useful place to start. Read
 [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and design guidelines.
+CI enforces at least 90% production Rust line coverage on macOS and Linux.
+See the [coverage workflow](CONTRIBUTING.md#coverage-gate) to reproduce the
+reports locally.
 For larger changes, open an issue first so we can discuss the approach.
 
 ## Acknowledgments

@@ -41,3 +41,6 @@ known_hosts
 # Python helper caches
 __pycache__/
 *.py[cod]
+
+# Local private RC deployment convenience script
+/scripts/install-remote-rc.sh

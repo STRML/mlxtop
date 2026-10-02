@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 use super::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum Chart {
@@ -12,7 +12,6 @@ pub(super) enum Chart {
     Gpu,
     Memory,
     Paging,
-    Footprint,
     Queue,
     Latency,
 }
@@ -30,10 +29,27 @@ impl From<ChartMetric> for Chart {
     }
 }
 
+impl Chart {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt load",
+            Self::Generation => "generation",
+            Self::Prefill => "prefill",
+            Self::Cache => "cache",
+            Self::Gpu => "GPU",
+            Self::Memory => "memory",
+            Self::Paging => "paging",
+            Self::Queue => "queue",
+            Self::Latency => "first token",
+        }
+    }
+}
+
 pub(super) struct Navigation {
     pub focused: Chart,
     pub expanded: bool,
-    zoom: [u16; 10],
+    zoom: [u16; 9],
+    pub overview_samples: Cell<Option<usize>>,
     pub regions: RefCell<Vec<(Chart, Rect)>>,
 }
 
@@ -42,7 +58,8 @@ impl Default for Navigation {
         Self {
             focused: Chart::Prompt,
             expanded: false,
-            zoom: [1; 10],
+            zoom: [1; 9],
+            overview_samples: Cell::new(None),
             regions: RefCell::new(Vec::new()),
         }
     }
@@ -56,6 +73,8 @@ impl Navigation {
                 region.1 = area;
             } else {
                 regions.push((chart, area));
+                // Keep keyboard order stable when responsive layouts move charts.
+                regions.sort_by_key(|(chart, _)| *chart as usize);
             }
         }
     }
@@ -67,12 +86,30 @@ impl Navigation {
         })
     }
 
+    // Time-series panels share zoom so their horizontal positions stay comparable.
+    // Request-sized bars keep independent ordinal zoom.
+    fn zoom_index(chart: Chart) -> usize {
+        match chart {
+            Chart::Prompt | Chart::Latency => chart as usize,
+            _ => Chart::Generation as usize,
+        }
+    }
+
     pub fn zoom(&self, chart: Chart) -> u16 {
-        self.zoom[chart as usize]
+        self.zoom[Self::zoom_index(chart)]
+    }
+
+    pub fn visible_samples(&self, chart: Chart, width: usize) -> usize {
+        self.overview_samples
+            .get()
+            .unwrap_or(width)
+            .min(width)
+            .div_ceil(usize::from(self.zoom(chart)))
+            .max(1)
     }
 
     pub fn change_zoom(&mut self, inward: bool) {
-        let zoom = &mut self.zoom[self.focused as usize];
+        let zoom = &mut self.zoom[Self::zoom_index(self.focused)];
         *zoom = if inward {
             (*zoom * 2).min(8)
         } else {
@@ -81,7 +118,7 @@ impl Navigation {
     }
 
     pub fn reset_zoom(&mut self) {
-        self.zoom[self.focused as usize] = 1;
+        self.zoom[Self::zoom_index(self.focused)] = 1;
     }
 
     pub fn cycle(&mut self, backwards: bool) {
@@ -131,10 +168,18 @@ impl Navigation {
             })
             .min_by_key(|(_, area)| {
                 let (x, y) = center(*area);
-                // Favor charts aligned with the movement axis before diagonals.
+                // Choose a directly aligned neighbor before a diagonal one.
+                // Full-width prompt history must not steal Left/Right from
+                // the adjacent generation and prefill charts above it.
                 match key {
-                    KeyCode::Left | KeyCode::Right => (y - cy).abs() * 4 + (x - cx).abs(),
-                    _ => (x - cx).abs() * 4 + (y - cy).abs(),
+                    KeyCode::Left | KeyCode::Right => (
+                        !(area.y < current.bottom() && current.y < area.bottom()),
+                        (y - cy).abs() * 4 + (x - cx).abs(),
+                    ),
+                    _ => (
+                        !(area.x < current.right() && current.x < area.right()),
+                        (y - cy).abs() * 4 + (x - cx).abs(),
+                    ),
                 }
             })
         {

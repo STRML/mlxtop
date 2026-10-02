@@ -15,8 +15,48 @@ continues to forbid unsafe Rust in its own source.
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
+python3 -m unittest discover -s scripts -p 'test_*.py'
+shellcheck scripts/cicd.sh scripts/coverage.sh scripts/install.sh scripts/package-dmg.sh
 cargo build --release --locked
 ~~~
+
+### Coverage gate
+
+Production line coverage must stay at or above 90 percent on each supported
+platform. Install the tools once, then run the gate:
+
+~~~sh
+cargo install cargo-llvm-cov --locked
+rustup component add llvm-tools-preview
+scripts/coverage.sh
+~~~
+
+Cargo, rustc and the LLVM coverage tools must use matching toolchains. If
+multiple Rust installations are present, select the intended toolchain before
+running the gate. `LLVM_COV` and `LLVM_PROFDATA` can point to matching tools.
+
+The script writes `coverage.json`, `summary.txt` and `uncovered.txt` to
+`target/coverage/` (override with `COVERAGE_DIR`) and fails below
+`COVERAGE_MIN_LINES` (default `90`). Tests live only in `src/tests/`; each
+module declares `#[cfg(test)] #[path = "tests/<module>.rs"] mod tests;`. The
+report excludes exactly `(^|/)src/tests/[^/]+\.rs$`, so the denominator is all
+production Rust compiled for the host platform. The script refuses to run if a
+production file contains `cfg(coverage)`, `coverage(off)`, `cfg(not(test))`,
+or any other `#[cfg(test)]` item. Code that reads the host goes through the
+`host::Host` seam, so collectors are tested with recorded command and file
+fixtures instead of being excluded.
+
+After running the gate, generate a browsable report from the same profiles:
+
+~~~sh
+cargo llvm-cov report --html --output-dir target/coverage \
+  --ignore-filename-regex '(^|/)src/tests/[^/]+\.rs$'
+~~~
+
+Open `target/coverage/html/index.html`. CI uploads the JSON, summary and
+uncovered-line reports as `coverage-macos-latest` and `coverage-ubuntu-latest`
+artifacts. Coverage describes code exercised by tests; review assertions and
+missing cases alongside the percentage.
 
 For UI changes, test both the interactive dashboard and the static report:
 
@@ -49,6 +89,10 @@ each platform's download and one `SHA256SUMS` covering all of them.
 Follow the [UX design rules](docs/UX_DESIGN.md) for naming, typography, color,
 layout, metric semantics and interaction. Chart titles use lowercase words
 with acronyms preserved: `prompt load`, `generation`, `GPU`.
+The [chart specification](docs/CHART_SPEC.md) is mandatory for every chart:
+use consistent green/yellow/red bands where defined, preserve captured colors,
+and automatically scale numeric axes in their actual units. Only percentages
+use 0–100. Consolidate related readings instead of duplicating summary cards.
 
 - Keep Overview focused on current health and LLM impact.
 - Keep MLX Top focused on live process/resource inspection.
@@ -56,8 +100,9 @@ with acronyms preserved: `prompt load`, `generation`, `GPU`.
 - Never display historical provider values as live telemetry.
 - Show telemetry provenance and age whenever a provider API is unavailable.
 - Use fixed-width stepped time-series traces for indicator history. One
-  displayed column maps to one captured sample; new samples enter on the right
-  and old samples leave on the left once the viewport is full. Gaps must remain
+  displayed column maps to one captured sample. Overview shares a trailing
+  window and zoom across time series, widening samples for larger panels
+  without decimation. New samples enter on the right. Gaps must remain
   disconnected, and a sample's recorded severity tone must not be recolored by
   a later refresh. If smoothing is needed for readability, make it causal and
   derive it from the current drawable resolution using only the samples up to
@@ -69,7 +114,7 @@ with acronyms preserved: `prompt load`, `generation`, `GPU`.
 - Preserve visual hierarchy: serving throughput is the outcome; GPU, memory,
   paging and compression are supporting evidence.
 - Use responsive disclosure instead of squeezing cards or columns. A medium
-  terminal must retain status, throughput, diagnosis and action; process-table
+  terminal must retain status, throughput, prompt sizes and resource readings; process-table
   columns may collapse in documented priority order.
 - Keep keyboard hints contextual to the active view and reserve color for
   identity, severity and selected state rather than decoration.

@@ -23,6 +23,32 @@ name = "libloading"
 version = "=0.8.9"
 allow = ["ISC"]
 
+# TLS certificate verification and its bundled public trust roots.
+[[licenses.exceptions]]
+name = "ring"
+version = "=0.17.14"
+allow = ["ISC"]
+
+[[licenses.exceptions]]
+name = "rustls-webpki"
+version = "=0.103.15"
+allow = ["ISC"]
+
+[[licenses.exceptions]]
+name = "untrusted"
+version = "=0.9.0"
+allow = ["ISC"]
+
+[[licenses.exceptions]]
+name = "subtle"
+version = "=2.6.1"
+allow = ["BSD-3-Clause"]
+
+[[licenses.exceptions]]
+name = "webpki-roots"
+version = "=1.0.9"
+allow = ["CDLA-Permissive-2.0"]
+
 [sources]
 unknown-git = "deny"
 unknown-registry = "deny"

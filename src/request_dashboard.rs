@@ -3,13 +3,34 @@
 use super::*;
 
 const HISTORY_LIMIT: usize = 240;
-const TREND_CEILING: u64 = 65_536;
 
 #[derive(Clone)]
 struct Entry {
     number: u64,
     usage: providers::RequestUsage,
     last_seen: SystemTime,
+    output_speed: Option<OutputSpeed>,
+}
+
+#[derive(Clone, Copy)]
+struct OutputSpeed {
+    tps: f64,
+    observed_at: SystemTime,
+    completed: bool,
+}
+
+fn observed_output_speed(
+    usage: &providers::RequestUsage,
+    observed_at: SystemTime,
+) -> Option<OutputSpeed> {
+    let tps = usage
+        .output_tps
+        .filter(|tps| tps.is_finite() && *tps >= 0.0)?;
+    Some(OutputSpeed {
+        tps,
+        observed_at,
+        completed: usage.completed,
+    })
 }
 
 #[derive(Clone, Default)]
@@ -27,6 +48,16 @@ impl History {
         self.entries.len()
     }
 
+    pub fn latest_for(&self, sample: &Sample) -> Option<(&providers::RequestUsage, SystemTime)> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.usage.provider == sample.llm_provider && entry.usage.model == sample.llm_model
+            })
+            .map(|entry| (&entry.usage, entry.last_seen))
+    }
+
     pub fn observe(&mut self, requests: &[providers::RequestUsage]) {
         for usage in requests {
             if let Some(entry) = self
@@ -37,13 +68,18 @@ impl History {
                 // Retained provider responses and repeated file reads do not
                 // refresh an observation's age.
                 entry.last_seen = usage.observed_at.unwrap_or(entry.last_seen);
+                if let Some(speed) = observed_output_speed(usage, entry.last_seen) {
+                    entry.output_speed = Some(speed);
+                }
                 entry.usage = usage.clone();
             } else {
                 self.next_number = self.next_number.saturating_add(1);
+                let last_seen = usage.observed_at.unwrap_or_else(SystemTime::now);
                 self.entries.push_back(Entry {
                     number: self.next_number,
                     usage: usage.clone(),
-                    last_seen: usage.observed_at.unwrap_or_else(SystemTime::now),
+                    last_seen,
+                    output_speed: observed_output_speed(usage, last_seen),
                 });
                 while self.entries.len() > HISTORY_LIMIT {
                     self.entries.pop_front();
@@ -104,8 +140,24 @@ fn compact_comparison(current: &providers::RequestUsage, previous: Option<&Entry
     )
 }
 
-fn chart_value(prompt: u64) -> u64 {
-    prompt.min(TREND_CEILING)
+fn history_window(history: &History, index: usize, width: u16, zoom: u16) -> (usize, usize, u16) {
+    let width = width.max(1);
+    let label_width = history
+        .entries
+        .iter()
+        .take(index + 1)
+        .rev()
+        .take(usize::from(width / 6).max(1))
+        .map(|entry| compact_tokens(entry.usage.prompt).len() as u16)
+        .max()
+        .unwrap_or(1)
+        .max(4);
+    // Newest requests stay at the right edge, just like the time series.
+    // A short history must not stretch its slots across the plot: one request
+    // would float in the middle and move when another request arrived.
+    let slot_width = (label_width + 2).saturating_mul(zoom.max(1)).min(width);
+    let visible = (index + 1).min(usize::from(width / slot_width));
+    (index + 1 - visible, visible, slot_width)
 }
 
 fn comparable(a: &providers::RequestUsage, b: &providers::RequestUsage) -> bool {
@@ -128,6 +180,10 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
         format!(" RECENT {}", sizes.len()),
         Style::default().fg(MUTED),
     ));
+    if sizes.len() == 1 {
+        append_detail(&mut line, "newest at right".into(), MUTED, width);
+        return line;
+    }
     let middle = sizes.len() / 2;
     let sum = u128::from(sizes[middle]) + u128::from(sizes[(sizes.len() - 1) / 2]);
     let median = format!(
@@ -176,14 +232,64 @@ fn append_detail(line: &mut Line<'static>, text: String, color: Color, width: u1
     }
 }
 
-fn draw_bar(frame: &mut Frame, area: Rect, usage: &providers::RequestUsage, color: Color) {
+fn output_summary(entry: &Entry, live: bool, width: u16) -> Line<'static> {
+    let speed = entry.output_speed.map(|speed| {
+        let state = if speed.completed {
+            "AVG"
+        } else if live && entry.usage.output_tps == Some(speed.tps) {
+            "LIVE"
+        } else {
+            "LAST"
+        };
+        (format!("{state} {:.1} tok/s", speed.tps), state)
+    });
+    let speed_label = speed
+        .as_ref()
+        .map(|(label, _)| label.as_str())
+        .unwrap_or("SPEED —");
+    let mut count = entry.usage.output.map(exact).unwrap_or_else(|| "—".into());
+    if format!("OUT {count} · {speed_label}").chars().count() > usize::from(width) {
+        count = entry
+            .usage
+            .output
+            .map(compact_tokens)
+            .unwrap_or_else(|| "—".into());
+    }
+    let mut line = Line::from(Span::styled(
+        format!("OUT {count}"),
+        Style::default().fg(CYAN),
+    ));
+    append_detail(
+        &mut line,
+        speed_label.into(),
+        if speed.is_some() { CYAN } else { MUTED },
+        width,
+    );
+    if speed.is_some_and(|(_, state)| state == "LAST") {
+        append_detail(
+            &mut line,
+            telemetry_age(entry.output_speed.map(|speed| speed.observed_at)),
+            MUTED,
+            width,
+        );
+    }
+    line
+}
+
+fn draw_bar(
+    frame: &mut Frame,
+    area: Rect,
+    usage: &providers::RequestUsage,
+    color: Color,
+    ceiling: u64,
+) {
     if area.is_empty() {
         return;
     }
     // Cache metadata must not change a bar's height. Only a full cell can
     // contain two segment colors without painting above the measured value.
-    let total = (u128::from(chart_value(usage.prompt)) * u128::from(area.height) * 8)
-        .div_ceil(u128::from(TREND_CEILING)) as u64;
+    let total = (u128::from(usage.prompt.min(ceiling)) * u128::from(area.height) * 8)
+        .div_ceil(u128::from(ceiling.max(1))) as u64;
     let cached = usage
         .cached
         .filter(|n| *n <= usage.prompt)
@@ -224,7 +330,7 @@ fn draw_bar(frame: &mut Frame, area: Rect, usage: &providers::RequestUsage, colo
             .set_fg(fg)
             .set_bg(bg);
     }
-    if usage.prompt > TREND_CEILING {
+    if usage.prompt > ceiling {
         frame.buffer_mut()[(area.x, area.y)]
             .set_symbol("↑")
             .set_fg(color);
@@ -243,6 +349,23 @@ pub(super) fn draw(
         .len()
         .checked_sub(1)
         .map(|last| last - scroll.min(last));
+    let window =
+        selected.map(|index| history_window(history, index, area.width.saturating_sub(2), zoom));
+    let ceiling = chart_scale::ceiling(
+        window
+            .map(|(start, visible, _)| {
+                history
+                    .entries
+                    .iter()
+                    .skip(start)
+                    .take(visible)
+                    .map(|entry| entry.usage.prompt)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0),
+        1,
+    );
     let now = SystemTime::now();
     let live = selected.is_some_and(|i| is_live(&history.entries[i], sample, now));
     let cached = selected.and_then(|i| {
@@ -258,20 +381,15 @@ pub(super) fn draw(
             " prompt load ",
             Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
         ),
-        Span::styled("· 0–65,536 tokens", Style::default().fg(MUTED)),
+        Span::styled(
+            if selected.is_some() {
+                format!("· 0–{} tokens · auto", exact(ceiling))
+            } else {
+                "· waiting for requests".into()
+            },
+            Style::default().fg(MUTED),
+        ),
     ]);
-    append_detail(
-        &mut title,
-        format!("1 bar/request · {zoom}×"),
-        MUTED,
-        area.width.saturating_sub(2),
-    );
-    append_detail(
-        &mut title,
-        "Shift+↑↓ history / Home latest".into(),
-        MUTED,
-        area.width.saturating_sub(2),
-    );
     title.spans.push(Span::raw(" "));
     let mut block = Block::default()
         .title(title)
@@ -280,6 +398,11 @@ pub(super) fn draw(
         .style(Style::default().bg(PANEL));
     if let Some(index) = selected {
         block = block.title_bottom(size_summary(history, index, area.width.saturating_sub(2)));
+    } else {
+        block = block.title_bottom(Line::from(Span::styled(
+            " tokens per request · size on every bar ",
+            Style::default().fg(MUTED),
+        )));
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -287,16 +410,38 @@ pub(super) fn draw(
         return;
     }
     let Some(index) = selected else {
-        let text = if matches!(sample.llm_provider.as_str(), "oMLX" | "KoboldCpp") {
+        let detail = if matches!(sample.llm_provider.as_str(), "oMLX" | "KoboldCpp") {
             "Waiting for per-request prompt counts."
         } else {
-            "No per-request counts received. Connect client usage to see prompt load."
+            "No per-request counts received."
         };
+        let heading = if sample.llm_active_requests.is_some_and(|n| n > 0) {
+            "WAITING FOR PROMPT SIZE"
+        } else if sample.llm_source == TelemetrySource::Live && sample.llm_status == "idle" {
+            "READY FOR NEXT REQUEST"
+        } else {
+            "NO REQUEST HISTORY"
+        };
+        let lines = vec![
+            Line::from(Span::styled(
+                heading,
+                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(detail, Style::default().fg(MUTED))),
+            Line::from(vec![
+                Span::styled("cached ", Style::default().fg(GREEN)),
+                Span::styled("/ ", Style::default().fg(MUTED)),
+                Span::styled("uncached", Style::default().fg(BLUE)),
+            ]),
+        ];
         frame.render_widget(
-            Paragraph::new(text)
-                .wrap(Wrap { trim: true })
-                .style(Style::default().fg(MUTED)),
-            inner,
+            Paragraph::new(lines).alignment(Alignment::Center),
+            Rect::new(
+                inner.x,
+                inner.y + inner.height.saturating_sub(3) / 2,
+                inner.width,
+                inner.height.min(3),
+            ),
         );
         return;
     };
@@ -310,25 +455,6 @@ pub(super) fn draw(
     } else {
         "LAST SEEN"
     };
-    let mut headline = Line::from(vec![
-        Span::styled(
-            format!("{} tokens", exact(entry.usage.prompt)),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(format!(" · {state}"), Style::default().fg(color)),
-    ]);
-    append_detail(
-        &mut headline,
-        format!("{} UTC", clock_stamp(entry.last_seen)),
-        MUTED,
-        inner.width,
-    );
-    append_detail(
-        &mut headline,
-        telemetry_age(Some(entry.last_seen)),
-        MUTED,
-        inner.width,
-    );
     let cache_label = cached
         .map(|n| {
             let ratio = if entry.usage.prompt == 0 {
@@ -351,6 +477,26 @@ pub(super) fn draw(
         CYAN
     };
     let cache_span = Span::styled(cache_label, Style::default().fg(cache_color));
+    let mut headline = Line::from(vec![
+        Span::styled(
+            format!("{} tokens", exact(entry.usage.prompt)),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" · {state}"), Style::default().fg(color)),
+    ]);
+    // Cache and observation age outrank the clock on narrow primary panels.
+    // Reserve cache space before adding optional metadata to the headline.
+    let headline_width = inner.width.saturating_sub(cache_span.width() as u16 + 2);
+    append_detail(
+        &mut headline,
+        telemetry_age(Some(entry.last_seen)),
+        MUTED,
+        headline_width,
+    );
+    let timestamp = format!("{} UTC", clock_stamp(entry.last_seen));
+    let before_clock = headline.width();
+    append_detail(&mut headline, timestamp.clone(), MUTED, headline_width);
+    let clock_in_header = headline.width() > before_clock;
     let cache_in_header = headline.width() + cache_span.width() + 2 <= usize::from(inner.width);
     if cache_in_header {
         headline.spans.push(Span::raw(
@@ -365,10 +511,33 @@ pub(super) fn draw(
     if inner.height < 2 {
         return;
     }
-    let mut details = Line::from(Span::styled(
-        compact_comparison(&entry.usage, previous),
-        Style::default().fg(MUTED),
-    ));
+    // History survives runtime/model changes. Attribute the selected request
+    // when SYSINFO describes a different runtime, without taking a plot row
+    // away from its size labels. Exact count, cache and age retain priority.
+    let other_runtime =
+        entry.usage.provider != sample.llm_provider || entry.usage.model != sample.llm_model;
+    let comparison = compact_comparison(&entry.usage, previous);
+    let comparison = if inner.width < 70 {
+        comparison.replace("PREVIOUS OBSERVED", "PREV")
+    } else {
+        comparison
+    };
+    let mut details = if other_runtime {
+        let cache_width = if cache_in_header {
+            0
+        } else {
+            cache_span.width() + 3
+        };
+        Line::from(Span::styled(
+            compact_label(
+                &format!("REQUEST {} · {}", entry.usage.provider, entry.usage.model),
+                usize::from(inner.width).saturating_sub(cache_width),
+            ),
+            Style::default().fg(color),
+        ))
+    } else {
+        Line::from(Span::styled(comparison.clone(), Style::default().fg(MUTED)))
+    };
     if !cache_in_header {
         append_detail(
             &mut details,
@@ -376,6 +545,9 @@ pub(super) fn draw(
             cache_color,
             inner.width,
         );
+    }
+    if other_runtime {
+        append_detail(&mut details, comparison, MUTED, inner.width);
     }
     if let Some(cached) = cached {
         append_detail(
@@ -392,383 +564,94 @@ pub(super) fn draw(
         inner.width,
     );
     frame.render_widget(
-        Paragraph::new(details),
+        Paragraph::new(if inner.height >= 5 {
+            details
+        } else {
+            let mut output = output_summary(entry, live, inner.width);
+            if other_runtime {
+                append_detail(
+                    &mut output,
+                    format!("REQUEST {} · {}", entry.usage.provider, entry.usage.model),
+                    color,
+                    inner.width,
+                );
+            }
+            output
+        }),
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
     );
-    if inner.height < 4 {
+    let metadata_height = if inner.height >= 5 {
+        let mut output = output_summary(entry, live, inner.width);
+        if !clock_in_header {
+            append_detail(&mut output, timestamp, MUTED, inner.width);
+            append_detail(
+                &mut output,
+                telemetry_age(Some(entry.last_seen)),
+                MUTED,
+                inner.width,
+            );
+        }
+        frame.render_widget(
+            Paragraph::new(output),
+            Rect::new(inner.x, inner.y + 2, inner.width, 1),
+        );
+        3
+    } else {
+        2
+    };
+    if inner.height < metadata_height + 2 {
         return;
     }
 
-    // Use every remaining column for history; new requests enter on the right.
-    // The axis is ordinal (one bar/request), with timestamps anchored to bars.
-    let plot = Rect::new(inner.x, inner.y + 2, inner.width, inner.height - 3);
-    let zoom = zoom.max(1).min(plot.width);
-    let visible = (index + 1).min(usize::from(plot.width / zoom));
-    let start = index + 1 - visible;
-    let first_x = plot.right() - visible as u16 * zoom;
+    // Reserve enough horizontal space for every bar's size, including the
+    // selection marker. History remains ordinal, with new requests at right.
+    let plot = Rect::new(
+        inner.x,
+        inner.y + metadata_height,
+        inner.width,
+        inner.height - metadata_height - 1,
+    );
+    let (start, visible, slot_width) = window.unwrap();
+    let first_x = plot.right() - visible as u16 * slot_width;
     for (offset, old) in history.entries.iter().skip(start).take(visible).enumerate() {
-        for column in 0..zoom {
+        let x = first_x + offset as u16 * slot_width;
+        let color = if is_live(old, sample, now) {
+            CYAN
+        } else {
+            BLUE
+        };
+        let bar_width = slot_width
+            .saturating_sub(2)
+            .min(12_u16.saturating_mul(zoom.max(1)))
+            .max(1);
+        let bar_x = x + slot_width.saturating_sub(bar_width) / 2;
+        for column in 0..bar_width {
             draw_bar(
                 frame,
-                Rect::new(
-                    first_x + offset as u16 * zoom + column,
-                    plot.y,
-                    1,
-                    plot.height,
-                ),
+                Rect::new(bar_x + column, plot.y, 1, plot.height),
                 &old.usage,
-                if is_live(old, sample, now) {
-                    CYAN
-                } else {
-                    BLUE
-                },
+                color,
+                ceiling,
             );
         }
-    }
-
-    let axis_y = plot.bottom();
-    let selected_x = plot.right() - 1;
-    frame.buffer_mut()[(selected_x, axis_y)]
-        .set_symbol("▲")
-        .set_style(Style::default().fg(color).add_modifier(Modifier::BOLD));
-    if plot.width >= 9 {
-        let last_label_x = selected_x - 8;
+        let selected = start + offset == index;
         frame.render_widget(
-            Paragraph::new(clock_stamp(entry.last_seen)).style(Style::default().fg(color)),
-            Rect::new(last_label_x, axis_y, 8, 1),
+            Paragraph::new(format!(
+                "{}{}",
+                compact_tokens(old.usage.prompt),
+                if selected { "▲" } else { "" }
+            ))
+            .alignment(Alignment::Center)
+            .style(if selected {
+                Style::default().fg(color).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(MUTED)
+            }),
+            Rect::new(x, plot.bottom(), slot_width, 1),
         );
-        let step = visible.div_ceil(4).max(12_u16.div_ceil(zoom) as usize);
-        for offset in (0..visible).step_by(step) {
-            let x = first_x + offset as u16 * zoom;
-            if x + 9 > last_label_x {
-                break;
-            }
-            frame.render_widget(
-                Paragraph::new(clock_stamp(history.entries[start + offset].last_seen))
-                    .style(Style::default().fg(MUTED)),
-                Rect::new(x, axis_y, 8, 1),
-            );
-        }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    fn usage(id: &str, prompt: u64) -> providers::RequestUsage {
-        providers::RequestUsage {
-            provider: "oMLX".into(),
-            model: "model".into(),
-            id: id.into(),
-            prompt,
-            cached: None,
-            output: None,
-            completed: false,
-            ttft_ms: None,
-            observed_at: None,
-        }
-    }
-
-    #[test]
-    fn polls_update_one_bar_and_absent_requests_remain() {
-        let mut history = History::default();
-        history.observe(&[usage("a", 12000), usage("b", 20000)]);
-        let mut updated = usage("a", 12000);
-        updated.output = Some(80);
-        history.observe(&[updated]);
-        history.observe(&[]);
-        assert_eq!(history.len(), 2);
-        assert_eq!(history.entries[0].usage.output, Some(80));
-        assert_eq!(history.entries[1].usage.prompt, 20000);
-        assert_eq!(history.entries[0].number, 1);
-    }
-
-    #[test]
-    fn history_is_bounded_and_ids_are_scoped_to_model_and_provider() {
-        let mut history = History::default();
-        let first = usage("a", 10);
-        let mut second = first.clone();
-        second.provider = "Ollama".into();
-        let mut third = first.clone();
-        third.model = "another".into();
-        history.observe(&[first, second, third]);
-        assert_eq!(history.len(), 3);
-        for n in 0..300 {
-            history.observe(&[usage(&n.to_string(), n)]);
-        }
-        assert_eq!(history.len(), HISTORY_LIMIT);
-        assert_eq!(history.entries.back().unwrap().number, 303);
-    }
-    #[test]
-    fn comparison_is_explicit_and_handles_zero_and_provider_changes() {
-        let mut history = History::default();
-        history.observe(&[usage("previous", 22710)]);
-        assert_eq!(
-            compact_comparison(&usage("latest", 20055), history.entries.back()),
-            "Δ −2,655 (−11.7%) · PREVIOUS OBSERVED 22,710"
-        );
-        let mut other = usage("other", 20055);
-        other.model = "different".into();
-        assert!(
-            compact_comparison(&other, history.entries.back()).contains("different provider/model")
-        );
-        history.observe(&[usage("zero", 0)]);
-        assert_eq!(
-            compact_comparison(&usage("new", 10), history.entries.back()),
-            "Δ +10 · PREVIOUS OBSERVED 0"
-        );
-    }
-
-    #[test]
-    fn fixed_trend_scale_does_not_change_with_outliers() {
-        let before = chart_value(20055);
-        assert_eq!(chart_value(u64::MAX), TREND_CEILING);
-        assert_eq!(chart_value(TREND_CEILING), TREND_CEILING);
-        assert_eq!(chart_value(0), 0);
-        assert_eq!(chart_value(20055), before);
-    }
-
-    #[test]
-    fn live_requires_fresh_membership_and_file_history_keeps_its_age() {
-        let now = SystemTime::now();
-        let mut request = usage("active", 20055);
-        request.observed_at = Some(now);
-        let mut history = History::default();
-        history.observe(&[request.clone()]);
-        let mut sample = Sample {
-            llm_source: TelemetrySource::Live,
-            llm_status: "generating".into(),
-            llm_observed_at: Some(now),
-            llm_requests: vec![request.clone()],
-            ..Sample::default()
-        };
-        let entry = history.entries.back().unwrap();
-        assert!(is_live(entry, &sample, now));
-        assert!(!is_live(entry, &sample, now + Duration::from_secs(6)));
-        sample.llm_requests.clear();
-        assert!(!is_live(entry, &sample, now));
-        request.completed = true;
-        request.observed_at = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1700000000));
-        history.observe(&[request.clone()]);
-        history.observe(&[request]);
-        assert_eq!(
-            history.entries.back().unwrap().last_seen,
-            SystemTime::UNIX_EPOCH + Duration::from_secs(1700000000)
-        );
-    }
-    #[test]
-    fn recent_sizes_keep_model_boundaries_and_ignore_future_requests() {
-        let mut history = History::default();
-        for (i, prompt) in [20000, 21000, 20500, 20055, 40000].into_iter().enumerate() {
-            history.observe(&[usage(&i.to_string(), prompt)]);
-        }
-        let summary = size_summary(&history, 3, 100).to_string();
-        assert!(summary.contains("RECENT 4"));
-        assert!(summary.contains("MEDIAN 20,277.5 tokens"));
-        assert!(summary.contains("RANGE 20,000–21,000"));
-        assert!(!summary.contains("40,000"));
-        let mut other = usage("other", 100000);
-        other.model = "different".into();
-        history.observe(&[other]);
-        assert_eq!(
-            size_summary(&history, 5, 100).to_string(),
-            " RECENT 1 · MEDIAN 100,000 tokens · RANGE 100,000–100,000 "
-        );
-    }
-
-    #[test]
-    fn cache_metadata_does_not_inflate_short_bars() {
-        let mut history = History::default();
-        let unknown = usage("unknown", 12000);
-        let mut cached = usage("cached", 12000);
-        cached.cached = Some(9000);
-        history.observe(&[unknown, cached]);
-        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(90, 8)).unwrap();
-        terminal
-            .draw(|frame| draw(frame, frame.area(), &history, &Sample::default(), 0, 1))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        // Two equal prompts must have identical geometry even if one reports
-        // cache reuse. In a partial cell, the background must stay empty.
-        for y in 3..6 {
-            assert_eq!(buffer[(87, y)].symbol(), buffer[(88, y)].symbol());
-            assert_eq!(buffer[(88, y)].bg, PANEL);
-            assert_ne!(buffer[(87, y)].fg, GREEN);
-        }
-        assert_eq!(buffer[(88, 5)].fg, GREEN);
-    }
-
-    #[test]
-    fn full_width_history_keeps_timestamps_and_selection_at_supported_sizes() {
-        let mut history = History::default();
-        for i in 0..120 {
-            let mut request = usage(&i.to_string(), 16_384 + i * 128);
-            request.observed_at =
-                Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + i * 5));
-            request.completed = true;
-            history.observe(&[request]);
-        }
-        for (width, height) in [(80, 8), (100, 8), (90, 8), (140, 7)] {
-            let mut terminal =
-                Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
-            terminal
-                .draw(|f| draw(f, f.area(), &history, &Sample::default(), 0, 1))
-                .unwrap();
-            let buffer = terminal.backend().buffer();
-            let visible_bars = (1..width - 1)
-                .filter(|x| {
-                    (3..height - 2)
-                        .any(|y| buffer[(*x, y)].fg == BLUE && buffer[(*x, y)].symbol() != " ")
-                })
-                .count();
-            assert_eq!(visible_bars, usize::from(width - 2).min(120));
-            assert_eq!(buffer[(width - 2, height - 2)].symbol(), "▲");
-            let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
-            for label in [
-                "31,616 tokens",
-                "REPORTED",
-                "CACHE —",
-                "22:23:15",
-                "UTC",
-                "PREVIOUS OBSERVED",
-            ] {
-                assert!(text.contains(label), "missing {label} at {width}x{height}");
-            }
-            terminal
-                .draw(|f| draw(f, f.area(), &history, &Sample::default(), usize::MAX, 1))
-                .unwrap();
-            let text: String = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|c| c.symbol())
-                .collect();
-            assert!(text.contains("16,384 tokens"));
-            assert!(text.contains("22:13:20"));
-            assert!(!text.contains("31,616"));
-        }
-    }
-
-    #[test]
-    fn selection_survives_a_jump_and_overflow_and_zero_stays_zero() {
-        let mut history = History::default();
-        history.observe(&[
-            usage("zero", 0),
-            usage("small", 12_000),
-            usage("overflow", 100_000),
-        ]);
-        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 8)).unwrap();
-        terminal
-            .draw(|f| draw(f, f.area(), &history, &Sample::default(), 0, 1))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(78, 3)].symbol(), "↑");
-        assert_eq!(buffer[(78, 6)].symbol(), "▲");
-        assert_eq!(buffer[(76, 5)].symbol(), "·");
-        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
-        assert!(text.contains("100,000 tokens"));
-        assert!(text.contains("MEDIAN 12,000 tokens"));
-        assert!(!text.contains('!'));
-    }
-
-    #[test]
-    fn full_cell_stacks_preserve_both_segments_and_timestamp_rollover_is_explicit() {
-        let mut request = usage("cached", TREND_CEILING);
-        request.cached = Some(TREND_CEILING * 3 / 4);
-        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(1, 3)).unwrap();
-        terminal
-            .draw(|f| draw_bar(f, f.area(), &request, BLUE))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0, 0)].fg, GREEN);
-        assert_eq!(buffer[(0, 0)].bg, BLUE);
-        assert_eq!(buffer[(0, 2)].fg, GREEN);
-        assert_eq!(
-            clock_stamp(SystemTime::UNIX_EPOCH + Duration::from_secs(86_399)),
-            "23:59:59"
-        );
-        assert_eq!(
-            clock_stamp(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400)),
-            "00:00:00"
-        );
-        assert_eq!(
-            clock_stamp(SystemTime::UNIX_EPOCH - Duration::from_secs(1)),
-            "--:--:--"
-        );
-    }
-
-    #[test]
-    fn prompt_sizes_and_cache_render_without_growth_warnings() {
-        let now = SystemTime::now();
-        let mut history = History::default();
-        for (i, prompt) in [10000, 12000, 20000, 21000].into_iter().enumerate() {
-            history.observe(&[usage(&i.to_string(), prompt)]);
-        }
-        let mut current = usage("live", 40000);
-        current.cached = Some(36000);
-        current.observed_at = Some(now);
-        history.observe(&[current.clone()]);
-        let sample = Sample {
-            llm_source: TelemetrySource::Live,
-            llm_status: "generating".into(),
-            llm_observed_at: Some(now),
-            llm_requests: vec![current],
-            ..Sample::default()
-        };
-        let backend = ratatui::backend::TestBackend::new(180, 7);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal
-            .draw(|frame| draw(frame, frame.area(), &history, &sample, 0, 1))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        for color in [BLUE, CYAN, GREEN] {
-            assert!(
-                buffer.content.iter().any(|cell| cell.fg == color),
-                "missing semantic color {color:?}"
-            );
-        }
-        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
-        for label in [
-            "LIVE",
-            "OBSERVED",
-            "40,000 tokens",
-            "CACHE 90%",
-            "4,000 uncached",
-            "MEDIAN 20,000 tokens",
-            "RANGE 10,000–40,000",
-        ] {
-            assert!(text.contains(label), "missing prompt measurement: {label}");
-        }
-        assert!(!text.contains('!'));
-        assert!(!text.contains("PROMPT JUMP"));
-        assert!(!buffer.content.iter().any(|cell| cell.fg == YELLOW));
-    }
-
-    #[test]
-    fn zoom_changes_history_range_without_changing_selected_prompt_size() {
-        let mut history = History::default();
-        for index in 0..120 {
-            let mut request = usage(&index.to_string(), 12_000 + index * 128);
-            request.observed_at =
-                Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + index));
-            history.observe(&[request]);
-        }
-        for (zoom, first) in [(1, 42), (4, 101)] {
-            let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(80, 8)).unwrap();
-            terminal
-                .draw(|frame| draw(frame, frame.area(), &history, &Sample::default(), 0, zoom))
-                .unwrap();
-            let text: String = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
-            assert!(text.contains("27,232 tokens"));
-            assert!(text.contains(&clock_stamp(history.entries[first].last_seen)));
-            assert_eq!(terminal.backend().buffer()[(78, 6)].symbol(), "▲");
-        }
-    }
-}
+#[path = "tests/request_dashboard.rs"]
+mod tests;

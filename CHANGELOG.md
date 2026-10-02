@@ -1,6 +1,146 @@
 # Changelog
 
-## Unreleased
+## 2.0.0 — 2026-10-02
+
+- Expand native monitoring to eleven local LLM runtimes. Add Ollama loaded
+  models, resident VRAM and context capacity, and LM Studio loaded instances
+  with native v1, v0 and OpenAI-compatible API fallback.
+- Add vLLM and SGLang process detection and Prometheus polling: active/waiting
+  requests, sampled server token rates, cache statistics, KV occupancy and
+  cumulative mean first-token timing. Preserve gaps across resets, changed
+  series and outages; never infer per-request history from aggregate counters.
+- Add explicit Jan/GPT4All detection and model-catalogue polling, plus native
+  catalogue polling for MLX-LM and LocalAI. Keep unavailable performance data
+  unknown. Monitor one selected endpoint per session.
+- Support configured HTTP/HTTPS provider URLs and bearer tokens with verified
+  certificates, bounded reads and timeouts, and no redirects or environment
+  proxies. Preserve the remote-authentication opt-in and exclude remote API
+  rates from local hardware slowdown correlation.
+- Preserve Ollama and LM Studio completion speeds, cached tokens and explicit
+  first-token timings in the counters-only usage recorder. Extend usage reports
+  to all eleven runtimes. Show native API details in Top and text reports.
+- Synchronize Overview time-series windows and zoom across panel widths without
+  dropping samples. Keep independent zoom for request bars and label rolling
+  durations explicitly, for example `window 34s`.
+- Remove the process-memory chart and give throughput and prompt bars more
+  vertical space. Retain OS process readings in Top and the static report.
+- Render resident RAM occupancy in cyan with a separate pressure-severity label.
+  Keep cache interval history stable when data is missing; show cumulative reuse
+  as text. Move server averages to expanded charts and label live rates.
+- Draw overlapping queue connectors as continuous lines with proper junctions.
+  Mark equality only for equal measured counts; distinguish crossings and
+  unequal values rounded to the same row. Keep arrow navigation adjacent.
+- Add a 90% production Rust line-coverage gate on macOS and Linux, with
+  per-file reports and tests excluded from the denominator. Move tests into
+  dedicated files and cover missing telemetry, provider failures, request
+  speeds, navigation, rendering and journal events.
+
+## 1.2.1-rc.8 — 2026-10-01
+
+- Color RAM readings, gauges and history by the captured memory-pressure state.
+  High resident usage including file cache no longer creates a false red warning
+  while macOS reports normal pressure. Missing pressure remains unknown.
+- Preserve historical pressure colors across percentage changes and chart
+  connectors. Linux derives pressure from MemAvailable and PSI, honoring the
+  configured memory bands; macOS uses its native pressure state.
+
+## 1.2.1-rc.7 — 2026-10-01
+
+- Show output count and request-specific tokens/second in prompt details and
+  retained prompt history. Label active samples LIVE, completed averages AVG,
+  and retained observations LAST, independently of server-wide throughput.
+- Capture oMLX local/distributed decode rates and KoboldCpp completed rates.
+  Accept explicit output speed in usage records and Ollama decode timing.
+  Preserve the last measured speed and age when a later sample omits timing.
+- Keep the prompt panel's existing size and bar labels; fit output speed into
+  its metadata rows, with no separate chart or additional screen allocation.
+
+## 1.2.1-rc.6 — 2026-10-01
+
+- Correct RAM history to physical occupancy, including file cache, with resident
+  bytes/total and an explicit resident label. macOS pressure accounting no
+  longer masquerades as RAM usage. Keep OS pressure independently visible.
+- Remove the artificial 1 B/s axis from measured idle paging windows; preserve
+  the zero trace, missing-data gaps and any visible historical traffic.
+- Add percent units to axes, identify OS process footprint, and distinguish
+  last sampled rates, server averages and cumulative cache reuse.
+
+## 1.2.1-rc.5 — 2026-10-01
+
+- Describe GPU Journal events as saturated, eased or idle instead of critical
+  faults. Use the measured utilization band for recovery colors and honor the
+  configured saturation threshold. Missing samples never report idle recovery.
+
+## 1.2.1-rc.4 — 2026-10-01
+
+- Prioritize memory pressure, process footprint and paging in Overview's main
+  row. Give them at least twice the height of supporting throughput charts.
+- Cap the generation/prefill/GPU row at six rows and reduce prefill to 30% of
+  its width. Preserve compact prompt history and the expanded recent Journal.
+- Label system memory as load percentage and color the separate PRESSURE
+  reading using OS pressure severity. Keep compact rate units readable.
+
+## 1.2.1-rc.3 — 2026-10-01
+
+- Rebalance Overview: generation and prefill sit side by side, prompt history
+  stays within eight rows, and recent Journal gets up to ten readable event
+  rows with message wrapping. Keep the Journal visible beside measured latency.
+- Rebuild process memory with a prominent current value, PID attribution,
+  byte-axis ticks, a fitted range, and peak/growth details that fit the panel.
+- Move contextual keyboard controls to a bottom bar. Simplify chart headers,
+  reserve detailed statistics for expanded views, and preserve complete Queue
+  counts and paging labels at 80 columns.
+
+## 1.2.1-rc.2 — 2026-10-01
+
+- Anchor prompt history at the right edge with fixed request spacing, including
+  a single observed request.
+- Treat oMLX's initial prefill speed as unavailable until measured. Distinguish
+  interval cache readings, last-sample age, window statistics and session averages.
+- Make isolated chart samples visible, round traces to the nearest row and show
+  exact Queue counts when a short panel cannot represent its numeric scale.
+- Leave cache-history gaps across stale telemetry, counter resets, provider
+  changes and inconsistent deltas instead of reporting false zero reuse.
+
+## 1.2.1-rc.1 — 2026-09-30
+
+- Size Overview by operational importance: large prompt history beside stacked
+  generation/prefill, a substantial memory/paging row and smaller GPU/cache/queue
+  panels. Keep empty and active geometry stable instead of collapsing prompt load.
+- Replace the tall SYSINFO card with a dense full-width strip; preserve model,
+  state, freshness, hardware and current work counters on short terminals.
+- Give empty prompt history a deliberate waiting state. Preserve exact selected
+  size, cache, age, UTC time and per-bar labels on narrow charts.
+- Identify unallocated swap explicitly in the static report.
+- Record importance-based sizing and stable geometry in the shared chart spec.
+
+- Separate Cache and Queue into independent Overview panels. Consolidate cache
+  statistics only with the Cache chart; preserve Queue's active/waiting counts,
+  history, selection and zoom. Keep both counts visible on short terminals.
+- Remove nested throughput/memory frames, cap SYSINFO width, and move hardware,
+  thermal and GPU allocation details there. Preserve units on standalone charts.
+- Add a horizontal swap-capacity bar alongside paging traffic. Use percent bars
+  in compact panels, keep queue counts readable and label cache average fallbacks.
+- Explain visible history gaps, label retained prompt models, fix directional
+  chart selection, and support large queue axis values.
+- Record the flat layout and metric rules in the shared chart specification.
+
+- Show a compact prompt-size label beneath every visible prompt-load bar at
+  every zoom level. Reserve space for readable token counts and keep the
+  selected request's exact count and UTC timestamp in the headline.
+- Replace throughput summary cards with generation and prefill charts; remove
+  diagnosis cards and expand model/state with queue, request, process and
+  telemetry details. Consolidate throughput, system/process memory, GPU,
+  paging/I/O and cache/queue; give prompt history a full row.
+- Fit numeric chart axes to visible data in their actual units, including
+  paging bytes/s, token rates, prompt tokens, process bytes, queue counts and
+  latency. Keep 0–100 only for percentages. Restore green/yellow/red GPU load
+  bands and document the shared rules for all charts in `docs/CHART_SPEC.md`.
+- Restore Tab/Shift-Tab as global view navigation; keep arrows for chart
+  selection. Make MLX Top a process table with filtered totals, full commands
+  and selected-process details; label provider-wide model/state separately.
+- Build, transfer, download and run private RCs with `scripts/rc.py` over SSH,
+  with checksum/platform verification and a separate RC installation.
 
 ## 1.2.0 — 2026-09-30
 
