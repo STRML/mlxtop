@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.0-rc.1 — 2026-10-04
 
 - Add a compact Overview assessment and the read-only `d` Diagnostics panel,
   including evidence, provider capabilities, polling ages and setup guidance.
