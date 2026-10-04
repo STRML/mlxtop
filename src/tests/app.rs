@@ -1345,3 +1345,64 @@ fn small_formatters_cover_every_unit() {
         ..MlxTelemetry::default()
     }));
 }
+
+#[test]
+fn doctor_arguments_configuration_and_exit_conditions_are_explicit() {
+    use crate::config::load_doctor_config;
+    use crate::report::{diagnostic_lines, write_doctor};
+    assert!(matches!(
+        parse_args(&args(&["doctor", "-i", "2"]), &Config::default()).unwrap(),
+        CliAction::Doctor { interval: 2, .. }
+    ));
+    assert!(parse_args(&args(&["doctor", "--once"]), &Config::default()).is_err());
+    assert!(matches!(
+        parse_args(&args(&["doctor", "--help"]), &Config::default()).unwrap(),
+        CliAction::Print(_)
+    ));
+    let dir = TempDir::new("doctor-config");
+    assert_eq!(
+        load_doctor_config(&dir.0.join("missing")).unwrap(),
+        Config::default()
+    );
+    for text in [
+        "invalid",
+        r#"{"interval":0}"#,
+        r#"{"history":9999}"#,
+        r#"{"omx":{"port":0}}"#,
+    ] {
+        let path = dir.write("config.json", text);
+        assert!(load_doctor_config(&path).is_err());
+    }
+    assert!(load_doctor_config(&dir.0).is_err());
+    assert_eq!(
+        load_doctor_config(&dir.write("config.json", r#"{"interval":2}"#))
+            .unwrap()
+            .interval,
+        Some(2)
+    );
+    let mut sample = Sample {
+        total_memory: 1024,
+        vm_available: true,
+        resident_memory: Some(512),
+        pressure: "RED".into(),
+        rate_ready: true,
+        ..Sample::default()
+    };
+    let mut text = Vec::new();
+    assert!(
+        write_doctor(&mut text, &sample).unwrap(),
+        "pressure is a measurement, not a doctor failure"
+    );
+    let text = String::from_utf8(text).unwrap();
+    for line in diagnostic_lines(&sample) {
+        assert!(text.contains(&line));
+    }
+    sample.runtime.provider = Some("Ollama".into());
+    sample.runtime.begin();
+    sample.runtime.finish(false);
+    assert!(!write_doctor(&mut Vec::new(), &sample).unwrap());
+    sample.runtime.finish(true);
+    assert!(write_doctor(&mut Vec::new(), &sample).unwrap());
+    sample.vm_available = false;
+    assert!(!write_doctor(&mut Vec::new(), &sample).unwrap());
+}

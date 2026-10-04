@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Bounded oMLX HTTP transport; authentication policy belongs to the provider.
+use crate::runtime_diagnostics::ProbeIssue;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -27,15 +28,20 @@ pub(crate) fn http_request(
     path: &str,
     headers: &[(&str, &str)],
     body: Option<&str>,
-) -> Option<HttpResponse> {
-    let address = (host, port).to_socket_addrs().ok()?.next()?;
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(250)).ok()?;
+) -> Result<HttpResponse, ProbeIssue> {
+    let address = (host, port)
+        .to_socket_addrs()
+        .map_err(ProbeIssue::from_io)?
+        .next()
+        .ok_or(ProbeIssue::Transport)?;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_millis(250))
+        .map_err(ProbeIssue::from_io)?;
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
-        .ok()?;
+        .map_err(ProbeIssue::from_io)?;
     stream
         .set_write_timeout(Some(Duration::from_millis(250)))
-        .ok()?;
+        .map_err(ProbeIssue::from_io)?;
     let body = body.unwrap_or("");
     let mut request =
         format!("{method} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n");
@@ -50,31 +56,37 @@ pub(crate) fn http_request(
     }
     request.push_str("\r\n");
     request.push_str(body);
-    stream.write_all(request.as_bytes()).ok()?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(ProbeIssue::from_io)?;
 
     let mut raw = Vec::new();
     stream
         .take((MAX_HTTP_RESPONSE_BYTES + 1) as u64)
         .read_to_end(&mut raw)
-        .ok()?;
+        .map_err(ProbeIssue::from_io)?;
     if raw.len() > MAX_HTTP_RESPONSE_BYTES {
-        return None;
+        return Err(ProbeIssue::ResponseTooLarge);
     }
     let raw = String::from_utf8_lossy(&raw);
-    let (head, body) = raw.split_once("\r\n\r\n")?;
+    let (head, body) = raw
+        .split_once("\r\n\r\n")
+        .ok_or(ProbeIssue::InvalidResponse)?;
     let mut lines = head.lines();
     let status = lines
-        .next()?
+        .next()
+        .ok_or(ProbeIssue::InvalidResponse)?
         .split_whitespace()
         .nth(1)
-        .and_then(|value| value.parse().ok())?;
+        .and_then(|value| value.parse().ok())
+        .ok_or(ProbeIssue::InvalidResponse)?;
     let headers = lines
         .filter_map(|line| {
             let (key, value) = line.split_once(':')?;
             Some((key.trim().to_owned(), value.trim().to_owned()))
         })
         .collect();
-    Some(HttpResponse {
+    Ok(HttpResponse {
         status,
         headers,
         body: body.to_owned(),

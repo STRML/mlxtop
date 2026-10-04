@@ -282,6 +282,7 @@ impl Collector {
         }
         sample.llm_processes = llm_processes;
         let live_stats = self.llm_client.poll(detected_provider.as_deref());
+        sample.runtime = self.llm_client.report();
         let should_read_log = !self
             .llm_client
             .provider_adapter
@@ -297,7 +298,7 @@ impl Collector {
             LlmLogStats::default()
         };
         let llm_stats = live_stats.as_ref();
-        sample.llm_remote = llm_stats.is_some_and(|stats| stats.remote);
+        sample.llm_remote = sample.runtime.remote || llm_stats.is_some_and(|stats| stats.remote);
         sample.llm_details = llm_stats.and_then(|stats| stats.details.clone());
         sample.mlx = llm_stats.map(|stats| stats.mlx.clone()).unwrap_or_default();
         sample.metal.resource_limit = sample.metal.resource_limit.or(sample.mlx.resource_limit);

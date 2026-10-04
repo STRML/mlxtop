@@ -93,6 +93,9 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         charts: chart_navigation::Navigation::default(),
         gpu_selected: 0,
         help: false,
+        diagnostics_open: false,
+        diagnostics_scroll: 0,
+        diagnostics_max_scroll: Default::default(),
         quit: false,
         sampler_disconnected: false,
         alert: None,
@@ -130,6 +133,21 @@ pub(super) fn render_app(app: &App, width: u16, height: u16) -> String {
 pub(super) fn populate_dashboard_fixture(app: &mut App) {
     let now = SystemTime::now();
     app.collector.current = Sample {
+        runtime: crate::runtime_diagnostics::RuntimeReport {
+            provider: Some("oMLX".into()),
+            selection: "process detection",
+            endpoint: "http://127.0.0.1:8080".into(),
+            credentials_present: true,
+            connected: true,
+            attempted_at: Some(now),
+            succeeded_at: Some(now),
+            ..Default::default()
+        },
+        impact: "LLM READY".into(),
+        correlation: CorrelationInsight {
+            direction: ThroughputDirection::Flat,
+            ..Default::default()
+        },
         total_memory: 36 * 1024 * MIB,
         availability: Some(93),
         resident_memory: Some((36 * 1024 * MIB * 57).div_ceil(100)),
@@ -377,7 +395,10 @@ fn flat_panels_keep_units_and_explain_a_zoomed_gap() {
         assert!(screen.contains("SYSINFO"));
         assert!(screen.contains("Apple M4 Max"));
         assert!(screen.contains("THERMAL no warning"));
-        assert!(!screen.contains("throughput"));
+        assert!(
+            !screen.contains("┌ throughput"),
+            "no extra throughput panel"
+        );
         assert!(!screen.contains("memory · system / process"));
         let regions = app.charts.regions.borrow().clone();
         for chart in [Chart::Generation, Chart::Prefill] {
@@ -660,7 +681,7 @@ fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
                 "missing {label} at {width}×{height}\n{screen}"
             );
         }
-        assert_eq!(screen.matches("generation").count(), 1);
+        assert_eq!(screen.matches("┌ generation").count(), 1);
         assert!(!screen.contains("cache / queue"));
         let regions = app.charts.regions.borrow();
         let cache = regions
@@ -721,6 +742,15 @@ fn dashboard_terminal_preview() {
     let (mut app, _views) = test_app_with_sender(0);
     populate_dashboard_fixture(&mut app);
     let preview_state = env::var("MLXTOP_PREVIEW_STATE").unwrap_or_default();
+    if preview_state == "nvidia" {
+        app = nvidia_app(4);
+    }
+    if preview_state == "diagnostics" {
+        app.diagnostics_open = true;
+    }
+    if preview_state == "critical" {
+        app.collector.current.pressure = "RED".into();
+    }
     if preview_state == "single-idle" {
         populate_single_idle_fixture(&mut app);
     }
@@ -1385,7 +1415,10 @@ fn process_details_follow_selection_and_keep_runtime_scoped() {
                 "missing {label} at {width}x{height}\n{screen}"
             );
         }
-        assert!(!screen.contains("throughput"));
+        assert!(
+            !screen.contains("┌ throughput"),
+            "no extra throughput panel"
+        );
         assert!(!screen.contains("SYSINFO"));
     }
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -1848,7 +1881,7 @@ fn prompt_counts_are_visible_and_request_events_use_the_llm_filter() {
 }
 
 #[test]
-fn overview_journal_retains_five_recent_events_at_screenshot_size() {
+fn overview_journal_retains_three_recent_events_at_screenshot_size() {
     let mut app = test_app(0);
     for index in 0..12 {
         app.collector.signals.push_back(SignalEvent {
@@ -1861,16 +1894,16 @@ fn overview_journal_retains_five_recent_events_at_screenshot_size() {
         });
     }
     let screen = render_app(&app, 170, 42);
-    for index in 7..12 {
+    for index in 9..12 {
         assert!(screen.contains(&format!("Event {index:02}")), "{screen}");
     }
-    assert!(!screen.contains("Event 06"), "capacity is five event rows");
-    assert!(screen.find("Event 11") < screen.find("Event 07"));
+    assert!(!screen.contains("Event 08"), "capacity is three event rows");
+    assert!(screen.find("Event 11") < screen.find("Event 09"));
     assert!(screen.contains("3 open"));
     let compact = render_app(&app, 80, 24);
     assert!(
-        compact.contains("Event 11"),
-        "compact Overview retains the latest event"
+        !compact.contains("Event 11"),
+        "compact Overview uses the journal preview space for the assessment"
     );
     assert!(compact.contains("? help q quit"));
 }

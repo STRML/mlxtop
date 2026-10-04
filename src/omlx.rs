@@ -8,7 +8,8 @@ use crate::json::{
 };
 use crate::logging::{diagnostics_log, log_field};
 use crate::providers;
-use crate::transport::http_request;
+use crate::runtime_diagnostics::{ProbeIssue, RuntimeReport};
+use crate::transport::{http_request, HttpResponse};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -25,6 +26,9 @@ pub(crate) struct LlmTelemetryClient {
     pub(crate) next_metadata_poll: Instant,
     pub(crate) next_poll: Instant,
     pub(crate) retry_backoff: Duration,
+    pub(crate) runtime: RuntimeReport,
+    using_adapter: bool,
+    configured_endpoint: bool,
 }
 
 impl LlmTelemetryClient {
@@ -42,18 +46,61 @@ impl LlmTelemetryClient {
             next_metadata_poll: Instant::now(),
             next_poll: Instant::now(),
             retry_backoff: Duration::from_secs(1),
+            runtime: RuntimeReport::default(),
+            using_adapter: false,
+            configured_endpoint: config
+                .omx
+                .as_ref()
+                .is_some_and(|omx| omx.host.is_some() || omx.port.is_some()),
         }
     }
 
     pub(crate) fn poll(&mut self, detected_provider: Option<&str>) -> Option<LlmTelemetry> {
-        if self.provider_adapter.selected(detected_provider) {
+        self.using_adapter = self.provider_adapter.selected(detected_provider);
+        if self.using_adapter {
             return self.provider_adapter.poll();
         }
         let now = Instant::now();
         if now < self.next_poll {
             return self.cached.clone();
         }
-        let telemetry = self.poll_once();
+        self.runtime.provider = self
+            .provider_adapter
+            .provider()
+            .map(str::to_owned)
+            .or_else(|| self.configured_endpoint.then(|| "oMLX".into()))
+            .or_else(|| self.runtime.provider.clone());
+        self.runtime.selection = if self.provider_adapter.explicitly_selected() {
+            "MLXTOP_PROVIDER; oMLX endpoint config"
+        } else if self.configured_endpoint {
+            "oMLX endpoint config"
+        } else if detected_provider.is_some() {
+            "process detection; oMLX endpoint config"
+        } else {
+            "automatic oMLX discovery"
+        };
+        let authority = if self.host.contains(':') && !self.host.starts_with('[') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        self.runtime.endpoint =
+            crate::runtime_diagnostics::safe_endpoint(&format!("http://{authority}:{}", self.port))
+                .unwrap_or_else(|| "<invalid endpoint>".into());
+        self.runtime.remote = !is_loopback_host(&self.host);
+        self.runtime.credentials_present = read_omlx_api_key(self.home.as_deref()).is_some();
+        self.runtime.begin();
+        let telemetry = if self.runtime.endpoint == "<invalid endpoint>" {
+            self.runtime
+                .record("configuration", Err(ProbeIssue::InvalidEndpoint))
+        } else {
+            self.poll_once()
+        };
+        self.runtime.finish(telemetry.is_some());
+        if telemetry.is_some() {
+            self.runtime.provider = Some("oMLX".into());
+        }
+
         if let Some(mut telemetry) = telemetry {
             telemetry.remote = !is_loopback_host(&self.host);
             self.cached = Some(telemetry);
@@ -65,7 +112,7 @@ impl LlmTelemetryClient {
                 "llm_api_poll_failed",
                 format!(
                     "host={} port={} retry_seconds={}",
-                    log_field(&self.host),
+                    log_field(&self.runtime.endpoint),
                     self.port,
                     self.retry_backoff.as_secs()
                 ),
@@ -76,16 +123,45 @@ impl LlmTelemetryClient {
         self.cached.clone()
     }
 
+    pub(crate) fn report(&self) -> RuntimeReport {
+        if self.using_adapter {
+            self.provider_adapter.report()
+        } else {
+            self.runtime.clone()
+        }
+    }
+
+    fn request(
+        &mut self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> Option<HttpResponse> {
+        let response = self.runtime.record(
+            path,
+            http_request(&self.host, self.port, method, path, headers, body),
+        )?;
+        if response.status != 200 {
+            self.runtime
+                .record::<()>(path, Err(ProbeIssue::Http(response.status)));
+        }
+        Some(response)
+    }
+
     pub(crate) fn poll_once(&mut self) -> Option<LlmTelemetry> {
-        let health_response = match http_request(&self.host, self.port, "GET", "/health", &[], None)
-        {
+        let health_response = match self.request("GET", "/health", &[], None) {
             Some(response) => response,
             None => {
                 self.last_stats_available = None;
                 diagnostics_log(
                     "WARN",
                     "llm_health_unreachable",
-                    format!("host={} port={}", log_field(&self.host), self.port),
+                    format!(
+                        "host={} port={}",
+                        log_field(&self.runtime.endpoint),
+                        self.port
+                    ),
                 );
                 return None;
             }
@@ -97,7 +173,7 @@ impl LlmTelemetryClient {
                 "llm_health_http_error",
                 format!(
                     "host={} port={} status={}",
-                    log_field(&self.host),
+                    log_field(&self.runtime.endpoint),
                     self.port,
                     health_response.status
                 ),
@@ -108,12 +184,14 @@ impl LlmTelemetryClient {
             Ok(health) => health,
             Err(error) => {
                 self.last_stats_available = None;
+                self.runtime
+                    .record::<()>("/health", Err(ProbeIssue::InvalidResponse));
                 diagnostics_log(
                     "WARN",
                     "llm_health_invalid_json",
                     format!(
                         "host={} port={} error={}",
-                        log_field(&self.host),
+                        log_field(&self.runtime.endpoint),
                         self.port,
                         log_field(&error.to_string())
                     ),
@@ -123,10 +201,16 @@ impl LlmTelemetryClient {
         };
         if health.get("default_model").is_none() && health.get("engine_pool").is_none() {
             self.last_stats_available = None;
+            self.runtime
+                .record::<()>("/health", Err(ProbeIssue::InvalidResponse));
             diagnostics_log(
                 "WARN",
                 "llm_health_unrecognized",
-                format!("host={} port={}", log_field(&self.host), self.port),
+                format!(
+                    "host={} port={}",
+                    log_field(&self.runtime.endpoint),
+                    self.port
+                ),
             );
             return None;
         }
@@ -139,7 +223,7 @@ impl LlmTelemetryClient {
                 "llm_api_stats",
                 format!(
                     "host={} port={} available={stats_available}",
-                    log_field(&self.host),
+                    log_field(&self.runtime.endpoint),
                     self.port
                 ),
             );
@@ -179,50 +263,44 @@ impl LlmTelemetryClient {
             self.login();
         }
         let cookie = self.session_cookie.clone()?;
-        let response = http_request(
-            &self.host,
-            self.port,
-            "GET",
-            path,
-            &[("Cookie", cookie.as_str())],
-            None,
-        )?;
+        let response = self.request("GET", path, &[("Cookie", cookie.as_str())], None)?;
         if response.status == 401 {
             self.session_cookie = None;
             self.login();
             let cookie = self.session_cookie.clone()?;
-            let response = http_request(
-                &self.host,
-                self.port,
-                "GET",
-                path,
-                &[("Cookie", cookie.as_str())],
-                None,
-            )?;
+            let response = self.request("GET", path, &[("Cookie", cookie.as_str())], None)?;
             if response.status != 200 {
                 return None;
             }
-            return serde_json::from_str(&response.body).ok();
+            return self.runtime.record(
+                path,
+                serde_json::from_str(&response.body).map_err(|_| ProbeIssue::InvalidResponse),
+            );
         }
         if response.status != 200 {
             return None;
         }
-        serde_json::from_str(&response.body).ok()
+        self.runtime.record(
+            path,
+            serde_json::from_str(&response.body).map_err(|_| ProbeIssue::InvalidResponse),
+        )
     }
 
     pub(crate) fn login(&mut self) {
         if !is_loopback_host(&self.host)
             && env::var("MLXTOP_ALLOW_REMOTE_AUTH").as_deref() != Ok("1")
         {
+            self.runtime
+                .record::<()>("/admin/api/login", Err(ProbeIssue::RemoteAuthBlocked));
             return;
         }
         let Some(api_key) = read_omlx_api_key(self.home.as_deref()) else {
+            self.runtime
+                .record::<()>("/admin/api/login", Err(ProbeIssue::CredentialsMissing));
             return;
         };
         let body = json!({ "api_key": api_key, "remember": true }).to_string();
-        let Some(response) = http_request(
-            &self.host,
-            self.port,
+        let Some(response) = self.request(
             "POST",
             "/admin/api/login",
             &[("Content-Type", "application/json")],
@@ -235,6 +313,10 @@ impl LlmTelemetryClient {
                 .header("set-cookie")
                 .and_then(|value| value.split(';').next())
                 .map(str::to_owned);
+            if self.session_cookie.is_none() {
+                self.runtime
+                    .record::<()>("/admin/api/login", Err(ProbeIssue::InvalidResponse));
+            }
         }
     }
 }

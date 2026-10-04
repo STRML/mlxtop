@@ -68,6 +68,9 @@ impl App {
         if self.alert.is_some() {
             self.draw_alert_banner(frame, outer[1]);
         }
+        if self.diagnostics_open {
+            self.draw_diagnostics(frame, outer[1]);
+        }
         if self.help {
             self.draw_help(frame, area);
         }
@@ -264,13 +267,8 @@ impl App {
         };
         // Keep idle geometry stable, but give throughput and request bars enough
         // vertical resolution. Resources remain visible in a compact first row.
-        let journal_height = if compact && devices {
-            0
-        } else if compact {
-            3
-        } else {
-            7
-        };
+        let journal_height = if compact { 0 } else { 5 };
+        let summary_height = 2;
         let request_height = if compact {
             if devices {
                 6
@@ -280,9 +278,9 @@ impl App {
         } else {
             (area.height / 4).clamp(9, 13)
         };
-        let remaining = area
-            .height
-            .saturating_sub(info_height + device_height + journal_height + request_height);
+        let remaining = area.height.saturating_sub(
+            info_height + summary_height + device_height + journal_height + request_height,
+        );
         let resource_height = (remaining / 2).clamp(4, 8).min(remaining);
         let rates_height = remaining.saturating_sub(resource_height);
         // Fit every captured observation into even the narrowest plot, then
@@ -322,6 +320,7 @@ impl App {
         self.charts.overview_samples.set(Some(usize::from(samples)));
         let rows = Layout::vertical([
             Constraint::Length(info_height),
+            Constraint::Length(summary_height),
             Constraint::Length(device_height),
             Constraint::Length(resource_height),
             Constraint::Length(rates_height),
@@ -335,27 +334,28 @@ impl App {
             &self.collector.current,
             &self.collector.request_history,
         );
+        crate::diagnostics_view::summary(frame, rows[1], &self.collector.current, self.paused);
         if devices {
             gpu_dashboard::draw(
                 frame,
-                rows[1],
+                rows[2],
                 &self.collector.current.gpus,
                 self.gpu_selected,
                 self.thresholds,
             );
         }
-        self.draw_resource_charts(frame, rows[2]);
-        self.draw_workload_charts(frame, rows[3]);
-        self.draw_supporting_charts(frame, rows[4]);
-        if rows[5].height > 0 {
+        self.draw_resource_charts(frame, rows[3]);
+        self.draw_workload_charts(frame, rows[4]);
+        self.draw_supporting_charts(frame, rows[5]);
+        if rows[6].height > 0 {
             if self.collector.operator_history.has_latency() && area.width >= 120 {
                 let columns =
                     Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
-                        .split(rows[5]);
+                        .split(rows[6]);
                 self.draw_signal_log(frame, columns[0]);
                 self.draw_operator_chart(frame, columns[1], Chart::Latency);
             } else {
-                self.draw_signal_log(frame, rows[5]);
+                self.draw_signal_log(frame, rows[6]);
             }
         }
     }
@@ -1468,6 +1468,20 @@ impl App {
         );
         let help = Line::from(vec![
             Span::styled(
+                " d",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if self.diagnostics_open {
+                    " close "
+                } else {
+                    " diagnostics "
+                },
+                Style::default().fg(MUTED),
+            ),
+            Span::styled(
                 " ?",
                 Style::default()
                     .fg(Color::White)
@@ -1484,7 +1498,9 @@ impl App {
         ]);
         let available = usize::from(area.width).saturating_sub(help.width());
         let mut line = Line::from(Span::styled(
-            if self.tab == 0 {
+            if self.diagnostics_open {
+                " Diagnostics ".into()
+            } else if self.tab == 0 {
                 format!(
                     " {} · {}× ",
                     self.charts.focused.label(),
@@ -1497,37 +1513,46 @@ impl App {
             },
             Style::default().fg(CYAN),
         ));
-        let hints = match self.tab {
-            0 => vec![
-                (
-                    "Enter",
-                    if self.charts.expanded {
-                        "restore"
-                    } else {
-                        "expand"
-                    },
-                ),
-                ("↑↓←→", "chart"),
-                ("+/−", "zoom"),
+        let hints = if self.diagnostics_open {
+            vec![
+                ("↑↓", "scroll"),
+                ("PgUp/Dn", "page"),
                 ("Tab", "view"),
                 ("p", if self.paused { "resume" } else { "pause" }),
-                ("Shift+↑↓", "requests"),
-                ("{ / }", "interval"),
-            ],
-            1 => vec![
-                ("↑↓", "select"),
-                ("s", "sort"),
-                ("/", "filter"),
-                ("Tab", "view"),
-                ("p", "pause"),
-            ],
-            _ => vec![
-                ("↑↓", "scroll"),
-                ("f", "filter"),
-                ("Tab", "view"),
-                ("r", "reset"),
-                ("p", "pause"),
-            ],
+            ]
+        } else {
+            match self.tab {
+                0 => vec![
+                    (
+                        "Enter",
+                        if self.charts.expanded {
+                            "restore"
+                        } else {
+                            "expand"
+                        },
+                    ),
+                    ("↑↓←→", "chart"),
+                    ("+/−", "zoom"),
+                    ("Tab", "view"),
+                    ("p", if self.paused { "resume" } else { "pause" }),
+                    ("Shift+↑↓", "requests"),
+                    ("{ / }", "interval"),
+                ],
+                1 => vec![
+                    ("↑↓", "select"),
+                    ("s", "sort"),
+                    ("/", "filter"),
+                    ("Tab", "view"),
+                    ("p", "pause"),
+                ],
+                _ => vec![
+                    ("↑↓", "scroll"),
+                    ("f", "filter"),
+                    ("Tab", "view"),
+                    ("r", "reset"),
+                    ("p", "pause"),
+                ],
+            }
         };
         for (key, label) in hints {
             let key = Span::styled(
@@ -1571,6 +1596,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from("1 / 2 / 3       Overview / MLX Top / Journal"),
+            Line::from("d               diagnostics and runtime setup"),
             Line::from("Tab / Shift-Tab next / previous view"),
             Line::from("p / Space       pause or resume; r resets history"),
             Line::from("{ / }           change refresh interval (1–60s)"),

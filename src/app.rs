@@ -173,6 +173,9 @@ pub(crate) struct App {
     pub(crate) charts: chart_navigation::Navigation,
     pub(crate) gpu_selected: usize,
     pub(crate) help: bool,
+    pub(crate) diagnostics_open: bool,
+    pub(crate) diagnostics_scroll: u16,
+    pub(crate) diagnostics_max_scroll: std::cell::Cell<u16>,
     pub(crate) quit: bool,
     pub(crate) sampler_disconnected: bool,
     pub(crate) alert: Option<ActiveAlert>,
@@ -224,6 +227,9 @@ impl App {
             charts: chart_navigation::Navigation::default(),
             gpu_selected: 0,
             help: false,
+            diagnostics_open: false,
+            diagnostics_scroll: 0,
+            diagnostics_max_scroll: Default::default(),
             quit: false,
             sampler_disconnected: false,
             alert: None,
@@ -318,6 +324,43 @@ impl App {
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if self.diagnostics_open {
+            let scroll = self
+                .diagnostics_scroll
+                .min(self.diagnostics_max_scroll.get());
+            match key.code {
+                KeyCode::Char('d') | KeyCode::Esc => self.diagnostics_open = false,
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.quit = true
+                }
+                KeyCode::Up => self.diagnostics_scroll = scroll.saturating_sub(1),
+                KeyCode::Down => {
+                    self.diagnostics_scroll = scroll
+                        .saturating_add(1)
+                        .min(self.diagnostics_max_scroll.get())
+                }
+                KeyCode::PageUp => self.diagnostics_scroll = scroll.saturating_sub(10),
+                KeyCode::PageDown => {
+                    self.diagnostics_scroll = scroll
+                        .saturating_add(10)
+                        .min(self.diagnostics_max_scroll.get())
+                }
+                KeyCode::Home => self.diagnostics_scroll = 0,
+                KeyCode::End => self.diagnostics_scroll = self.diagnostics_max_scroll.get(),
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1' | '2' | '3') => {
+                    self.diagnostics_open = false;
+                    self.charts.expanded = false;
+                    self.handle_global_key(key);
+                }
+                KeyCode::Char('?' | 'h') => {
+                    self.diagnostics_open = false;
+                    self.help = true;
+                }
+                KeyCode::Char('q' | 'a' | 'p' | ' ') => self.handle_global_key(key),
+                _ => {}
+            }
             return;
         }
         if self.help {
@@ -488,6 +531,17 @@ impl App {
     }
 
     pub(crate) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        if self.diagnostics_open {
+            let key = match mouse.kind {
+                MouseEventKind::ScrollUp => Some(KeyCode::Up),
+                MouseEventKind::ScrollDown => Some(KeyCode::Down),
+                _ => None,
+            };
+            if let Some(key) = key {
+                self.handle_key(KeyEvent::new(key, KeyModifiers::NONE));
+            }
+            return;
+        }
         if self.help || self.tab != 0 {
             return;
         }
@@ -511,6 +565,10 @@ impl App {
 
     pub(crate) fn handle_global_key(&mut self, key: KeyEvent) {
         match key.code {
+            KeyCode::Char('d') => {
+                self.diagnostics_open = true;
+                self.diagnostics_scroll = 0;
+            }
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
             KeyCode::Char('a') => {
                 if let Some(alert) = self.alert.take() {

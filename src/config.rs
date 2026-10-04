@@ -216,3 +216,20 @@ pub(crate) fn load_tone(value: u64, warn: u64, critical: u64) -> Tone {
         Tone::Green
     }
 }
+
+pub(crate) fn load_doctor_config(path: &Path) -> Result<Config, &'static str> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+        Err(_) => return Err("cannot read mlxtop configuration file"),
+    };
+    let config: Config = serde_json::from_str(&text)
+        .map_err(|_| "invalid mlxtop configuration JSON or field type")?;
+    if config_interval(&config).1 || config_history(&config).1 {
+        return Err("configuration interval/history is out of range");
+    }
+    if config.omx.as_ref().and_then(|omx| omx.port) == Some(0) {
+        return Err("oMLX port must be between 1 and 65535");
+    }
+    Ok(config)
+}

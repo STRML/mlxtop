@@ -166,3 +166,44 @@ pub(crate) fn write_static(
     )?;
     Ok(())
 }
+
+/// The expanded panel and doctor report share facts and wording.
+pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
+    let finding = diagnosis::assess(sample);
+    let mut lines = vec![
+        "ASSESSMENT".into(),
+        finding.title,
+        finding.evidence,
+        finding.context,
+        format!(
+            "{}: {}",
+            if finding.actionable { "Check" } else { "Note" },
+            finding.next
+        ),
+        String::new(),
+        "CONNECTION".into(),
+    ];
+    lines.extend(sample.runtime.lines(sample));
+    lines
+}
+
+pub(crate) fn write_doctor(out: &mut dyn Write, sample: &Sample) -> io::Result<bool> {
+    let host_ready = sample.total_memory > 0
+        && sample.vm_available
+        && sample.resident_memory.is_some()
+        && sample.pressure != "UNKNOWN";
+    writeln!(out, "mlxtop doctor")?;
+    writeln!(
+        out,
+        "Host counters: {}",
+        if host_ready {
+            "available"
+        } else {
+            "incomplete"
+        }
+    )?;
+    for line in diagnostic_lines(sample) {
+        writeln!(out, "{line}")?;
+    }
+    Ok(host_ready && !sample.runtime.failed())
+}

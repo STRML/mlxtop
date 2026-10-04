@@ -4,6 +4,7 @@ use crate::domain::{LlmTelemetry, TelemetrySource};
 use crate::formatting::bytes;
 use crate::omlx::is_loopback_host;
 use crate::providers::{counter, identifier};
+use crate::runtime_diagnostics::ProbeIssue;
 use crate::transport::MAX_HTTP_RESPONSE_BYTES;
 use serde_json::Value;
 use std::env;
@@ -35,26 +36,22 @@ impl Endpoint {
             .unwrap_or(false)
     }
 
-    pub fn get(&self, port: u16, path: &str) -> Option<String> {
-        if self.api_key.is_some() && self.is_remote() && !self.allow_remote_auth {
-            return None;
-        }
+    pub fn base_url(&self, port: u16) -> Result<String, ProbeIssue> {
         let default = format!("http://127.0.0.1:{port}");
         let base = self
             .url
             .as_deref()
             .unwrap_or(&default)
             .trim_end_matches('/');
-        let uri: ureq::http::Uri = base.parse().ok()?;
-        if !matches!(uri.scheme_str(), Some("http" | "https"))
-            || uri.authority()?.as_str().contains('@')
-            || uri.query().is_some()
-            || base.contains('#')
-        {
-            return None;
+        crate::runtime_diagnostics::safe_endpoint(base).ok_or(ProbeIssue::InvalidEndpoint)
+    }
+
+    pub fn get(&self, port: u16, path: &str) -> Result<String, ProbeIssue> {
+        let base = self.base_url(port)?;
+        if self.api_key.is_some() && self.is_remote() && !self.allow_remote_auth {
+            return Err(ProbeIssue::RemoteAuthBlocked);
         }
-        // No redirects or environment proxies: credentials stay at the
-        // configured server. HTTPS verifies certificates with rustls roots.
+        // No redirects or proxies: credentials stay at the configured endpoint.
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(2)))
             .timeout_connect(Some(Duration::from_millis(500)))
@@ -65,20 +62,29 @@ impl Endpoint {
         let mut request = agent.get(format!("{base}{path}"));
         if let Some(key) = &self.api_key {
             if key.is_empty() || key.chars().any(char::is_control) {
-                return None;
+                return Err(ProbeIssue::InvalidCredential);
             }
             request = request.header("Authorization", format!("Bearer {key}"));
         }
-        let mut response = request.call().ok()?;
+        let mut response = request.call().map_err(request_issue)?;
         if response.status() != 200 {
-            return None;
+            return Err(ProbeIssue::Http(response.status().as_u16()));
         }
         response
             .body_mut()
             .with_config()
             .limit(MAX_HTTP_RESPONSE_BYTES as u64)
             .read_to_string()
-            .ok()
+            .map_err(request_issue)
+    }
+}
+
+fn request_issue(error: ureq::Error) -> ProbeIssue {
+    match error {
+        ureq::Error::StatusCode(status) => ProbeIssue::Http(status),
+        ureq::Error::Timeout(_) => ProbeIssue::Timeout,
+        ureq::Error::BodyExceedsLimit(_) => ProbeIssue::ResponseTooLarge,
+        _ => ProbeIssue::Transport,
     }
 }
 

@@ -330,6 +330,7 @@ pub(crate) struct LlmTelemetry {
 
 #[derive(Clone)]
 pub(crate) struct Sample {
+    pub(crate) runtime: crate::runtime_diagnostics::RuntimeReport,
     pub(crate) updated: String,
     pub(crate) pressure: String,
     pub(crate) pressure_meaning: String,
@@ -412,6 +413,7 @@ impl Sample {
 impl Default for Sample {
     fn default() -> Self {
         Self {
+            runtime: Default::default(),
             updated: "waiting".into(),
             pressure: "UNKNOWN".into(),
             pressure_meaning: "unavailable".into(),

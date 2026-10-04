@@ -2,6 +2,7 @@
 //! Command-line parsing and application startup.
 use crate::app::App;
 use crate::collector::Collector;
+use crate::config::load_doctor_config;
 use crate::config::{
     config_history, config_interval, config_path, load_config, Config, HISTORY_MAX, HISTORY_MIN,
     INTERVAL_MAX, INTERVAL_MIN,
@@ -10,7 +11,7 @@ use crate::host::Platform;
 use crate::logging::{
     diagnostics_default_hint, diagnostics_log, init_diagnostics, install_panic_hook, log_field,
 };
-use crate::report::write_static;
+use crate::report::{write_doctor, write_static};
 use crate::terminal::{next_terminal_event, run_app, TerminalGuard};
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
@@ -46,6 +47,10 @@ pub(crate) fn entry() {
 pub(crate) enum CliAction {
     /// Print this text (version or help) and exit successfully.
     Print(String),
+    Doctor {
+        interval: u64,
+        history: usize,
+    },
     Run {
         interval: u64,
         history: usize,
@@ -55,7 +60,7 @@ pub(crate) enum CliAction {
 
 pub(crate) fn help_text(platform: Platform) -> String {
     format!(
-        "Usage: mlxtop [refresh-seconds] [options]\n\n\
+        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop doctor [--interval N]\n\n\
          Options: -i, --interval N  refresh interval (default 1)\n\
          -n, --history N    chart/journal history (20–3600)\n\
          -1, --once         static report\n\
@@ -63,7 +68,7 @@ pub(crate) fn help_text(platform: Platform) -> String {
          -h, --help         show help\n\
          Config file: ~/.config/mlxtop/config.json\n\
          Diagnostics: {} (override with MLXTOP_LOG_PATH)\n\n\
-         Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · ? help",
+         Interactive keys: q quit · 1 overview · 2 top · 3 journal · tab views · arrows charts · +/- zoom · enter expand · {{/}} interval · d diagnostics · ? help",
         diagnostics_default_hint(platform)
     )
 }
@@ -95,9 +100,11 @@ pub(crate) fn parse_args(
         );
     }
     let mut once = false;
+    let mut doctor = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "doctor" if i == 0 => doctor = true,
             "-i" | "--interval" => {
                 i += 1;
                 interval = args.get(i).ok_or("missing interval")?.parse()?;
@@ -119,6 +126,12 @@ pub(crate) fn parse_args(
     }
     if !(HISTORY_MIN..=HISTORY_MAX).contains(&history) {
         return Err("history must be between 20 and 3600".into());
+    }
+    if doctor {
+        if once {
+            return Err("doctor cannot be combined with --once".into());
+        }
+        return Ok(CliAction::Doctor { interval, history });
     }
     Ok(CliAction::Run {
         interval,
@@ -146,11 +159,28 @@ pub(crate) fn run_once(
 }
 
 pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let config = load_config();
     let args: Vec<String> = env::args().skip(1).collect();
+    let config = if args.first().is_some_and(|arg| arg == "doctor") {
+        load_doctor_config(&config_path())?
+    } else {
+        load_config()
+    };
     let (interval, history, once) = match parse_args(&args, &config)? {
         CliAction::Print(text) => {
             println!("{text}");
+            return Ok(());
+        }
+        CliAction::Doctor { interval, history } => {
+            let mut collector = Collector::new(history, config);
+            collector.sample();
+            thread::sleep(Duration::from_secs(interval));
+            let sample = collector.sample();
+            if !write_doctor(&mut stdout().lock(), &sample)? {
+                return Err(
+                    "diagnostics found unavailable host counters or a failed runtime connection"
+                        .into(),
+                );
+            }
             return Ok(());
         }
         CliAction::Run {

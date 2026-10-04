@@ -192,7 +192,7 @@ fn endpoint_supports_auth_prefix_chunked_body_and_refuses_bad_config() {
         api_key: Some("test-token".into()),
         allow_remote_auth: false,
     };
-    assert_eq!(endpoint.get(1, "/v1/models").as_deref(), Some("{}"));
+    assert_eq!(endpoint.get(1, "/v1/models").as_deref(), Ok("{}"));
     server.join().unwrap();
     for url in [
         "invalid",
@@ -207,7 +207,7 @@ fn endpoint_supports_auth_prefix_chunked_body_and_refuses_bad_config() {
             allow_remote_auth: false,
         }
         .get(1, "/models")
-        .is_none());
+        .is_err());
     }
     for key in ["", "abc\r\nHeader: injected"] {
         assert!(Endpoint {
@@ -216,7 +216,7 @@ fn endpoint_supports_auth_prefix_chunked_body_and_refuses_bad_config() {
             allow_remote_auth: false,
         }
         .get(1, "/models")
-        .is_none());
+        .is_err());
     }
 }
 
@@ -280,7 +280,7 @@ fn remote_credentials_require_the_existing_explicit_opt_in() {
         api_key: Some("test-token".into()),
         allow_remote_auth: false,
     };
-    assert!(endpoint.get(1, "/models").is_none());
+    assert!(endpoint.get(1, "/models").is_err());
     assert!(listener.accept().is_err(), "no request or credentials sent");
 }
 
@@ -308,7 +308,7 @@ fn http_errors_redirects_and_oversized_bodies_never_become_telemetry() {
             assert!(stream.read(&mut request).unwrap() > 0);
             let _ = stream.write_all(response.as_bytes());
         });
-        assert!(Endpoint::default().get(port, "/models").is_none());
+        assert!(Endpoint::default().get(port, "/models").is_err());
         server.join().unwrap();
     }
 }
