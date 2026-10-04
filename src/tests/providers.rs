@@ -1,3 +1,4 @@
+use crate::test_support::*;
 // SPDX-License-Identifier: MIT
 use super::*;
 
@@ -341,7 +342,7 @@ fn omlx_cluster_rows_use_rank_zero_request_ids() {
 
 #[test]
 fn successive_omlx_cluster_requests_stay_distinct() {
-    let mut history = request_dashboard::History::default();
+    let mut history = request_history::History::default();
     for id in ["chatcmpl-1", "chatcmpl-2"] {
         let model = omlx_cluster_model(json!([cluster_request(id, 500, 9, false)]), 0.5, false);
         history.observe(&omlx_requests(&json!({"active_models":{"models":[model]}})));

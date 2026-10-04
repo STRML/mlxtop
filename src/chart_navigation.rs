@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MIT
-use super::*;
+use crate::domain::ChartMetric;
+use crate::theme::CYAN;
+use crossterm::event::KeyCode;
+use ratatui::layout::Rect;
+use ratatui::Frame;
+
 use std::cell::{Cell, RefCell};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

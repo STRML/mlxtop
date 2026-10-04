@@ -1,5 +1,5 @@
+use crate::test_support::*;
 // SPDX-License-Identifier: MIT
-use super::*;
 
 // Test-only constructors and helpers kept out of production files so the
 // coverage gate can exclude test code by filename alone.
@@ -72,8 +72,8 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
             swap_history: VecDeque::new(),
             gpu_history: VecDeque::new(),
             signals: VecDeque::new(),
-            request_history: request_dashboard::History::default(),
-            operator_history: operator_charts::History::default(),
+            request_history: request_history::History::default(),
+            operator_history: operator_history::History::default(),
         },
         sampler: Sampler {
             commands,
@@ -118,8 +118,8 @@ pub(super) fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
         swap_history: VecDeque::new(),
         gpu_history: VecDeque::new(),
         signals: VecDeque::new(),
-        request_history: request_dashboard::History::default(),
-        operator_history: operator_charts::History::default(),
+        request_history: request_history::History::default(),
+        operator_history: operator_history::History::default(),
     }
 }
 
@@ -257,7 +257,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
     *app.collector.load_history.back_mut().unwrap() = ChartPoint::new(Some(57), Tone::Green);
     *app.collector.swap_history.back_mut().unwrap() = ChartPoint::new(Some(4096), Tone::Green);
     for (index, prompt) in [500, 729, 837, 12000, 20000, 32768].into_iter().enumerate() {
-        let request = providers::RequestUsage {
+        let request = domain::RequestUsage {
             provider: "oMLX".into(),
             model: "Qwen3.8-27B-oQ4e-mtp".into(),
             id: format!("preview-{index}"),
@@ -300,10 +300,10 @@ pub(super) fn populate_single_idle_fixture(app: &mut App) {
     sample.gpu_util = Some(0);
     sample.swap_in = 0;
     sample.swap_out = 0;
-    app.collector.request_history = request_dashboard::History::default();
+    app.collector.request_history = request_history::History::default();
     app.collector
         .request_history
-        .observe(&[providers::RequestUsage {
+        .observe(&[domain::RequestUsage {
             provider: sample.llm_provider.clone(),
             model: sample.llm_model.clone(),
             id: "single-idle-preview".into(),
@@ -315,7 +315,7 @@ pub(super) fn populate_single_idle_fixture(app: &mut App) {
             output_tps: Some(40.0),
             observed_at: Some(now - Duration::from_secs(25)),
         }]);
-    app.collector.operator_history = operator_charts::History::default();
+    app.collector.operator_history = operator_history::History::default();
     for history in [
         &mut app.collector.generation_history,
         &mut app.collector.prefill_history,
@@ -741,7 +741,7 @@ fn dashboard_terminal_preview() {
             .prefill_history
             .push_back(ChartPoint::new(None, Tone::Muted));
         if preview_state == "empty" {
-            app.collector.request_history = request_dashboard::History::default();
+            app.collector.request_history = request_history::History::default();
         }
     }
     app.collector.signals = [
@@ -1650,7 +1650,7 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
         .into_iter()
         .enumerate()
     {
-        app.collector.current.llm_requests = vec![providers::RequestUsage {
+        app.collector.current.llm_requests = vec![domain::RequestUsage {
             provider: "oMLX".into(),
             model: "test".into(),
             id: i.to_string(),
@@ -1735,7 +1735,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
     for (i, prompt) in [12000, 20000, 32768].into_iter().enumerate() {
         app.collector
             .request_history
-            .observe(&[providers::RequestUsage {
+            .observe(&[domain::RequestUsage {
                 provider: "oMLX".into(),
                 model: "test-model".into(),
                 id: format!("req-{i}"),
@@ -1783,7 +1783,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
 fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
     let mut app = test_app(0);
     for (width, height) in [(80, 24), (100, 40), (170, 42), (180, 50)] {
-        app.collector.request_history = request_dashboard::History::default();
+        app.collector.request_history = request_history::History::default();
         render_app(&app, width, height);
         let empty_regions = app.charts.regions.borrow().clone();
         let region = |chart| empty_regions.iter().find(|(id, _)| *id == chart).unwrap().1;

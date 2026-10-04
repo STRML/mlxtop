@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 //! Per-device NVIDIA counters. Device memory is separate from Apple Metal accounting.
+
+use crate::domain::MIB;
 use std::collections::HashSet;
 
 use crate::host::Host;
-use crate::MIB;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Device {

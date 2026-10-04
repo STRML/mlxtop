@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 //! Native model inventories and Prometheus telemetry. No inference requests.
-use super::*;
+use crate::domain::{LlmTelemetry, TelemetrySource};
+use crate::formatting::bytes;
+use crate::omlx::is_loopback_host;
+use crate::providers::{counter, identifier};
+use crate::transport::MAX_HTTP_RESPONSE_BYTES;
+use serde_json::Value;
+use std::env;
+use std::time::{Duration, Instant, SystemTime};
+
 use std::collections::BTreeMap;
 
 #[derive(Default)]

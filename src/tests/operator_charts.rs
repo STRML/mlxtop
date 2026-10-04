@@ -1,3 +1,4 @@
+use crate::test_support::*;
 // SPDX-License-Identifier: MIT
 use super::*;
 
@@ -36,7 +37,7 @@ fn queue_keeps_idle_zero_but_gaps_stale_and_reported_values() {
 #[test]
 fn latency_requires_explicit_measurement_and_deduplicates_requests() {
     let mut sample = live();
-    sample.llm_requests.push(providers::RequestUsage {
+    sample.llm_requests.push(domain::RequestUsage {
         provider: "oMLX".into(),
         model: "test".into(),
         id: "one".into(),

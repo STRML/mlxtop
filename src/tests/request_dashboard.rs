@@ -1,9 +1,11 @@
+use crate::request_history::HISTORY_LIMIT;
+use crate::test_support::*;
 // SPDX-License-Identifier: MIT
 use super::*;
 
 const TREND_CEILING: u64 = 65_536;
-fn usage(id: &str, prompt: u64) -> providers::RequestUsage {
-    providers::RequestUsage {
+fn usage(id: &str, prompt: u64) -> domain::RequestUsage {
+    domain::RequestUsage {
         provider: "oMLX".into(),
         model: "model".into(),
         id: id.into(),

@@ -1,8 +1,8 @@
-// SPDX-License-Identifier: MIT
-//! Process-level behavior: diagnostics, configuration, CLI, static report,
-//! the interactive loop, keyboard/mouse navigation and classification.
-use super::*;
 use crate::test_support::*;
+// SPDX-License-Identifier: MIT
+// Process-level behavior: diagnostics, configuration, CLI, static report,
+// the interactive loop, keyboard/mouse navigation and classification.
+use super::*;
 use crate::tests::{
     populate_dashboard_fixture, render_app, render_view, test_app, test_app_with_sender,
 };
@@ -255,7 +255,7 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
         llm_active_requests: Some(1),
         llm_prompt_tokens: Some(1200),
         llm_output_tokens: Some(30),
-        llm_requests: vec![providers::RequestUsage {
+        llm_requests: vec![domain::RequestUsage {
             provider: "oMLX".into(),
             model: "qwen".into(),
             id: "req-1".into(),

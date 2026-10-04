@@ -1,14 +1,122 @@
 // SPDX-License-Identifier: MIT
-//! Operating-system inputs read by the collectors.
-//!
-//! Collectors reach commands and files only through [`Host`], so the parsing
-//! and classification paths for both platforms can be driven by recorded
-//! fixtures in tests. [`System`] is the production implementation; it adds no
-//! behavior beyond the bounded command runner and plain file reads.
-use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+use std::{fs, thread};
 
-use crate::command_text;
+use crate::logging::{diagnostics_log, log_field};
+pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
+
+pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
+    let command = || {
+        format!(
+            "program={} args={}",
+            log_field(program),
+            args.iter()
+                .map(|arg| log_field(arg))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
+    let mut child = match Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            diagnostics_log(
+                "WARN",
+                "command_spawn_failed",
+                format!("{} error={}", command(), log_field(&error.to_string())),
+            );
+            return None;
+        }
+    };
+    let Some(mut stdout) = child.stdout.take() else {
+        diagnostics_log("WARN", "command_stdout_unavailable", command());
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let command_context = command();
+    let reader = thread::spawn(move || {
+        let mut output = String::new();
+        match stdout.read_to_string(&mut output) {
+            Ok(_) => Some(output),
+            Err(error) => {
+                diagnostics_log(
+                    "WARN",
+                    "command_read_failed",
+                    format!(
+                        "{} error={}",
+                        command_context,
+                        log_field(&error.to_string())
+                    ),
+                );
+                None
+            }
+        }
+    });
+    let deadline = Instant::now() + COMMAND_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = match reader.join() {
+                    Ok(Some(output)) => output,
+                    Ok(None) => return None,
+                    Err(_) => {
+                        diagnostics_log("WARN", "command_reader_panicked", command());
+                        return None;
+                    }
+                };
+                if !status.success() {
+                    diagnostics_log(
+                        "WARN",
+                        "command_nonzero_exit",
+                        format!("{} code={:?}", command(), status.code()),
+                    );
+                    return None;
+                }
+                return Some(output);
+            }
+            Err(error) => {
+                diagnostics_log(
+                    "WARN",
+                    "command_wait_failed",
+                    format!("{} error={}", command(), log_field(&error.to_string())),
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                diagnostics_log("WARN", "command_timeout", command());
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+}
+
+pub(crate) fn now_clock(host: &dyn Host) -> String {
+    if let Some(value) = host.command("/bin/date", &["+%H:%M:%S"]) {
+        return value.trim().to_string();
+    }
+    "??:??:??".into()
+}
+// Operating-system inputs read by the collectors.
+//
+// Collectors reach commands and files only through [`Host`], so the parsing
+// and classification paths for both platforms can be driven by recorded
+// fixtures in tests. [`System`] is the production implementation; it adds no
+// behavior beyond the bounded command runner and plain file reads.
 
 pub(crate) trait Host: Send {
     /// Standard output of a successful command, or `None`.

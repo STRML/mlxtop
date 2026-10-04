@@ -1,3 +1,4 @@
+use crate::test_support::*;
 // SPDX-License-Identifier: MIT
 use super::*;
 
@@ -26,12 +27,7 @@ fn live_sample() -> Sample {
     }
 }
 
-fn render(
-    sample: &Sample,
-    history: &request_dashboard::History,
-    width: u16,
-    height: u16,
-) -> String {
+fn render(sample: &Sample, history: &request_history::History, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| draw(frame, frame.area(), sample, history))
@@ -49,7 +45,7 @@ fn render(
 #[test]
 fn dense_sysinfo_preserves_state_work_and_hardware_at_supported_sizes() {
     let sample = live_sample();
-    let history = request_dashboard::History::default();
+    let history = request_history::History::default();
     for (width, height) in [(80, 3), (80, 5), (100, 5), (180, 5)] {
         let screen = render(&sample, &history, width, height);
         for label in [
@@ -97,7 +93,7 @@ fn long_model_never_hides_stale_state_or_source_age() {
     sample.llm_status = "stale".into();
     sample.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(3_600));
     for height in [3, 5] {
-        let screen = render(&sample, &request_dashboard::History::default(), 80, height);
+        let screen = render(&sample, &request_history::History::default(), 80, height);
         for label in ["STALE", "LIVE", "1h old", "PROMPT 32.8k"] {
             assert!(screen.contains(label), "missing {label}\n{screen}");
         }
@@ -112,8 +108,8 @@ fn last_prompt_stays_scoped_to_runtime_and_unknown_os_values_stay_unknown() {
     sample.llm_output_tokens = None;
     sample.llm_active_requests = Some(0);
     sample.llm_status = "idle".into();
-    let mut history = request_dashboard::History::default();
-    let mut request = providers::RequestUsage {
+    let mut history = request_history::History::default();
+    let mut request = domain::RequestUsage {
         provider: "oMLX".into(),
         model: "previous-model".into(),
         id: "request-1".into(),

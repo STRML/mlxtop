@@ -1,62 +1,19 @@
 // SPDX-License-Identifier: MIT
 //! Read-only provider adapters. Only counters and identifiers cross into samples.
-use super::*;
+use crate::domain::{LlmTelemetry, RequestUsage, TelemetrySource};
+use crate::json::{json_value, request_rate};
+use serde_json::Value;
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+use std::{env, fs};
 
 #[path = "provider_native.rs"]
 mod native;
 
 const MAX_USAGE_BYTES: u64 = 256 * 1024;
-
-#[derive(Clone, Debug)]
-pub(super) struct RequestUsage {
-    pub provider: String,
-    pub model: String,
-    pub id: String,
-    pub prompt: u64,
-    pub cached: Option<u64>,
-    pub output: Option<u64>,
-    /// Request-scoped output throughput. Never populated from server averages
-    /// or the prefill phase; a completed record supplies its final average.
-    pub output_tps: Option<f64>,
-    pub completed: bool,
-    pub ttft_ms: Option<u64>,
-    pub observed_at: Option<SystemTime>,
-}
-
-impl RequestUsage {
-    pub fn summary(&self) -> String {
-        let mut text = format!(
-            "{} prompt {} · out {} · {} · {} · {}",
-            if self.completed {
-                "reported"
-            } else {
-                "observed"
-            },
-            self.prompt,
-            optional_tokens(self.output),
-            self.provider,
-            self.model,
-            self.id
-        );
-        if let Some(cached) = self.cached {
-            text.push_str(&format!(" · cached {cached}"));
-        }
-        if let Some(speed) = self.output_tps {
-            text.push_str(&format!(
-                " · output {speed:.1} tok/s ({})",
-                if self.completed {
-                    "request avg"
-                } else {
-                    "sampled"
-                }
-            ));
-        }
-        if let Some(ttft) = self.ttft_ms {
-            text.push_str(&format!(" · first token {ttft} ms (reported)"));
-        }
-        text
-    }
-}
 
 pub(super) fn new_request_summary(
     seen: &mut VecDeque<(String, u64)>,

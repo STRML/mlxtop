@@ -1,7 +1,119 @@
+#![allow(unused_imports)]
+pub(crate) use crate::analysis::*;
+pub(crate) use crate::app::*;
+pub(crate) use crate::chart_navigation::Chart;
+pub(crate) use crate::chart_render::*;
+pub(crate) use crate::cli::*;
+pub(crate) use crate::collector::*;
+pub(crate) use crate::completion_log::*;
+pub(crate) use crate::config::*;
+pub(crate) use crate::domain::*;
+pub(crate) use crate::formatting::*;
+pub(crate) use crate::history::*;
+pub(crate) use crate::host::*;
+pub(crate) use crate::host::{Host, Platform};
+pub(crate) use crate::json::*;
+pub(crate) use crate::logging::*;
+pub(crate) use crate::omlx::*;
+pub(crate) use crate::parsing::*;
+pub(crate) use crate::platform::*;
+pub(crate) use crate::processes::*;
+pub(crate) use crate::report::*;
+pub(crate) use crate::sampler::*;
+pub(crate) use crate::terminal::*;
+pub(crate) use crate::theme::*;
+pub(crate) use crate::transport::*;
+pub(crate) use crate::{
+    analysis, app, chart_navigation, chart_render, chart_scale, cli, collector, completion_log,
+    config, diagnosis, domain, formatting, gpu, gpu_dashboard, history, host, json, logging,
+    model_dashboard, omlx, operator_charts, operator_history, parsing, platform, process_memory,
+    processes, providers, report, request_dashboard, request_history, sampler, swap_usage,
+    terminal, theme, transport, ui,
+};
+pub(crate) use crossterm::event;
+pub(crate) use crossterm::event::DisableMouseCapture;
+pub(crate) use crossterm::event::EnableMouseCapture;
+pub(crate) use crossterm::event::Event;
+pub(crate) use crossterm::event::KeyCode;
+pub(crate) use crossterm::event::KeyEvent;
+pub(crate) use crossterm::event::KeyEventKind;
+pub(crate) use crossterm::event::KeyModifiers;
+pub(crate) use crossterm::event::MouseButton;
+pub(crate) use crossterm::event::MouseEvent;
+pub(crate) use crossterm::event::MouseEventKind;
+pub(crate) use crossterm::execute;
+pub(crate) use crossterm::terminal::disable_raw_mode;
+pub(crate) use crossterm::terminal::enable_raw_mode;
+pub(crate) use crossterm::terminal::EnterAlternateScreen;
+pub(crate) use crossterm::terminal::LeaveAlternateScreen;
+pub(crate) use ratatui::backend::Backend;
+pub(crate) use ratatui::backend::CrosstermBackend;
+pub(crate) use ratatui::layout::Alignment;
+pub(crate) use ratatui::layout::Constraint;
+pub(crate) use ratatui::layout::Direction;
+pub(crate) use ratatui::layout::Layout;
+pub(crate) use ratatui::layout::Rect;
+pub(crate) use ratatui::style::Color;
+pub(crate) use ratatui::style::Modifier;
+pub(crate) use ratatui::style::Style;
+pub(crate) use ratatui::text::Line;
+pub(crate) use ratatui::text::Span;
+pub(crate) use ratatui::text::Text;
+pub(crate) use ratatui::widgets::Block;
+pub(crate) use ratatui::widgets::Borders;
+pub(crate) use ratatui::widgets::Cell;
+pub(crate) use ratatui::widgets::Clear;
+pub(crate) use ratatui::widgets::Gauge;
+pub(crate) use ratatui::widgets::Paragraph;
+pub(crate) use ratatui::widgets::Row;
+pub(crate) use ratatui::widgets::Scrollbar;
+pub(crate) use ratatui::widgets::ScrollbarOrientation;
+pub(crate) use ratatui::widgets::ScrollbarState;
+pub(crate) use ratatui::widgets::Table;
+pub(crate) use ratatui::widgets::TableState;
+pub(crate) use ratatui::widgets::Tabs;
+pub(crate) use ratatui::widgets::Wrap;
+pub(crate) use ratatui::Frame;
+pub(crate) use ratatui::Terminal;
+pub(crate) use serde::Deserialize;
+pub(crate) use serde_json::json;
+pub(crate) use serde_json::Value;
+pub(crate) use std::any::Any;
+pub(crate) use std::backtrace::Backtrace;
+pub(crate) use std::collections::VecDeque;
+pub(crate) use std::env;
+pub(crate) use std::fs;
+pub(crate) use std::fs::File;
+pub(crate) use std::fs::OpenOptions;
+pub(crate) use std::io;
+pub(crate) use std::io::stdout;
+pub(crate) use std::io::IsTerminal;
+pub(crate) use std::io::Read;
+pub(crate) use std::io::Seek;
+pub(crate) use std::io::SeekFrom;
+pub(crate) use std::io::Write;
+pub(crate) use std::net::TcpStream;
+pub(crate) use std::net::ToSocketAddrs;
+pub(crate) use std::panic;
+pub(crate) use std::panic::AssertUnwindSafe;
+pub(crate) use std::path::Path;
+pub(crate) use std::path::PathBuf;
+pub(crate) use std::process::Command;
+pub(crate) use std::process::Stdio;
+pub(crate) use std::sync::mpsc;
+pub(crate) use std::sync::mpsc::Receiver;
+pub(crate) use std::sync::mpsc::Sender;
+pub(crate) use std::sync::mpsc::TryRecvError;
+pub(crate) use std::sync::Mutex;
+pub(crate) use std::sync::OnceLock;
+pub(crate) use std::thread;
+pub(crate) use std::time::Duration;
+pub(crate) use std::time::Instant;
+pub(crate) use std::time::SystemTime;
 // SPDX-License-Identifier: MIT
-//! Shared fixtures for tests: a scripted [`Host`], a scripted HTTP server and
-//! scratch directories. Nothing here is compiled outside `cargo test`.
-use super::*;
+// Shared fixtures for tests: a scripted [`Host`], a scripted HTTP server and
+// scratch directories. Nothing here is compiled outside `cargo test`.
+
 use std::collections::HashMap;
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -335,7 +447,7 @@ pub(crate) fn empty_view() -> CollectorView {
         swap_history: VecDeque::new(),
         gpu_history: VecDeque::new(),
         signals: VecDeque::new(),
-        request_history: request_dashboard::History::default(),
-        operator_history: operator_charts::History::default(),
+        request_history: request_history::History::default(),
+        operator_history: operator_history::History::default(),
     }
 }

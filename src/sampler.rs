@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: MIT
+//! Background collection and commands; the input/render thread never polls providers.
+use crate::collector::{Collector, CollectorView};
+use crate::config::Config;
+use crate::logging::{diagnostics_log, log_field, panic_payload};
+use std::panic::AssertUnwindSafe;
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, Instant};
+use std::{panic, thread};
+pub(crate) enum SamplerCommand {
+    SetPaused(bool),
+    SetInterval(Duration),
+    Reset,
+    Stop,
+}
+
+pub(crate) struct Sampler {
+    pub(crate) commands: Sender<SamplerCommand>,
+    pub(crate) views: Receiver<CollectorView>,
+    pub(crate) handle: Option<thread::JoinHandle<()>>,
+}
+
+impl Sampler {
+    pub(crate) fn spawn(interval: Duration, history_limit: usize, config: Config) -> Self {
+        diagnostics_log(
+            "INFO",
+            "sampler_start",
+            format!(
+                "interval_seconds={} history_limit={history_limit}",
+                interval.as_secs()
+            ),
+        );
+        Self::start(interval, move || Collector::new(history_limit, config))
+    }
+
+    /// Run `build`'s collector on the sampling thread. The collector is built
+    /// there because its first host reads may block on slow commands.
+    pub(crate) fn start(
+        interval: Duration,
+        build: impl FnOnce() -> Collector + Send + 'static,
+    ) -> Self {
+        let (command_tx, command_rx) = mpsc::channel();
+        let (view_tx, view_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let mut collector = build();
+            let mut interval = interval;
+            let mut paused = false;
+            let mut next_sample = Instant::now();
+
+            loop {
+                if !paused && Instant::now() >= next_sample {
+                    let sampled = panic::catch_unwind(AssertUnwindSafe(|| collector.sample()));
+                    if let Err(payload) = sampled.as_ref() {
+                        diagnostics_log(
+                            "ERROR",
+                            "sampler_panic",
+                            format!("message={}", log_field(&panic_payload(payload.as_ref()))),
+                        );
+                    }
+                    if sampled.is_err() {
+                        break;
+                    }
+                    if view_tx.send(collector.view()).is_err() {
+                        diagnostics_log("INFO", "sampler_stop", "reason=view_receiver_closed");
+                        break;
+                    }
+                    next_sample = Instant::now() + interval;
+                }
+
+                let wait = if paused {
+                    Duration::from_millis(100)
+                } else {
+                    next_sample
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(100))
+                };
+                match command_rx.recv_timeout(wait) {
+                    Ok(SamplerCommand::SetPaused(value)) => {
+                        paused = value;
+                        diagnostics_log("INFO", "sampler_paused", format!("paused={paused}"));
+                        if !paused {
+                            next_sample = Instant::now();
+                        }
+                    }
+                    Ok(SamplerCommand::SetInterval(value)) => {
+                        interval = value;
+                        diagnostics_log(
+                            "INFO",
+                            "sampler_interval_changed",
+                            format!("interval_seconds={}", interval.as_secs()),
+                        );
+                        next_sample = Instant::now() + interval;
+                    }
+                    Ok(SamplerCommand::Reset) => {
+                        collector.reset();
+                        diagnostics_log("INFO", "sampler_reset", "history_and_baselines_cleared");
+                        next_sample = Instant::now();
+                    }
+                    Ok(SamplerCommand::Stop) => {
+                        diagnostics_log("INFO", "sampler_stop", "reason=shutdown");
+                        break;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        diagnostics_log("WARN", "sampler_stop", "reason=command_channel_closed");
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            commands: command_tx,
+            views: view_rx,
+            handle: Some(handle),
+        }
+    }
+
+    pub(crate) fn send(&self, command: SamplerCommand) {
+        let _ = self.commands.send(command);
+    }
+}
+
+impl Drop for Sampler {
+    fn drop(&mut self) {
+        let _ = self.commands.send(SamplerCommand::Stop);
+        if let Some(handle) = self.handle.take() {
+            if let Err(payload) = handle.join() {
+                diagnostics_log(
+                    "ERROR",
+                    "sampler_thread_panic",
+                    format!("message={}", log_field(&panic_payload(payload.as_ref()))),
+                );
+            }
+        }
+    }
+}

@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: MIT
-//! Collector, sampler and oMLX client behavior driven through the host seam.
-use super::*;
 use crate::test_support::*;
+// SPDX-License-Identifier: MIT
+// Collector, sampler and oMLX client behavior driven through the host seam.
+use super::*;
 
 fn collector(host: FakeHost, platform: Platform, home: Option<PathBuf>) -> Collector {
     Collector::with_host(60, offline_config(), Box::new(host), platform, home)

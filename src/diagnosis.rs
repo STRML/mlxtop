@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! Separate measured problems from high resource use during normal work.
-use super::*;
+use crate::analysis::correlation_evidence_label;
+use crate::domain::{CorrelationCause, Sample, TelemetrySource, ThroughputDirection, Tone};
+use crate::formatting::{count, llm_generation_rate_label, percent_u8, pressure_state_label, rate};
+use std::time::{Duration, SystemTime};
 
 pub(super) struct Finding {
     pub title: String,
