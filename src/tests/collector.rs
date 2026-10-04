@@ -1,7 +1,7 @@
-// SPDX-License-Identifier: MIT
-//! Collector, sampler and oMLX client behavior driven through the host seam.
-use super::*;
 use crate::test_support::*;
+// SPDX-License-Identifier: MIT
+// Collector, sampler and oMLX client behavior driven through the host seam.
+use super::*;
 
 fn collector(host: FakeHost, platform: Platform, home: Option<PathBuf>) -> Collector {
     Collector::with_host(60, offline_config(), Box::new(host), platform, home)
@@ -585,6 +585,18 @@ const HEALTH: &str = r#"{"status":"healthy","default_model":"qwen","engine_pool"
 const STATS: &str = r#"{"avg_generation_tps":31.5,"avg_prefill_tps":900.0,"cache_efficiency":50.0,"total_prompt_tokens":100,"total_cached_tokens":50}"#;
 
 #[test]
+fn configured_omlx_failure_is_not_mistaken_for_no_runtime() {
+    let (port, server) = serve(vec![reply("GET /health ", 503, "{}")]);
+    let mut client = omlx_client(port, None);
+    assert!(client.poll(None).is_none());
+    let report = client.report();
+    assert_eq!(report.provider.as_deref(), Some("oMLX"));
+    assert_eq!(report.selection, "oMLX endpoint config");
+    assert!(report.failed());
+    server.join().unwrap();
+}
+
+#[test]
 fn omlx_client_logs_in_polls_stats_and_caches_metadata() {
     let home = TempDir::new("omlx-auth");
     home.write(
@@ -789,16 +801,16 @@ fn http_request_rejects_oversized_and_malformed_responses() {
     };
     let mut huge = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
     huge.resize(MAX_HTTP_RESPONSE_BYTES + 10, b'x');
-    assert!(respond(huge).is_none());
-    assert!(respond(b"HTTP/1.1 200 OK\r\nno blank line".to_vec()).is_none());
-    assert!(respond(b"HTTP/1.1 abc OK\r\n\r\n".to_vec()).is_none());
+    assert!(respond(huge).is_err());
+    assert!(respond(b"HTTP/1.1 200 OK\r\nno blank line".to_vec()).is_err());
+    assert!(respond(b"HTTP/1.1 abc OK\r\n\r\n".to_vec()).is_err());
     let response =
         respond(b"HTTP/1.1 204 No Content\r\nX-Test: yes\r\nbad header\r\n\r\n".to_vec())
             .expect("valid response");
     assert_eq!(response.status, 204);
     assert_eq!(response.header("x-test"), Some("yes"));
     assert_eq!(response.header("missing"), None);
-    assert!(http_request("host.invalid.", 1, "GET", "/", &[], None).is_none());
+    assert!(http_request("host.invalid.", 1, "GET", "/", &[], None).is_err());
 }
 
 #[test]

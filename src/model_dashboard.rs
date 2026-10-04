@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: MIT
 //! A dense system strip: runtime identity, workload and host facts share one border.
-use super::*;
+use crate::domain::Sample;
+use crate::formatting::{
+    bytes, compact_label, compact_tokens, compressed_memory_label, llm_context_label,
+    optional_tokens, process_count_label, signed_rate, telemetry_age, telemetry_source,
+};
+use crate::theme::{card_block, llm_status_tone, tone_badge, BLUE, MUTED};
+use crate::{gpu, request_history};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+use std::env;
 
 fn fitted_parts(parts: impl IntoIterator<Item = String>, width: usize) -> String {
     let mut text = String::new();
@@ -22,7 +34,7 @@ fn fitted_parts(parts: impl IntoIterator<Item = String>, width: usize) -> String
     text
 }
 
-fn work_parts(sample: &Sample, history: &request_dashboard::History) -> Vec<String> {
+fn work_parts(sample: &Sample, history: &request_history::History) -> Vec<String> {
     if sample.llm_prompt_tokens.is_none() && sample.llm_active_requests == Some(0) {
         if let Some((request, observed)) = history.latest_for(sample) {
             return vec![
@@ -145,7 +157,7 @@ pub(super) fn draw(
     frame: &mut Frame,
     area: Rect,
     sample: &Sample,
-    history: &request_dashboard::History,
+    history: &request_history::History,
 ) {
     let width = usize::from(area.width.saturating_sub(2));
     let compact = area.height < 5;

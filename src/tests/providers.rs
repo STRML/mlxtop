@@ -1,3 +1,4 @@
+use crate::test_support::*;
 // SPDX-License-Identifier: MIT
 use super::*;
 
@@ -84,6 +85,8 @@ fn usage_file_supplements_live_slots_and_filters_other_providers() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        diagnostics: Default::default(),
+        config_error: None,
     };
     let result = adapter.with_usage().unwrap();
     assert_eq!(result.source, TelemetrySource::Live);
@@ -143,6 +146,8 @@ fn llama_http_polls_metrics_even_when_slots_are_disabled() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        diagnostics: Default::default(),
+        config_error: None,
     };
     let result = adapter.poll().unwrap();
     assert_eq!(result.waiting_requests, Some(2));
@@ -341,7 +346,7 @@ fn omlx_cluster_rows_use_rank_zero_request_ids() {
 
 #[test]
 fn successive_omlx_cluster_requests_stay_distinct() {
-    let mut history = request_dashboard::History::default();
+    let mut history = request_history::History::default();
     for id in ["chatcmpl-1", "chatcmpl-2"] {
         let model = omlx_cluster_model(json!([cluster_request(id, 500, 9, false)]), 0.5, false);
         history.observe(&omlx_requests(&json!({"active_models":{"models":[model]}})));
@@ -438,6 +443,8 @@ fn kobold_restart_does_not_reuse_request_identity() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        diagnostics: Default::default(),
+        config_error: None,
     };
     let first = adapter
         .kobold_result(&json!({"total_gens":1,"last_input_count":100,"uptime":500.5}))
@@ -514,6 +521,8 @@ fn provider_switch_drops_cached_counts() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        diagnostics: Default::default(),
+        config_error: None,
     };
     assert!(adapter.selected(Some("Ollama")));
     assert!(adapter.cached.is_none());
@@ -559,6 +568,8 @@ fn native_poll_uses_get_and_preserves_last_result_age() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        diagnostics: Default::default(),
+        config_error: None,
     };
     let first = adapter.poll().unwrap();
     adapter.next_poll = Instant::now();
@@ -754,6 +765,8 @@ fn every_new_adapter_polls_its_native_read_only_endpoint() {
             kobold_session: 0,
             endpoint: native::Endpoint::default(),
             metrics: native::MetricsHistory::default(),
+            diagnostics: Default::default(),
+            config_error: None,
         };
         assert!(adapter.selected(Some("oMLX")));
         let result = adapter.poll().unwrap();
@@ -789,4 +802,108 @@ fn lm_native_usage_preserves_decode_and_explicit_first_token_timing() {
     assert!(!result.generation_tps_live);
     record["usage"]["time_to_first_token_seconds"] = json!(-1);
     assert_eq!(parse_usage(&record).unwrap().requests[0].ttft_ms, None);
+}
+
+fn diagnostic_adapter(provider: &str, port: u16) -> Adapter {
+    Adapter {
+        configured: Some(provider.into()),
+        selected: None,
+        usage_file: None,
+        port: Some(port),
+        cached: None,
+        next_poll: Instant::now(),
+        backoff: Duration::from_secs(1),
+        kobold_uptime: None,
+        kobold_session: 0,
+        endpoint: native::Endpoint::default(),
+        metrics: native::MetricsHistory::default(),
+        diagnostics: Default::default(),
+        config_error: None,
+    }
+}
+
+#[test]
+fn runtime_report_distinguishes_auth_schema_and_optional_endpoint_failures() {
+    use crate::runtime_diagnostics::ProbeIssue;
+    for (status, body, issue) in [
+        (401, "{}", ProbeIssue::Http(401)),
+        (200, "not json", ProbeIssue::InvalidResponse),
+        (200, "{}", ProbeIssue::InvalidResponse),
+    ] {
+        let (port, server) = serve(vec![reply("GET /api/ps", status, body)]);
+        let mut adapter = diagnostic_adapter("ollama", port);
+        assert!(adapter.selected(None));
+        assert!(adapter.poll().is_none());
+        let report = adapter.report();
+        assert!(report.failed());
+        assert!(report.probes.iter().any(|p| p.issue == Some(issue.clone())));
+        server.join().unwrap();
+    }
+    let (port, server) = serve(vec![
+        reply("GET /slots", 404, "{}"),
+        reply("GET /metrics", 200, "llamacpp:requests_processing 0\n"),
+    ]);
+    let mut adapter = diagnostic_adapter("llama.cpp", port);
+    adapter.selected(None);
+    assert!(adapter.poll().is_some());
+    let report = adapter.report();
+    assert!(report.connected && !report.failed());
+    assert!(report.status().contains("partial"));
+    server.join().unwrap();
+}
+
+#[test]
+fn legacy_fallback_is_connected_and_invalid_selection_never_polls() {
+    use crate::runtime_diagnostics::ProbeIssue;
+    let (port, server) = serve(vec![
+        reply("GET /api/v1/models", 404, "{}"),
+        reply("GET /api/v0/models", 200, r#"{"data":[]}"#),
+    ]);
+    let mut adapter = diagnostic_adapter("lmstudio", port);
+    adapter.selected(None);
+    assert!(adapter.poll().is_some());
+    assert!(adapter.report().connected);
+    assert!(adapter
+        .report()
+        .probes
+        .iter()
+        .any(|p| p.path == "/api/v0/models" && p.issue.is_none()));
+    server.join().unwrap();
+    let mut adapter = diagnostic_adapter("unsupported", 1);
+    adapter.selected(None);
+    assert!(adapter.poll().is_none());
+    assert_eq!(
+        adapter.report().probes[0].issue,
+        Some(ProbeIssue::InvalidProvider)
+    );
+    let mut adapter = diagnostic_adapter("ollama", 1);
+    adapter.selected(None);
+    adapter.config_error = Some(ProbeIssue::InvalidPort);
+    assert!(adapter.poll().is_none());
+    assert_eq!(
+        adapter.report().probes[0].issue,
+        Some(ProbeIssue::InvalidPort)
+    );
+}
+
+#[test]
+fn recorder_only_reports_usage_without_claiming_an_api_connection() {
+    let dir = TempDir::new("recorder-only-diagnostics");
+    let usage = record("ollama", json!({"prompt_eval_count":50}));
+    let path = dir.write("usage.jsonl", &format!("{usage}\n"));
+    let mut adapter = diagnostic_adapter("ollama", 1);
+    adapter.configured = None;
+    adapter.usage_file = Some(path.clone());
+    assert!(adapter.selected(None));
+    assert!(adapter.poll().is_some());
+    let report = adapter.report();
+    assert_eq!(report.provider.as_deref(), Some("Ollama"));
+    assert_eq!(report.status(), "Usage recorder only");
+    assert!(!report.failed() && !report.connected);
+    assert!(report.attempted_at.is_none() && report.endpoint.is_empty());
+    assert!(report.probes.is_empty());
+    fs::write(path, "invalid\n").unwrap();
+    assert!(adapter.poll().is_none());
+    assert!(adapter.report().usage.contains("no valid"));
+    assert!(!adapter.report().failed());
 }

@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: MIT
 //! Swap occupancy is capacity, independent of paging traffic or pressure.
-use super::*;
+use crate::domain::Sample;
+use crate::theme::{CYAN, EDGE, MUTED, PANEL};
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
 
 /// Render a single row inside the paging panel, without an additional border.
 pub(super) fn draw(frame: &mut Frame, area: Rect, sample: &Sample) {

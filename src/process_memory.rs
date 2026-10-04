@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! OS accounting for one process, independent of provider/allocator telemetry.
-use super::*;
+use crate::domain::Sample;
+use crate::formatting::{bytes, signed_rate};
+use crate::history::signed_rate_bytes;
+use std::time::Instant;
 
 #[derive(Clone)]
 pub(super) struct Reading {

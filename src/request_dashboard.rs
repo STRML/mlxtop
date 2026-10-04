@@ -1,94 +1,15 @@
 // SPDX-License-Identifier: MIT
-//! Compact operator view of sampled request load; never a billing ledger.
-use super::*;
-
-const HISTORY_LIMIT: usize = 240;
-
-#[derive(Clone)]
-struct Entry {
-    number: u64,
-    usage: providers::RequestUsage,
-    last_seen: SystemTime,
-    output_speed: Option<OutputSpeed>,
-}
-
-#[derive(Clone, Copy)]
-struct OutputSpeed {
-    tps: f64,
-    observed_at: SystemTime,
-    completed: bool,
-}
-
-fn observed_output_speed(
-    usage: &providers::RequestUsage,
-    observed_at: SystemTime,
-) -> Option<OutputSpeed> {
-    let tps = usage
-        .output_tps
-        .filter(|tps| tps.is_finite() && *tps >= 0.0)?;
-    Some(OutputSpeed {
-        tps,
-        observed_at,
-        completed: usage.completed,
-    })
-}
-
-#[derive(Clone, Default)]
-pub(super) struct History {
-    entries: VecDeque<Entry>,
-    next_number: u64,
-}
-
-fn same_request(a: &providers::RequestUsage, b: &providers::RequestUsage) -> bool {
-    a.id == b.id && a.provider == b.provider && a.model == b.model
-}
-
-impl History {
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn latest_for(&self, sample: &Sample) -> Option<(&providers::RequestUsage, SystemTime)> {
-        self.entries
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry.usage.provider == sample.llm_provider && entry.usage.model == sample.llm_model
-            })
-            .map(|entry| (&entry.usage, entry.last_seen))
-    }
-
-    pub fn observe(&mut self, requests: &[providers::RequestUsage]) {
-        for usage in requests {
-            if let Some(entry) = self
-                .entries
-                .iter_mut()
-                .find(|entry| same_request(&entry.usage, usage))
-            {
-                // Retained provider responses and repeated file reads do not
-                // refresh an observation's age.
-                entry.last_seen = usage.observed_at.unwrap_or(entry.last_seen);
-                if let Some(speed) = observed_output_speed(usage, entry.last_seen) {
-                    entry.output_speed = Some(speed);
-                }
-                entry.usage = usage.clone();
-            } else {
-                self.next_number = self.next_number.saturating_add(1);
-                let last_seen = usage.observed_at.unwrap_or_else(SystemTime::now);
-                self.entries.push_back(Entry {
-                    number: self.next_number,
-                    usage: usage.clone(),
-                    last_seen,
-                    output_speed: observed_output_speed(usage, last_seen),
-                });
-                while self.entries.len() > HISTORY_LIMIT {
-                    self.entries.pop_front();
-                }
-            }
-        }
-    }
-}
-
+use crate::domain::{Sample, TelemetrySource};
+use crate::formatting::{compact_label, compact_tokens, telemetry_age};
+use crate::request_history::{same_request, Entry, History};
+use crate::theme::{BLUE, CYAN, DIM, GREEN, MUTED, PANEL, YELLOW};
+use crate::{chart_scale, domain};
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
+use std::time::{Duration, SystemTime};
 fn exact(n: u64) -> String {
     let digits = n.to_string();
     let mut output = String::new();
@@ -112,7 +33,7 @@ fn clock_stamp(at: SystemTime) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
-fn compact_comparison(current: &providers::RequestUsage, previous: Option<&Entry>) -> String {
+fn compact_comparison(current: &domain::RequestUsage, previous: Option<&Entry>) -> String {
     let Some(previous) = previous else {
         return "PREVIOUS OBSERVED — · no earlier request".into();
     };
@@ -160,7 +81,7 @@ fn history_window(history: &History, index: usize, width: u16, zoom: u16) -> (us
     (index + 1 - visible, visible, slot_width)
 }
 
-fn comparable(a: &providers::RequestUsage, b: &providers::RequestUsage) -> bool {
+fn comparable(a: &domain::RequestUsage, b: &domain::RequestUsage) -> bool {
     a.provider == b.provider && a.model == b.model
 }
 
@@ -279,7 +200,7 @@ fn output_summary(entry: &Entry, live: bool, width: u16) -> Line<'static> {
 fn draw_bar(
     frame: &mut Frame,
     area: Rect,
-    usage: &providers::RequestUsage,
+    usage: &domain::RequestUsage,
     color: Color,
     ceiling: u64,
 ) {

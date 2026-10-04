@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.0-rc.1 — 2026-10-04
+
+- Add a compact Overview assessment and the read-only `d` Diagnostics panel,
+  including evidence, provider capabilities, polling ages and setup guidance.
+- Add `mlxtop doctor` for the same diagnostic report without a TTY, with explicit
+  configuration and primary-connection failure exit statuses.
+- Distinguish transport, authentication, malformed-response and optional-endpoint
+  failures without exposing credentials or raw responses. Label local host
+  findings when monitoring a remote runtime.
+- Split the executable into domain, collection, provider, analysis, application,
+  rendering and reporting modules; separate history storage from chart widgets.
+
 ## 2.0.0 — 2026-10-02
 
 - Expand native monitoring to eleven local LLM runtimes. Add Ollama loaded
