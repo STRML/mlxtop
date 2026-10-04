@@ -84,6 +84,27 @@ The README links and `scripts/install.sh` follow GitHub's latest release,
 which never includes prereleases, so they need no per-release edits. Attach
 each platform's download and one `SHA256SUMS` covering all of them.
 
+## Source layout
+
+`main.rs` only declares modules and enters the application. `cli` handles arguments
+and startup; `app` owns navigation, selection and alarms; `ui` and the dashboard
+modules render terminal views. `terminal` owns restoration and the event loop.
+
+`domain` contains shared observations. `collector` combines platform counters and
+provider telemetry; `sampler` runs it off the UI thread. `history`, `request_history`
+and `operator_history` own storage separately from rendering. `analysis` and
+`diagnosis` interpret measured conditions; they do not render widgets.
+
+`host`, `platform`, `processes`, `gpu`, and `process_memory` own system inputs.
+`omlx`, `providers`, `provider_native`, and `transport` own API collection.
+`runtime_diagnostics` carries sanitized connection observations and capability
+information. `report` supplies the shared doctor/panel text and the static report.
+`config`, `logging`, `formatting`, `parsing`, `json`, and `theme` provide scoped support.
+
+Use explicit imports and crate-local interfaces. Keep core collection independent
+of terminal widgets, provider errors free of response bodies/credentials, and all
+test-only fixtures under `src/tests/` so coverage includes all production code.
+
 ## Design boundaries
 
 Follow the [UX design rules](docs/UX_DESIGN.md) for naming, typography, color,

@@ -13,16 +13,16 @@ metric an equal rectangle. SYSINFO is a dense full-width strip, not a tall card.
 
 | Row | Space allocation |
 | --- | --- |
-| Context | Three-row SYSINFO; compact selectable NVIDIA device table when present |
+| Context | Three-row SYSINFO, fixed two-row borderless assessment, then the compact NVIDIA table when present |
 | Resources | Memory/pressure and paging each use half the width, capped at eight rows; process footprint stays in MLX Top and the static report |
 | Throughput | Generation 40%, prefill 35%, GPU 25%; use the remaining height for readable traces |
 | Requests | Prompt load takes half the width; Cache and Queue take one quarter each; nine to thirteen rows on regular terminals |
-| Recent events | Seven rows including borders (five event lines); three rows on compact macOS terminals |
+| Recent events | Five rows including borders (three event lines); omitted on compact terminals |
 
 Keep a stable layout across workload changes. At 170×42, resources use eight
-rows, throughput twelve, requests ten and Journal seven. Compact terminals
+rows, throughput twelve, requests ten and Journal five. Compact terminals
 retain six/seven request rows and exact readings when history cannot fit.
-A compact NVIDIA device table may consume the Journal preview budget; the full
+The compact assessment and NVIDIA device table consume the Journal preview budget; the full
 Journal remains available with `3`. Measured latency may take 30% of a wide
 Journal row. It must not replace Journal.
 
@@ -46,7 +46,8 @@ Cache and Queue must remain separate, independently selectable panels; never
 merge them under a shared card. Consolidate cache readings only with Cache.
 Do not add summary cards repeating these charts. Reserve space for recent Journal events; show explicitly measured first-token
 latency alongside them when width permits. There is no
-dedicated Diagnostics card; existing alarms and Journal findings remain.
+dedicated Diagnostics card. The borderless assessment shares the static report’s
+diagnosis, with full evidence in the `d` overlay; existing alarms remain visible.
 
 On short terminals, show percentage capacity bars and exact readings rather
 than misleading one-row traces with 0/100 axes. Queue retains both counts even

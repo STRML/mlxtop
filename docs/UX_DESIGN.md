@@ -31,6 +31,9 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 - Use one border per chart. Place a dense full-width SYSINFO strip above the
   histories; do not wrap charts in another throughput box.
   SYSINFO owns hardware identity, cores, RAM, CPU/RSS, thermal and GPU allocation.
+  Put a fixed borderless two-row assessment below SYSINFO: finding and fitting
+  evidence, then the complete next check or neutral observation. Use `d` for full
+  evidence and runtime setup; do not add another diagnosis card.
   Memory/pressure and paging share the first row equally, capped at eight rows.
   Generation, prefill and GPU use 40/35/25 percent widths and receive the
   remaining height. Prompt history takes half of the next row, with Cache and
@@ -42,8 +45,7 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   narrow rate charts. Keep an accessible help hint and separate chart/view keys.
 - Give prompt history nine to thirteen rows on regular terminals, seven on
   short macOS terminals and six with a compact NVIDIA table. Journal gets
-  seven rows on regular terminals (five event lines), three on compact macOS
-  terminals; the full Journal is available with `3`. Wrap summaries to at most
+  five rows on regular terminals (three event lines) and no compact preview; the full Journal is available with `3`. Wrap summaries to at most
   two rows, align time/state columns, and mark shortened messages.
 - Keep a one-row header for views and sampling state, and contextual controls
   in a bottom bar. Show current readings in chart headers, moving detailed
@@ -146,7 +148,9 @@ colors in time-series history instead of recoloring old samples on refresh.
   filtered aggregate CPU/RSS and full commands. OS readings must belong to
   the selected PID; label provider-wide telemetry as runtime data rather than
   assigning a model/state to every process. Do not repeat Overview charts.
-- Preserve 1/2/3 for views and p for pause. Shift-↑↓ and Home/End inspect prompt
+- Preserve 1/2/3 for views and p for pause. `d` opens read-only Diagnostics
+  outside text entry; Esc/d closes it, and view switching dismisses it. Keep
+  quit and alarm acknowledgment available and label retained paused observations. Shift-↑↓ and Home/End inspect prompt
   history. Use { / } for sampling cadence. Show contextual controls.
 - Review at 80×24, a medium terminal, and a wide terminal. Check empty, live,
   idle/historical, unavailable and large-value states when affected.

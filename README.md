@@ -75,6 +75,26 @@ Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
 example `curl -fsSL … | MLXTOP_VERSION=2.0.0 sh`.
 
+## Diagnose a connection or missing reading
+
+Press **`d`** in the dashboard to inspect the current assessment, the selected
+runtime and endpoint, authentication status, supported measurements, and setup
+instructions. The panel is read-only and uses the current samples. Overview also
+shows a compact assessment and a suggested check above the charts.
+
+For the same diagnostic information without a terminal UI:
+
+```sh
+mlxtop doctor
+MLXTOP_PROVIDER=ollama mlxtop doctor
+```
+
+`doctor` takes two samples using the configured interval. It returns exit code
+1 for invalid configuration, incomplete host counters, or a failed primary runtime
+connection. No detected runtime, missing optional metrics, and resource pressure
+are informational. The [diagnostics guide](docs/USER_GUIDE.md#diagnostics-and-runtime-setup)
+explains partial connections and client recording.
+
 ## Configuration
 
 Create `~/.config/mlxtop/config.json` to customize mlxtop. All fields are optional,
@@ -205,6 +225,7 @@ an oMLX session. These numbers illustrate the display and aren’t benchmarks.
 | `{` / `}` | Change refresh interval |
 | `a` | Acknowledge a critical system alarm |
 | `[` / `]` | Select an NVIDIA GPU in Overview and reveal additional cards |
+| `d` | Open diagnostics and runtime setup guidance |
 | `?` | Show help |
 | `q` | Quit |
 

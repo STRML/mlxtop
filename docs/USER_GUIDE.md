@@ -12,7 +12,8 @@ Detailed controls, runtime setup, and explanations of the dashboard readings.
 | MLX Top | Which process owns the workload? | PID, command, CPU, memory %, RSS, page-ins, OS state and selected runtime details |
 | Journal | What changed during this session? | Request lifecycle, provider/model changes, paging, pressure, compression, GPU, thermal and recovery events |
 
-Overview starts with a dense full-width **SYSINFO** strip. **Memory / pressure**
+Overview starts with a dense full-width **SYSINFO** strip and a fixed two-row
+assessment: the current finding and a suggested check or neutral observation. **Memory / pressure**
 and **paging** share a compact first row. **Generation**, **prefill** and **GPU**
 use the next row, with enough height to show rate changes clearly. Select a
 chart and press Enter for its full view. OS process footprint is available in
@@ -32,7 +33,7 @@ application pages in its reported percentage and is not used as RAM usage.
 
 A compact row holds **prompt load**, **Cache** and **Queue**. The bottom **recent
 Journal** shows timestamped changes, newest first. At 170×42 the resource row is
-eight rows high, throughput twelve and Journal has five event rows, with long messages
+eight rows high, throughput twelve and Journal has three event rows, with long messages
 wrapping to a second line. Press `3` for the full Journal.
 
 Prompt load uses nine to thirteen rows on regular terminals. Each panel keeps its place
@@ -229,6 +230,51 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 | `a` | Acknowledge the current critical system alarm |
 | `?` / `h` | Help |
 | `q` / `Ctrl-C` | Quit (`Esc` restores an enlarged chart before quitting) |
+
+### Diagnostics and runtime setup
+
+Press `d` from any main view to open **Diagnostics**. During process-filter entry,
+`d` remains a filter character; finish the filter first. The panel shows the full
+assessment, supporting evidence, and confidence when a measured slowdown has a
+correlated signal. Local hardware findings are explicitly labeled when the selected
+API is remote; they do not establish a remote inference bottleneck.
+
+The connection section shows selection provenance, the resolved endpoint, hidden
+credential status, polling ages, endpoint failures and capability sources. A
+connected inventory API does not establish live throughput. Native live rates,
+server averages, last completions, and client-reported usage retain their separate
+meanings. A missing reading stays unavailable. Optional endpoint failures can
+leave a connection partially available; legacy LM Studio fallbacks remain usable.
+
+Use arrows, Page Up/Down, Home/End, or the mouse wheel to scroll. `d` or Esc closes
+the panel. Tab/Shift-Tab and 1/2/3 close it and switch views. `p` pauses sampling,
+`a` acknowledges a critical alarm, and `q` or Ctrl-C quits. Opening the panel does
+not make additional API requests or edit configuration.
+
+```sh
+mlxtop doctor
+mlxtop doctor --interval 2
+MLXTOP_PROVIDER=ollama mlxtop doctor
+```
+
+The doctor command uses the same report and configuration precedence. It samples
+twice, honors the refresh interval, and needs no TTY. Exit code 1 means invalid
+configuration, incomplete host counters, or an unusable selected primary API;
+exit code 0 includes no detected runtime and partial connections with missing
+optional measurements. Recorder-only collection is labeled separately and does
+not claim an API connection. High pressure is reported without making the command fail.
+Unlike the dashboard's tolerant startup, doctor rejects malformed configuration
+and out-of-range interval/history values. `doctor` cannot be combined with `--once`.
+
+Setup guidance explains API activation and recorder requirements. Integrate the
+[client recorder](#client-reported-usage-file) in the calling client before setting
+`MLXTOP_USAGE_FILE`; the environment variable alone does not record requests.
+Credentials and raw API responses are excluded from the report.
+
+![Read-only Diagnostics panel with runtime capabilities](screenshots/diagnostics.png)
+
+On compact terminals, the two-row assessment uses the Overview Journal preview's
+space. The complete Journal remains accessible with `3`.
 
 ### Overview charts
 
