@@ -2201,6 +2201,11 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
             "LM Studio",
         ),
         ("local-ai", "local-ai run", "LocalAI"),
+        (
+            "mlx-serve",
+            "/home/user/.local/bin/mlx-serve --serve --port 11234",
+            "mlx-serve",
+        ),
     ] {
         assert!(is_llm_process(name, command), "{command}");
         assert_eq!(

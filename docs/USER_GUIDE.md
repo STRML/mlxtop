@@ -615,6 +615,15 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   Top shows maximum reported KV occupancy across engines and cumulative mean
   TTFT. Aggregate latency is never inserted into individual request history.
   No per-request prompt counts or IDs are inferred from aggregate counters.
+- **mlx-serve:** polls `/metrics` (start the server with `--metrics`; set
+  `MLXTOP_PROVIDER_API_KEY` if it has an API key) and `/metrics.json` for the model and
+  one entry per running request (prompt, cached and output counts; cache-only sessions
+  are skipped). Generation rate is the delta of `mlx_serve:generation_tokens_live`, which
+  includes tokens of requests still running. Prefill rate is the growth of
+  `mlx_serve:prefill_tokens_live` over the time a request was prefilling, because the
+  gauge advances in coarse chunks. Requests that ended between polls show their
+  per-request speed for three seconds as a last sample, not live. Cache reuse is tokens
+  restored from the prefix cache over all prompt tokens. Sampling follows the vLLM rules.
 - **MLX-LM, LocalAI, Jan and GPT4All:** `/v1/models` supplies the available model
   catalogue. This is not proof that models are loaded or processing a request.
   Completion usage needs client integration, and missing counts/rates stay
