@@ -1,5 +1,107 @@
 # Changelog
 
+## 2.1.1 — 2026-10-09
+
+Stable release of the 2.1 candidates below (2.1.0-rc.1 through rc.5).
+
+- Overview leads with host-critical resources: memory (pressure, RAM
+  composition and the GPU wired limit), a new macOS compression chart and
+  paging, then prompt load, then a compact throughput row, on one aligned
+  three-column grid. Tall terminals give extra height to the host resources.
+- The assessment leads with a verdict (`Healthy · no bottleneck`), uses
+  sentence case, and a critical alarm replaces it without hiding SYSINFO.
+- Every chart is graded green/yellow/red by its configured thresholds, and
+  generation and prefill by their rolling baseline. Chart, assessment and
+  Journal colors agree.
+- Prompt times use the local zone, each reading appears once, cache readings
+  are labeled `CACHED`, `interval` and `SERVER TOTAL`, and narrow terminals
+  keep full view names and units.
+- `d` Diagnostics and `mlxtop doctor` explain the assessment, connection and
+  runtime setup.
+
+## 2.1.0-rc.5 — 2026-10-08
+
+- Grade every chart by its thresholds. GPU is red again from
+  `gpu_critical_load`; paging is red from `swap_critical_rate`, and the
+  "Paging active" finding turns red at the same rate. The memory trace keeps
+  the pressure severity captured with each sample. Cache reuse is green from
+  50%, yellow from 20% and red below, for the cache chart and the prompt's
+  CACHED share.
+- Grade throughput against a rolling baseline: generation and prefill turn
+  yellow 10% (and 2 tok/s) below the median of recent live samples and red at
+  30%; the assessment reports a 30% generation drop in red too.
+
+## 2.1.0-rc.4 — 2026-10-08
+
+- Lay Overview on one grid of three equal columns so panel edges align across
+  rows. Prompt load spans two columns with Cache above Queue in the third;
+  generation, prefill and GPU take one column each.
+- Give tall terminals' extra height to memory, compression and paging. Prompt
+  load stops at fourteen rows, throughput at ten and Journal at ten, instead of
+  one prompt bar or a long Journal filling the screen.
+
+## 2.1.0-rc.3 — 2026-10-08
+
+- Reorder Overview around host-critical resources: memory, compression and
+  paging lead with the remaining height; prompt load follows; generation,
+  prefill and GPU become a compact fixed row (seven rows, four on short
+  terminals).
+- Add a macOS compression chart: compress + decompress traffic, stored versus
+  compressor bytes with the ratio, a COMP/DECOMP split and compressor occupancy
+  as a share of RAM. Decompression of model or KV pages is a leading slowdown
+  signal that paging alone misses. Linux keeps memory and paging at half width.
+- Show RAM composition (wired, app, compressed, cache, free) under the memory
+  reading, marking the GPU wired limit from `iogpu.wired_limit_mb` or the
+  runtime's Metal working set; the marker turns red when wired memory exceeds
+  it.
+- Make chart colors agree with the assessment at every threshold. Paging turns
+  red only with a critical paging finding (thrashing, heavy paging, page-in
+  recovery), not at 16 MiB/s of one-way traffic; compression keeps the
+  finding's 64/32 MiB/s enter/exit hysteresis; Journal logs paging below the
+  warning rate as green `light` paging; the compact paging label uses `Watch
+  paging` from 1 MiB/s and `Paging active` from 4 MiB/s; the GPU wired-limit
+  marker is yellow with a legend reason instead of an unexplained red.
+
+## 2.1.0-rc.2 — 2026-10-07
+
+- Lead the Overview assessment with a verdict: `Healthy · no bottleneck` in
+  green when nothing is actionable and pressure is normal. GPU load is evidence,
+  never the headline; findings use sentence case, and an idle runtime reads
+  `Idle · waiting for the next request.`
+- Show memory PRESSURE in the memory chart's reading slot, with bytes and
+  resident percentage beneath it. Short memory panels use a capacity bar with
+  exact bytes instead of a flat trace on a 0–100% axis.
+- Cap throughput charts at fourteen rows and give taller terminals' extra rows
+  to prompt load and Journal.
+- Show prompt-load timestamps in the local zone used by Journal (UTC, labeled,
+  only when the offset is unavailable).
+- Show each reading once: SYSINFO keeps runtime prompt counters only when they
+  differ from the prompt-load request, and prompt load omits a live speed equal
+  to the generation headline. Label cache readings `CACHED` (request),
+  `interval` and `SERVER TOTAL`.
+- Never color GPU utilization red; `saturated` labels the yellow band, and the
+  GPU scale reads `within target`, `busy`, `saturated`. Keep the queue's waiting
+  series muted while nothing waits, and use cyan for the paging chart title.
+- In Overview, show a critical alarm in place of the assessment rows so
+  SYSINFO stays visible.
+- Keep full view names from 80 columns, keep units on narrow rate charts, and
+  replace `int`/`decode` abbreviations. Use one empty-state vocabulary, spaced
+  paging units, whole-token medians, `3 full journal`, a swatch legend for
+  Queue, threshold-based compact paging wording, unsplit partial prompt-bar
+  cells, left-aligned Journal states and a separate `r` help entry.
+
+## 2.1.0-rc.1 — 2026-10-04
+
+- Add a compact Overview assessment and the read-only `d` Diagnostics panel,
+  including evidence, provider capabilities, polling ages and setup guidance.
+- Add `mlxtop doctor` for the same diagnostic report without a TTY, with explicit
+  configuration and primary-connection failure exit statuses.
+- Distinguish transport, authentication, malformed-response and optional-endpoint
+  failures without exposing credentials or raw responses. Label local host
+  findings when monitoring a remote runtime.
+- Split the executable into domain, collection, provider, analysis, application,
+  rendering and reporting modules; separate history storage from chart widgets.
+
 ## 2.0.0 — 2026-10-02
 
 - Expand native monitoring to eleven local LLM runtimes. Add Ollama loaded

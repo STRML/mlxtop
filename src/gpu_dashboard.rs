@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: MIT
 //! Responsive per-card comparison in Overview, with no aggregate VRAM pool.
+use crate::config::Thresholds;
+use crate::domain::ChartMetric;
+use crate::formatting::{bytes, compact_label};
+use crate::gpu;
+use crate::theme::{BLUE, CYAN, DIM, MUTED, PANEL, PANEL_RAISED};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
 use std::ops::Range;
-
-use ratatui::{
-    layout::{Alignment, Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
-    Frame,
-};
-
-use crate::{
-    bytes, compact_label, gpu, ChartMetric, Thresholds, BLUE, CYAN, DIM, MUTED, PANEL, PANEL_RAISED,
-};
 
 pub(crate) fn height(count: usize, available: u16) -> u16 {
     // Border + column labels + at most eight devices. The caller reserves
@@ -48,7 +46,7 @@ fn state(device: &gpu::Device, thresholds: Thresholds) -> &'static str {
         None => "unavailable",
         Some(0) => "idle",
         Some(load) if load >= thresholds.gpu_critical_load => "saturated",
-        Some(load) if load >= thresholds.gpu_warn_load => "loaded",
+        Some(load) if load >= thresholds.gpu_warn_load => "busy",
         Some(_) => "active",
     }
 }

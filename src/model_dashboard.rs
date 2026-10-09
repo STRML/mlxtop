@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: MIT
 //! A dense system strip: runtime identity, workload and host facts share one border.
-use super::*;
+use crate::domain::Sample;
+use crate::formatting::{
+    bytes, compact_label, compact_tokens, compressed_memory_label, llm_context_label,
+    optional_tokens, process_count_label, signed_rate, telemetry_age, telemetry_source,
+};
+use crate::theme::{card_block, llm_status_tone, tone_badge, BLUE, MUTED};
+use crate::{gpu, request_history};
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+use std::env;
 
 fn fitted_parts(parts: impl IntoIterator<Item = String>, width: usize) -> String {
     let mut text = String::new();
@@ -22,7 +34,7 @@ fn fitted_parts(parts: impl IntoIterator<Item = String>, width: usize) -> String
     text
 }
 
-fn work_parts(sample: &Sample, history: &request_dashboard::History) -> Vec<String> {
+fn work_parts(sample: &Sample, history: &request_history::History) -> Vec<String> {
     if sample.llm_prompt_tokens.is_none() && sample.llm_active_requests == Some(0) {
         if let Some((request, observed)) = history.latest_for(sample) {
             return vec![
@@ -37,6 +49,16 @@ fn work_parts(sample: &Sample, history: &request_dashboard::History) -> Vec<Stri
         format!("OUT {}", optional_tokens(sample.llm_output_tokens)),
         format!("CONTEXT {}", llm_context_label(sample)),
     ]
+}
+
+/// Overview's prompt load panel already shows the latest request's prompt and
+/// output. Keep runtime counters here only when they add a different reading.
+fn prompt_panel_covers(sample: &Sample, history: &request_history::History) -> bool {
+    history.latest_for(sample).is_some_and(|(request, _)| {
+        sample
+            .llm_prompt_tokens
+            .is_none_or(|prompt| prompt == request.prompt)
+    })
 }
 
 fn hardware_parts(sample: &Sample) -> Vec<String> {
@@ -145,18 +167,20 @@ pub(super) fn draw(
     frame: &mut Frame,
     area: Rect,
     sample: &Sample,
-    history: &request_dashboard::History,
+    history: &request_history::History,
 ) {
     let width = usize::from(area.width.saturating_sub(2));
     let compact = area.height < 5;
     let wide = width >= 130;
     let tone = llm_status_tone(&sample.llm_status);
     let title = fitted_parts(
-        std::iter::once("SYSINFO".into()).chain(if compact {
-            work_parts(sample, history)
-        } else {
-            Vec::new()
-        }),
+        std::iter::once("SYSINFO".into()).chain(
+            if compact && !prompt_panel_covers(sample, history) {
+                work_parts(sample, history)
+            } else {
+                Vec::new()
+            },
+        ),
         width.saturating_sub(2),
     );
     let footer = if compact {

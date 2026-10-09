@@ -1,8 +1,8 @@
-// SPDX-License-Identifier: MIT
-//! Process-level behavior: diagnostics, configuration, CLI, static report,
-//! the interactive loop, keyboard/mouse navigation and classification.
-use super::*;
 use crate::test_support::*;
+// SPDX-License-Identifier: MIT
+// Process-level behavior: diagnostics, configuration, CLI, static report,
+// the interactive loop, keyboard/mouse navigation and classification.
+use super::*;
 use crate::tests::{
     populate_dashboard_fixture, render_app, render_view, test_app, test_app_with_sender,
 };
@@ -255,7 +255,7 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
         llm_active_requests: Some(1),
         llm_prompt_tokens: Some(1200),
         llm_output_tokens: Some(30),
-        llm_requests: vec![providers::RequestUsage {
+        llm_requests: vec![domain::RequestUsage {
             provider: "oMLX".into(),
             model: "qwen".into(),
             id: "req-1".into(),
@@ -598,7 +598,7 @@ fn journal_keys_scroll_newest_first_and_cycle_filters() {
     press(&mut app, &[KeyCode::Home]);
     let newest = render_app(&app, 120, 30);
     assert!(newest.contains("JOURNAL"));
-    assert!(newest.contains("30 ALL events · 30 total"));
+    assert!(newest.contains("30 events · f/[/] filter"));
     assert!(newest.contains("LATEST  event 29"));
     assert!(newest.contains("EVENTS · ALL · 1–"));
     assert!(newest.contains("of 30"));
@@ -627,7 +627,7 @@ fn journal_keys_scroll_newest_first_and_cycle_filters() {
     );
     assert_eq!(app.journal_filter, JournalFilter::Paging);
     let paging = render_app(&app, 120, 30);
-    assert!(paging.contains("15 PAGING events · 30 total"));
+    assert!(paging.contains("15 PAGING of 30 events"));
     assert!(paging.contains("│  event 28") && !paging.contains("event 29"));
     press(&mut app, &[KeyCode::Char(']')]);
     assert_eq!(app.filtered_journal_events().len(), 15, "GPU events");
@@ -1344,4 +1344,65 @@ fn small_formatters_cover_every_unit() {
         process_footprint: Some(1),
         ..MlxTelemetry::default()
     }));
+}
+
+#[test]
+fn doctor_arguments_configuration_and_exit_conditions_are_explicit() {
+    use crate::config::load_doctor_config;
+    use crate::report::{diagnostic_lines, write_doctor};
+    assert!(matches!(
+        parse_args(&args(&["doctor", "-i", "2"]), &Config::default()).unwrap(),
+        CliAction::Doctor { interval: 2, .. }
+    ));
+    assert!(parse_args(&args(&["doctor", "--once"]), &Config::default()).is_err());
+    assert!(matches!(
+        parse_args(&args(&["doctor", "--help"]), &Config::default()).unwrap(),
+        CliAction::Print(_)
+    ));
+    let dir = TempDir::new("doctor-config");
+    assert_eq!(
+        load_doctor_config(&dir.0.join("missing")).unwrap(),
+        Config::default()
+    );
+    for text in [
+        "invalid",
+        r#"{"interval":0}"#,
+        r#"{"history":9999}"#,
+        r#"{"omx":{"port":0}}"#,
+    ] {
+        let path = dir.write("config.json", text);
+        assert!(load_doctor_config(&path).is_err());
+    }
+    assert!(load_doctor_config(&dir.0).is_err());
+    assert_eq!(
+        load_doctor_config(&dir.write("config.json", r#"{"interval":2}"#))
+            .unwrap()
+            .interval,
+        Some(2)
+    );
+    let mut sample = Sample {
+        total_memory: 1024,
+        vm_available: true,
+        resident_memory: Some(512),
+        pressure: "RED".into(),
+        rate_ready: true,
+        ..Sample::default()
+    };
+    let mut text = Vec::new();
+    assert!(
+        write_doctor(&mut text, &sample).unwrap(),
+        "pressure is a measurement, not a doctor failure"
+    );
+    let text = String::from_utf8(text).unwrap();
+    for line in diagnostic_lines(&sample) {
+        assert!(text.contains(&line));
+    }
+    sample.runtime.provider = Some("Ollama".into());
+    sample.runtime.begin();
+    sample.runtime.finish(false);
+    assert!(!write_doctor(&mut Vec::new(), &sample).unwrap());
+    sample.runtime.finish(true);
+    assert!(write_doctor(&mut Vec::new(), &sample).unwrap());
+    sample.vm_available = false;
+    assert!(!write_doctor(&mut Vec::new(), &sample).unwrap());
 }

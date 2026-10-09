@@ -13,22 +13,26 @@ metric an equal rectangle. SYSINFO is a dense full-width strip, not a tall card.
 
 | Row | Space allocation |
 | --- | --- |
-| Context | Three-row SYSINFO; compact selectable NVIDIA device table when present |
-| Resources | Memory/pressure and paging each use half the width, capped at eight rows; process footprint stays in MLX Top and the static report |
-| Throughput | Generation 40%, prefill 35%, GPU 25%; use the remaining height for readable traces |
-| Requests | Prompt load takes half the width; Cache and Queue take one quarter each; nine to thirteen rows on regular terminals |
-| Recent events | Seven rows including borders (five event lines); three rows on compact macOS terminals |
+| Context | Three-row SYSINFO, fixed two-row borderless assessment, then the compact NVIDIA table when present |
+| Grid | Three equal columns shared by every row, so panel edges align |
+| Host | Memory, compression, paging one column each on macOS (memory spans two columns on Linux); all remaining height, at least six rows; process footprint stays in MLX Top and the static report |
+| Requests | Prompt load spans two columns; Cache above Queue in the third; about 28% of the chart height, nine to fourteen rows (seven compact) |
+| Throughput | Generation, prefill and GPU one column each; seven to ten rows, four on short terminals |
+| Recent events | Five rows including borders (three event lines), growing to ten on tall terminals; omitted on compact terminals |
 
-Keep a stable layout across workload changes. At 170×42, resources use eight
-rows, throughput twelve, requests ten and Journal seven. Compact terminals
-retain six/seven request rows and exact readings when history cannot fit.
-A compact NVIDIA device table may consume the Journal preview budget; the full
+Keep a stable layout across workload changes. At 170×42, the host row uses
+fourteen rows, requests nine, throughput seven and Journal five; at 250×80 the
+host row grows to thirty-nine while requests stop at fourteen. Compact
+terminals retain seven request rows and exact readings when history cannot fit.
+The compact assessment and NVIDIA device table consume the Journal preview budget; the full
 Journal remains available with `3`. Measured latency may take 30% of a wide
 Journal row. It must not replace Journal.
 
 An empty state explains the absence of samples without fabricated bars or axes.
 Request arrival, idle transitions, pressure and queue spikes must not rearrange
 panels. Use the existing critical banner and semantic colors to emphasize pressure.
+In Overview the banner replaces the two assessment rows, keeping SYSINFO's model,
+state and data age visible during the incident.
 NVIDIA identity and per-device readings retain a selectable table budget.
 
 | Panel | Contents |
@@ -36,7 +40,8 @@ NVIDIA identity and per-device readings retain a selectable table budget.
 | SYSINFO | Model/state, source/age, device/cores, RAM, LLM CPU/RSS, thermal and GPU allocation |
 | generation / prefill | Separate tok/s histories with independent axes; no outer throughput box |
 | prompt load | One labeled bar per observed request, cache split when reported |
-| memory | Resident RAM occupancy in cyan, with separate pressure severity |
+| memory | PRESSURE in the reading slot; bytes and resident % in cyan; a composition bar of wired, app, compressed, cache and free RAM with the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set) marked, yellow with a legend reason when wired memory exceeds it; occupancy history |
+| compression | macOS compress + decompress traffic history (B/s, zero-based automatic ceiling), stored/compressor bytes and ratio, COMP/DECOMP split and a COMP occupancy bar as a share of RAM; yellow from `compression_warn_rate`, never red |
 | GPU | Utilization history and load state; hardware metadata belongs in SYSINFO |
 | paging / I/O | Paging-rate history, IN/OUT rates and a horizontal SWAP used/total capacity bar |
 | cache | Interval history with cumulative TOTAL and prefix hit readings kept in fixed text positions |
@@ -46,7 +51,8 @@ Cache and Queue must remain separate, independently selectable panels; never
 merge them under a shared card. Consolidate cache readings only with Cache.
 Do not add summary cards repeating these charts. Reserve space for recent Journal events; show explicitly measured first-token
 latency alongside them when width permits. There is no
-dedicated Diagnostics card; existing alarms and Journal findings remain.
+dedicated Diagnostics card. The borderless assessment shares the static report’s
+diagnosis, with full evidence in the `d` overlay; existing alarms remain visible.
 
 On short terminals, show percentage capacity bars and exact readings rather
 than misleading one-row traces with 0/100 axes. Queue retains both counts even
@@ -99,21 +105,43 @@ The current configured defaults are:
 
 | Metric | Green | Yellow | Red |
 | --- | --- | --- | --- |
-| PRESSURE label | normal pressure | warning pressure | critical pressure |
-| GPU utilization | below 75% | 75% to below 90% | 90% or more |
-| Paging rate | below 1 MiB/s | 1 MiB/s to below 16 MiB/s | 16 MiB/s or more |
+| PRESSURE label and memory trace | normal pressure | warning pressure | critical pressure |
+| GPU utilization | below 75% | 75% to below 90% (`busy`) | 90% or more (`saturated`) |
+| Paging rate | below 1 MiB/s | 1 MiB/s to below 16 MiB/s | 16 MiB/s or more, or a critical paging finding (swap thrashing, heavy paging, page-in recovery) |
+| Compression traffic | below 64 MiB/s, or below 32 MiB/s once active | 64 MiB/s or more; stays yellow down to 32 MiB/s | none: no critical threshold is defined |
+| Cache reuse (interval and prompt CACHED share) | 50% or more | 20% to below 50% | below 20% |
+| Generation (dynamic) | at or above the rolling baseline | 10% and 2 tok/s or more below it | 30% or more below it, or a drop correlated with paging, memory pressure or thermals |
+| Prefill (dynamic) | at or above the rolling baseline | 10% and 2 tok/s or more below it | 30% or more below it |
+| GPU wired-limit marker | — | wired memory over the limit, with `wired over GPU limit` in the legend | — |
+
+Dynamic bands compare each sample with the median of the chart's previous
+thirty live samples (generation uses the assessment's slowdown baseline for the
+same provider and model). Without three samples there is no baseline and the
+sample is green. Prompt CACHED shares below 4,096 tokens stay neutral cyan.
+
+Chart colors agree with the assessment where both grade the same signal:
+"Paging active" turns red from the paging chart's critical rate, a generation
+drop of 30% or more is red in both, and compression keeps the finding's
+enter/exit hysteresis. GPU saturation is red on the chart while the assessment
+still reports no bottleneck unless a slowdown is measured. Journal paging events
+use the paging band: traffic below the warning rate is logged as `light`, in
+green. The compact paging label uses the finding's words: `Light paging`,
+`Watch paging` (from 1 MiB/s), `Paging active` (from 4 MiB/s).
 
 RAM percentage and bytes still measure physical occupancy including file cache.
-Its current value, compact gauge and trace use cyan for occupancy. Missing
-occupancy remains muted. The separate PRESSURE label uses the reported
-severity, so cyan occupancy does not imply healthy pressure. Native macOS
+The memory chart's reading slot shows the PRESSURE label in its severity color;
+resident percentage follows the bytes in cyan, and the occupancy trace keeps
+the pressure severity captured with each sample, so a high but healthy
+occupancy stays green. Below five inner rows, memory shows bytes and a
+composition bar instead of a trace. Missing occupancy remains muted. Native macOS
 pressure is authoritative. Linux derives pressure from unavailable memory
 (`100 - MemAvailable%`) using configured 70/85 defaults, with full PSI stalls
 of 1%/5% escalating to watch/critical. Occupancy is never a pressure threshold.
 
 Use resolved configuration thresholds, not duplicated constants in renderers.
-GPU bands mean utilization/load; red GPU utilization alone does not establish
-a bottleneck and must not sound an alarm. GPU Journal events use load terms
+GPU bands mean utilization/load: `busy` is yellow and `saturated` red.
+Utilization alone does not establish a bottleneck, so it never sounds an alarm
+or becomes a finding without a measured slowdown. GPU Journal events use load terms
 such as saturated, eased and idle; they must not call utilization critical or
 report recovery from missing readings. Recovery colors follow measured load. Thresholds stay in the original
 units when an axis changes. A history sample keeps its captured color when a
@@ -127,12 +155,16 @@ and measured zero usage.
 Series without a defined health threshold must not invent one from their
 display range: a fast token rate, large prompt or large footprint is not by
 itself a fault. Use labeled identity/measurement colors for those series:
-generation/prefill and resident occupancy use cyan; a measured generation drop
-can carry its recorded warning tone. Queue identifies active and waiting
-series and marks exact equality with white `═`; overlapping connectors use muted continuous strokes and proper junctions.
+chart titles use their identity color (cyan; GPU blue). Throughput and cache
+use the graded bands above. Queue identifies
+active (cyan) and waiting series with stroke swatches, and marks exact equality
+with white `═`. The waiting series is yellow only while the visible window
+contains waiting requests; an empty wait queue stays muted. Overlapping
+connectors use muted continuous strokes and proper junctions.
 Unequal values rounded to one row use muted `≈`. Prompt bars distinguish reported cached tokens
 (green) from live/retained uncached tokens (cyan/blue); size changes stay
-numeric. Defining a new severity band requires recording its metric-specific
+numeric. A partial cell that would hold both segments stays unsplit in the
+request color, so equal cache ratios never change color with rounding. Defining a new severity band requires recording its metric-specific
 meaning and thresholds here, with boundary tests.
 
 Keep numeric readings, units, state labels and legends readable without color.
@@ -177,14 +209,18 @@ its zoom, while expanded views expose detailed window statistics.
   count, observation timestamp, age, cache information and selection marker.
   On narrow panels, prioritize the exact count, state and cache reading in the
   headline; output count and request speed use existing metadata rows. Keep the
-  UTC clock and comparisons when they fit; expansion reveals full metadata.
+  clock and comparisons when they fit; expansion reveals full metadata. The
+  clock uses the host's local zone, like Journal, and is labeled UTC only when
+  the local offset is unavailable. A live request speed equal to the generation
+  headline is not repeated; a differing per-request speed is.
   Never sacrifice a reading or bar label to fit optional fields.
 - Only measured live rates enter throughput traces. Session averages and
   retained results use `AVG`/`LAST` labels and never become live samples.
 - oMLX prefill progress initializes `speed` to zero before a chunk rate exists;
   treat that placeholder as missing, retaining the separately labeled average.
 - Distinguish Cache's interval reading and last interval age from aggregate
-  `TOTAL` reuse. Label chart statistics `window avg`; provider averages use
+  `SERVER TOTAL` reuse (`TOTAL` on narrow panels), and both from the selected
+  request's `CACHED` share in prompt load. Label chart statistics `window avg`; provider averages use
   `SERVER AVG` in expanded views; keep Overview focused on LIVE and LAST. Explain trailing gaps with the last sample
   and age, and mark isolated observations with a visible dot. Counter resets,
   stale intervals and inconsistent cache deltas leave gaps, never false zeros.

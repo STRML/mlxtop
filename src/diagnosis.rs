@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 //! Separate measured problems from high resource use during normal work.
-use super::*;
+use crate::analysis::correlation_evidence_label;
+use crate::domain::{CorrelationCause, Sample, TelemetrySource, ThroughputDirection, Tone};
+use crate::formatting::{count, llm_generation_rate_label, percent_u8, pressure_state_label, rate};
+use std::time::{Duration, SystemTime};
 
 pub(super) struct Finding {
     pub title: String,
@@ -12,6 +15,22 @@ pub(super) struct Finding {
 }
 
 pub(super) fn assess(sample: &Sample) -> Finding {
+    let mut finding = assess_observation(sample);
+    if sample.llm_remote {
+        if finding.title.ends_with("requests waiting") {
+            finding.title = format!("Remote runtime: {}", finding.title);
+            finding.evidence = "Remote request queue".into();
+        } else {
+            finding.title = format!("Local host: {}", finding.title);
+            if !finding.actionable {
+                finding.next = "Remote inference is not correlated with local hardware.";
+            }
+        }
+    }
+    finding
+}
+
+fn assess_observation(sample: &Sample) -> Finding {
     let paging = if sample.swap_available && sample.vm_available && sample.rate_ready {
         rate(sample.swap_in.saturating_add(sample.swap_out))
     } else {
@@ -51,7 +70,7 @@ pub(super) fn assess(sample: &Sample) -> Finding {
         _ => None,
     };
     if let Some(action) = action {
-        finding.title = impact.into();
+        finding.title = sentence_case(impact);
         finding.next = action;
         finding.actionable = true;
         finding.tone = if sample.pressure == "RED" {
@@ -88,7 +107,7 @@ pub(super) fn assess(sample: &Sample) -> Finding {
                 .is_ok_and(|age| age <= Duration::from_secs(5))
         });
     let live = fresh && sample.llm_generation_tps_live;
-    if live && sample.correlation.is_material_drop() {
+    if live && !sample.llm_remote && sample.correlation.is_material_drop() {
         finding.title = "Generation slowed".into();
         finding.evidence = sample
             .correlation
@@ -142,8 +161,10 @@ pub(super) fn assess(sample: &Sample) -> Finding {
         finding.tone = Tone::Yellow;
         return finding;
     }
-    if sample.gpu_util.is_some_and(|value| value >= 80) {
-        finding.title = "GPU busy · bottleneck unconfirmed".into();
+    // Lead with the verdict. High GPU use stays evidence, never the headline.
+    if pressure_state_label(sample) == "normal" {
+        finding.title = "Healthy · no bottleneck".into();
+        finding.tone = Tone::Green;
     }
     if live
         && matches!(
@@ -152,10 +173,22 @@ pub(super) fn assess(sample: &Sample) -> Finding {
         )
     {
         finding.next = "No generation slowdown measured.";
+    } else if !live && matches!(sample.llm_status.as_str(), "idle" | "ready") {
+        finding.next = "Idle · waiting for the next request.";
     } else if !live {
         finding.next = "Live generation rate unavailable.";
     }
     finding
+}
+
+/// Findings share one headline slot, so native state names use sentence case.
+fn sentence_case(state: &str) -> String {
+    let lower = state.to_ascii_lowercase();
+    let mut chars = lower.chars();
+    chars
+        .next()
+        .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

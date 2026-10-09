@@ -1,62 +1,21 @@
 // SPDX-License-Identifier: MIT
 //! Read-only provider adapters. Only counters and identifiers cross into samples.
-use super::*;
+use crate::domain::{LlmTelemetry, RequestUsage, TelemetrySource};
+use crate::json::{json_value, request_rate};
+use crate::runtime_diagnostics::{default_port, ProbeIssue, RuntimeReport};
+use serde_json::Value;
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
+use std::{env, fs};
 
 #[path = "provider_native.rs"]
 mod native;
 
 const MAX_USAGE_BYTES: u64 = 256 * 1024;
-
-#[derive(Clone, Debug)]
-pub(super) struct RequestUsage {
-    pub provider: String,
-    pub model: String,
-    pub id: String,
-    pub prompt: u64,
-    pub cached: Option<u64>,
-    pub output: Option<u64>,
-    /// Request-scoped output throughput. Never populated from server averages
-    /// or the prefill phase; a completed record supplies its final average.
-    pub output_tps: Option<f64>,
-    pub completed: bool,
-    pub ttft_ms: Option<u64>,
-    pub observed_at: Option<SystemTime>,
-}
-
-impl RequestUsage {
-    pub fn summary(&self) -> String {
-        let mut text = format!(
-            "{} prompt {} · out {} · {} · {} · {}",
-            if self.completed {
-                "reported"
-            } else {
-                "observed"
-            },
-            self.prompt,
-            optional_tokens(self.output),
-            self.provider,
-            self.model,
-            self.id
-        );
-        if let Some(cached) = self.cached {
-            text.push_str(&format!(" · cached {cached}"));
-        }
-        if let Some(speed) = self.output_tps {
-            text.push_str(&format!(
-                " · output {speed:.1} tok/s ({})",
-                if self.completed {
-                    "request avg"
-                } else {
-                    "sampled"
-                }
-            ));
-        }
-        if let Some(ttft) = self.ttft_ms {
-            text.push_str(&format!(" · first token {ttft} ms (reported)"));
-        }
-        text
-    }
-}
 
 pub(super) fn new_request_summary(
     seen: &mut VecDeque<(String, u64)>,
@@ -309,6 +268,8 @@ pub(super) struct Adapter {
     kobold_session: u64,
     endpoint: native::Endpoint,
     metrics: native::MetricsHistory,
+    diagnostics: RefCell<RuntimeReport>,
+    config_error: Option<ProbeIssue>,
 }
 
 impl Adapter {
@@ -328,6 +289,14 @@ impl Adapter {
             kobold_session: 0,
             endpoint: native::Endpoint::from_env(),
             metrics: native::MetricsHistory::default(),
+            diagnostics: RefCell::default(),
+            config_error: env::var("MLXTOP_PROVIDER_PORT").ok().and_then(|s| {
+                if s.parse::<u16>().is_ok_and(|p| p > 0) {
+                    None
+                } else {
+                    Some(ProbeIssue::InvalidPort)
+                }
+            }),
         }
     }
 
@@ -339,6 +308,7 @@ impl Adapter {
             .map(|s| canonical_provider(s).unwrap_or("unsupported").to_owned());
         if selected != self.selected {
             self.selected = selected;
+            *self.diagnostics.borrow_mut() = RuntimeReport::default();
             self.cached = None;
             self.next_poll = Instant::now();
             self.backoff = Duration::from_secs(1);
@@ -349,41 +319,90 @@ impl Adapter {
         self.usage_file.is_some() || self.selected.as_deref().is_some_and(|s| s != "oMLX")
     }
 
+    pub(crate) fn report(&self) -> RuntimeReport {
+        self.diagnostics.borrow().clone()
+    }
+
+    pub(crate) fn explicitly_selected(&self) -> bool {
+        self.configured.is_some()
+    }
+
     pub fn provider(&self) -> Option<&str> {
         self.selected.as_deref()
     }
 
     pub fn poll(&mut self) -> Option<LlmTelemetry> {
+        // Preserve recorder-only collection without claiming that an API was
+        // contacted, or treating the intentionally absent API as a failure.
+        if self.usage_file.is_some()
+            && self.config_error.is_none()
+            && matches!(self.selected.as_deref(), None | Some("oMLX"))
+        {
+            *self.diagnostics.borrow_mut() = RuntimeReport {
+                provider: self.selected.clone(),
+                selection: "MLXTOP_USAGE_FILE (recorder only)",
+                recorder_only: true,
+                ..RuntimeReport::default()
+            };
+            return self.with_usage();
+        }
         let now = Instant::now();
         if now < self.next_poll {
             return self.with_usage();
         }
-        let result = match self.selected.as_deref() {
-            Some("KoboldCpp") => self.poll_kobold(),
-            Some("llama.cpp") => self.poll_llama(),
-            Some("vLLM" | "SGLang") => {
-                let provider = self.selected.as_deref().unwrap();
-                let port = if provider == "vLLM" { 8000 } else { 30000 };
-                let body = self.get(port, "/metrics");
-                body.and_then(|body| self.metrics.observe(provider, &body, now))
+        {
+            let mut report = self.diagnostics.borrow_mut();
+            report.provider = self.selected.clone();
+            report.selection = if self.configured.is_some() {
+                "MLXTOP_PROVIDER"
+            } else {
+                "process detection"
+            };
+            report.endpoint = self
+                .endpoint
+                .base_url(self.port.unwrap_or(default_port(self.selected.as_deref())))
+                .unwrap_or_else(|_| "<invalid endpoint>".into());
+            report.remote = self.endpoint.is_remote();
+            report.credentials_present = self.endpoint.api_key.is_some();
+            report.begin();
+        }
+        let config_error = self.config_error.clone().or_else(|| {
+            (self.selected.as_deref() == Some("unsupported")).then_some(ProbeIssue::InvalidProvider)
+        });
+        let result = if let Some(issue) = config_error {
+            self.diagnostics
+                .borrow_mut()
+                .record::<()>("configuration", Err(issue));
+            None
+        } else {
+            match self.selected.as_deref() {
+                Some("KoboldCpp") => self.poll_kobold(),
+                Some("llama.cpp") => self.poll_llama(),
+                Some("vLLM" | "SGLang") => {
+                    let provider = self.selected.as_deref().unwrap();
+                    let port = if provider == "vLLM" { 8000 } else { 30000 };
+                    let body = self.get(port, "/metrics");
+                    body.and_then(|body| self.metrics.observe(provider, &body, now))
+                }
+                Some("Ollama") => self
+                    .get_json(11434, "/api/ps")
+                    .and_then(|value| native::ollama(&value)),
+                Some("LM Studio") => self
+                    .get_json(1234, "/api/v1/models")
+                    .and_then(|value| native::lm_studio(&value))
+                    .or_else(|| {
+                        self.get_json(1234, "/api/v0/models")
+                            .and_then(|value| native::lm_studio_legacy(&value))
+                    })
+                    .or_else(|| self.poll_models("LM Studio", 1234)),
+                Some("mlx-lm") => self.poll_models("mlx-lm", 8080),
+                Some("LocalAI") => self.poll_models("LocalAI", 8080),
+                Some("Jan") => self.poll_models("Jan", 6767),
+                Some("GPT4All") => self.poll_models("GPT4All", 4891),
+                _ => None,
             }
-            Some("Ollama") => self
-                .get_json(11434, "/api/ps")
-                .and_then(|value| native::ollama(&value)),
-            Some("LM Studio") => self
-                .get_json(1234, "/api/v1/models")
-                .and_then(|value| native::lm_studio(&value))
-                .or_else(|| {
-                    self.get_json(1234, "/api/v0/models")
-                        .and_then(|value| native::lm_studio_legacy(&value))
-                })
-                .or_else(|| self.poll_models("LM Studio", 1234)),
-            Some("mlx-lm") => self.poll_models("mlx-lm", 8080),
-            Some("LocalAI") => self.poll_models("LocalAI", 8080),
-            Some("Jan") => self.poll_models("Jan", 6767),
-            Some("GPT4All") => self.poll_models("GPT4All", 4891),
-            _ => None,
         };
+        self.diagnostics.borrow_mut().finish(result.is_some());
         if let Some(mut result) = result {
             // A successful poll does not make KoboldCpp's last completion new.
             if result.provider.as_deref() == Some("KoboldCpp") {
@@ -414,6 +433,13 @@ impl Adapter {
             .usage_file
             .as_ref()
             .and_then(|path| read_usage_file(path, self.selected.as_deref()));
+        {
+            let mut report = self.diagnostics.borrow_mut();
+            report.usage_file(self.usage_file.as_deref(), reported.is_some());
+            if report.recorder_only && report.provider.is_none() {
+                report.provider = reported.as_ref().and_then(|usage| usage.provider.clone());
+            }
+        }
         match (self.cached.clone(), reported) {
             (Some(mut native), Some(reported)) if native.source == TelemetrySource::Live => {
                 // Completed prompt counts belong in request history. Never attach
@@ -426,11 +452,17 @@ impl Adapter {
     }
 
     fn get(&self, port: u16, path: &str) -> Option<String> {
-        self.endpoint.get(self.port.unwrap_or(port), path)
+        self.diagnostics
+            .borrow_mut()
+            .record(path, self.endpoint.get(self.port.unwrap_or(port), path))
     }
 
     fn get_json(&self, port: u16, path: &str) -> Option<Value> {
-        serde_json::from_str(&self.get(port, path)?).ok()
+        let body = self.get(port, path)?;
+        self.diagnostics.borrow_mut().record(
+            path,
+            serde_json::from_str(&body).map_err(|_| ProbeIssue::InvalidResponse),
+        )
     }
 
     fn poll_models(&self, provider: &str, port: u16) -> Option<LlmTelemetry> {

@@ -13,9 +13,22 @@ responds.
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
 
-**mlxtop 2.0.0** is the stable major release for Apple Silicon macOS and Linux
-(x86_64 and ARM64). [Download 2.0.0](https://github.com/maximpri/mlxtop/releases/tag/v2.0.0)
+**mlxtop 2.1.1** is the current stable release for Apple Silicon macOS and
+Linux (x86_64 and ARM64). [Download 2.1.1](https://github.com/maximpri/mlxtop/releases/tag/v2.1.1)
 or use the installer below.
+
+## What's new in 2.1
+
+- **Host resources first:** memory pressure with RAM composition (wired, app,
+  compressed, cache, free) and the GPU wired limit, a new macOS compression
+  chart and paging lead Overview; prompt load follows and throughput stays
+  compact. Panels share one aligned grid.
+- **A clear verdict:** the assessment says `Healthy · no bottleneck` when
+  nothing needs action and names the next check when something does. Press
+  `d`, or run `mlxtop doctor`, for evidence and runtime setup.
+- **Threshold colors everywhere:** every chart is graded green/yellow/red by
+  its configured thresholds; generation and prefill compare with their rolling
+  baseline. Charts, assessment and Journal agree.
 
 ## What's new in 2.0
 
@@ -73,7 +86,27 @@ Linux downloads are static binaries with no runtime dependencies. Then run:
 
 Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
-example `curl -fsSL … | MLXTOP_VERSION=2.0.0 sh`.
+example `curl -fsSL … | MLXTOP_VERSION=2.1.1 sh`.
+
+## Diagnose a connection or missing reading
+
+Press **`d`** in the dashboard to inspect the current assessment, the selected
+runtime and endpoint, authentication status, supported measurements, and setup
+instructions. The panel is read-only and uses the current samples. Overview also
+shows a compact assessment and a suggested check above the charts.
+
+For the same diagnostic information without a terminal UI:
+
+```sh
+mlxtop doctor
+MLXTOP_PROVIDER=ollama mlxtop doctor
+```
+
+`doctor` takes two samples using the configured interval. It returns exit code
+1 for invalid configuration, incomplete host counters, or a failed primary runtime
+connection. No detected runtime, missing optional metrics, and resource pressure
+are informational. The [diagnostics guide](docs/USER_GUIDE.md#diagnostics-and-runtime-setup)
+explains partial connections and client recording.
 
 ## Configuration
 
@@ -109,11 +142,11 @@ and anything you leave out keeps its built-in default.
 | `omx.port` | integer | 8080 | oMLX server port |
 | `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
 | `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
-| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "loaded" and shown in yellow |
-| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and considered in slowdown correlation; never an alarm by itself |
+| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "busy" and shown in yellow |
+| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; considered in slowdown correlation; never an alarm by itself |
 | `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
 | `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
-| `swap_critical_rate` | integer | 16 MiB/s | Swap churn that counts as thrashing |
+| `swap_critical_rate` | integer | 16 MiB/s | Swap rate that counts as thrashing (in and out); critical paging findings turn the paging chart red |
 | `swap_warn_exit` | integer | 2 MiB/s | Swap churn below which "PAGING ACTIVE" clears |
 | `compression_warn_rate` | integer | 64 MiB/s | Compression churn that raises "COMPRESSION ACTIVE" |
 | `compression_warn_exit` | integer | 32 MiB/s | Compression churn below which it clears |
@@ -205,6 +238,7 @@ an oMLX session. These numbers illustrate the display and aren’t benchmarks.
 | `{` / `}` | Change refresh interval |
 | `a` | Acknowledge a critical system alarm |
 | `[` / `]` | Select an NVIDIA GPU in Overview and reveal additional cards |
+| `d` | Open diagnostics and runtime setup guidance |
 | `?` | Show help |
 | `q` | Quit |
 
@@ -258,12 +292,16 @@ in the [provider guide](docs/USER_GUIDE.md#provider-endpoints).
 The dashboard monitors one selected server at a time. Native model catalogues
 cannot provide live generation speed; completed usage requires client integration.
 
-Overview uses flat charts with one border each. SYSINFO holds model/state and
-hardware details; generation, prefill, memory, GPU, paging, Cache and Queue
-have independent plots. SWAP usage is a horizontal capacity bar. Numeric axes
+Overview leads with host-critical resources: memory (pressure, composition of
+wired/app/compressed/cache/free RAM and the GPU wired limit), compression
+(macOS) and paging, then prompt load, then a compact throughput row. SYSINFO
+holds model/state and hardware details; every chart has one border and an
+independent plot. SWAP usage is a horizontal capacity bar. Numeric axes
 fit visible measurements in their actual units; only percentages use 0–100.
-GPU and paging retain their captured severity colors. RAM readings and history
-use cyan; the separate pressure label carries OS severity. Resident occupancy
+Every chart is graded green/yellow/red by its thresholds: memory by OS
+pressure, GPU, paging, compression and cache by configured bands, and
+generation and prefill against their rolling baseline. Captured colors are
+kept as history scrolls. Resident occupancy
 includes reclaimable file cache and does not establish a warning by itself.
 **Prompt load means prompt size in input tokens, including cached tokens.**
 The headline gives the selected request's exact size; each bar represents one

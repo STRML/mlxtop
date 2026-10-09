@@ -1,5 +1,5 @@
+use crate::test_support::*;
 // SPDX-License-Identifier: MIT
-use super::*;
 
 // Test-only constructors and helpers kept out of production files so the
 // coverage gate can exclude test code by filename alone.
@@ -70,10 +70,12 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
             cache_history: VecDeque::new(),
             load_history: VecDeque::new(),
             swap_history: VecDeque::new(),
+            compression_history: VecDeque::new(),
+            platform: Platform::MacOs,
             gpu_history: VecDeque::new(),
             signals: VecDeque::new(),
-            request_history: request_dashboard::History::default(),
-            operator_history: operator_charts::History::default(),
+            request_history: request_history::History::default(),
+            operator_history: operator_history::History::default(),
         },
         sampler: Sampler {
             commands,
@@ -93,6 +95,9 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         charts: chart_navigation::Navigation::default(),
         gpu_selected: 0,
         help: false,
+        diagnostics_open: false,
+        diagnostics_scroll: 0,
+        diagnostics_max_scroll: Default::default(),
         quit: false,
         sampler_disconnected: false,
         alert: None,
@@ -116,10 +121,12 @@ pub(super) fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
         cache_history: VecDeque::new(),
         load_history: VecDeque::new(),
         swap_history: VecDeque::new(),
+        compression_history: VecDeque::new(),
+        platform: Platform::MacOs,
         gpu_history: VecDeque::new(),
         signals: VecDeque::new(),
-        request_history: request_dashboard::History::default(),
-        operator_history: operator_charts::History::default(),
+        request_history: request_history::History::default(),
+        operator_history: operator_history::History::default(),
     }
 }
 
@@ -130,6 +137,21 @@ pub(super) fn render_app(app: &App, width: u16, height: u16) -> String {
 pub(super) fn populate_dashboard_fixture(app: &mut App) {
     let now = SystemTime::now();
     app.collector.current = Sample {
+        runtime: crate::runtime_diagnostics::RuntimeReport {
+            provider: Some("oMLX".into()),
+            selection: "process detection",
+            endpoint: "http://127.0.0.1:8080".into(),
+            credentials_present: true,
+            connected: true,
+            attempted_at: Some(now),
+            succeeded_at: Some(now),
+            ..Default::default()
+        },
+        impact: "LLM READY".into(),
+        correlation: CorrelationInsight {
+            direction: ThroughputDirection::Flat,
+            ..Default::default()
+        },
         total_memory: 36 * 1024 * MIB,
         availability: Some(93),
         resident_memory: Some((36 * 1024 * MIB * 57).div_ceil(100)),
@@ -142,6 +164,13 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
         swap_total: 2 * 1024 * MIB,
         swap_used: 1100 * MIB,
         swap_in: 4096,
+        wired: 3277 * MIB,
+        anonymous: 12_698 * MIB,
+        compressor: 1638 * MIB,
+        compressed_logical: 4710 * MIB,
+        file_backed: 3380 * MIB,
+        compress: 3 * MIB,
+        decompress: 3 * MIB / 2,
         gpu_util: Some(95),
         gpu_in_use: Some(18 * 1024 * MIB),
         llm_provider: "oMLX".into(),
@@ -201,6 +230,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
     app.collector.current.metal.gpu_cores = Some(32);
     app.collector.current.thermal = "no warning".into();
     app.collector.current.gpu_alloc = Some(24 * 1024 * MIB);
+    app.collector.current.mlx.recommended_working_set = Some(27 * 1024 * MIB);
     for index in 0..100 {
         for (history, metric, value) in [
             (
@@ -233,15 +263,21 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
                 ChartMetric::Cache,
                 55 + index % 15,
             ),
+            (
+                &mut app.collector.compression_history,
+                ChartMetric::Compression,
+                (index % 6 + 1) * 768 * 1024,
+            ),
         ] {
-            let mut point = ChartPoint::new(
-                Some(value),
-                if metric == ChartMetric::Memory {
-                    app.collector.current.pressure_tone
-                } else {
-                    metric.tone(value, defaults())
-                },
-            );
+            // Grade exactly as the collector does, including rolling baselines.
+            let tone = match metric {
+                ChartMetric::Memory => app.collector.current.pressure_tone,
+                // Generation follows the slowdown finding (flat here).
+                ChartMetric::Generation => Tone::Green,
+                ChartMetric::Prefill => crate::history::baseline_tone(value, history),
+                _ => metric.tone(value, defaults()),
+            };
+            let mut point = ChartPoint::new(Some(value), tone);
             point.observed_at = now - Duration::from_secs(119 - index);
             history.push_back(point);
         }
@@ -251,13 +287,15 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
         }
         app.collector.operator_history.observe(&historical, 120);
     }
-    *app.collector.generation_history.back_mut().unwrap() = ChartPoint::new(Some(355), Tone::Cyan);
+    *app.collector.generation_history.back_mut().unwrap() = ChartPoint::new(Some(355), Tone::Green);
     *app.collector.prefill_history.back_mut().unwrap() = ChartPoint::new(None, Tone::Muted);
     *app.collector.gpu_history.back_mut().unwrap() = ChartPoint::new(Some(95), Tone::Red);
     *app.collector.load_history.back_mut().unwrap() = ChartPoint::new(Some(57), Tone::Green);
     *app.collector.swap_history.back_mut().unwrap() = ChartPoint::new(Some(4096), Tone::Green);
+    *app.collector.compression_history.back_mut().unwrap() =
+        ChartPoint::new(Some(9 * MIB / 2), Tone::Green);
     for (index, prompt) in [500, 729, 837, 12000, 20000, 32768].into_iter().enumerate() {
-        let request = providers::RequestUsage {
+        let request = domain::RequestUsage {
             provider: "oMLX".into(),
             model: "Qwen3.8-27B-oQ4e-mtp".into(),
             id: format!("preview-{index}"),
@@ -300,10 +338,10 @@ pub(super) fn populate_single_idle_fixture(app: &mut App) {
     sample.gpu_util = Some(0);
     sample.swap_in = 0;
     sample.swap_out = 0;
-    app.collector.request_history = request_dashboard::History::default();
+    app.collector.request_history = request_history::History::default();
     app.collector
         .request_history
-        .observe(&[providers::RequestUsage {
+        .observe(&[domain::RequestUsage {
             provider: sample.llm_provider.clone(),
             model: sample.llm_model.clone(),
             id: "single-idle-preview".into(),
@@ -315,7 +353,7 @@ pub(super) fn populate_single_idle_fixture(app: &mut App) {
             output_tps: Some(40.0),
             observed_at: Some(now - Duration::from_secs(25)),
         }]);
-    app.collector.operator_history = operator_charts::History::default();
+    app.collector.operator_history = operator_history::History::default();
     for history in [
         &mut app.collector.generation_history,
         &mut app.collector.prefill_history,
@@ -377,7 +415,10 @@ fn flat_panels_keep_units_and_explain_a_zoomed_gap() {
         assert!(screen.contains("SYSINFO"));
         assert!(screen.contains("Apple M4 Max"));
         assert!(screen.contains("THERMAL no warning"));
-        assert!(!screen.contains("throughput"));
+        assert!(
+            !screen.contains("┌ throughput"),
+            "no extra throughput panel"
+        );
         assert!(!screen.contains("memory · system / process"));
         let regions = app.charts.regions.borrow().clone();
         for chart in [Chart::Generation, Chart::Prefill] {
@@ -426,7 +467,7 @@ fn flat_panels_keep_units_and_explain_a_zoomed_gap() {
             ChartMetric::Generation,
         )
     });
-    assert!(gap.contains("No samples in view"));
+    assert!(gap.contains("No samples in this window"));
 }
 
 #[test]
@@ -457,22 +498,31 @@ fn memory_chart_colors_follow_pressure_even_with_high_cache_occupancy() {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let headline: String = (0..51).map(|x| buffer[(x, 0)].symbol()).collect();
+        let reading: String = (0..51).map(|x| buffer[(x, 1)].symbol()).collect();
         let footer: String = (0..51).map(|x| buffer[(x, 12)].symbol()).collect();
-        assert!(headline.contains(&format!("{resident}% resident")));
-        assert!(footer.contains(&format!("PRESSURE {label}")));
-        assert_eq!(buffer[(2, 12)].fg, tone.color());
+        // Pressure is the verdict in the reading slot; occupancy supports it.
+        let pressure = format!("PRESSURE {label}");
+        assert!(headline.contains(&pressure), "{headline}");
+        let at = headline.find(&pressure).unwrap();
+        let column = headline[..at].chars().count() as u16;
+        assert_eq!(buffer[(column, 0)].fg, tone.color());
+        let resident_label = format!("{resident}% resident");
+        assert!(reading.contains(&resident_label), "{reading}");
+        let at = reading.find(&resident_label).unwrap();
         assert_eq!(
-            buffer[(44, 0)].fg,
+            buffer[(reading[..at].chars().count() as u16, 1)].fg,
             CYAN,
             "resident percentage is occupancy; pressure has a separate severity label"
         );
+        assert!(footer.contains("Includes file cache"));
         let sample_cells: Vec<_> = buffer
             .content
             .iter()
             .filter(|cell| cell.symbol() == "●")
             .collect();
         assert!(!sample_cells.is_empty());
-        assert!(sample_cells.iter().all(|cell| cell.fg == CYAN));
+        // The occupancy trace is graded by the captured pressure state.
+        assert!(sample_cells.iter().all(|cell| cell.fg == tone.color()));
         let mut compact = Terminal::new(ratatui::backend::TestBackend::new(40, 4)).unwrap();
         compact
             .draw(|frame| {
@@ -485,12 +535,10 @@ fn memory_chart_colors_follow_pressure_even_with_high_cache_occupancy() {
                 )
             })
             .unwrap();
-        assert!(compact
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .any(|cell| cell.fg == CYAN && cell.symbol().contains('█')));
+        let top: String = (0..40)
+            .map(|x| compact.backend().buffer()[(x, 0)].symbol())
+            .collect();
+        assert!(top.contains(&pressure), "{top}");
     }
 }
 
@@ -548,16 +596,36 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
     for (metric, history, label) in [
-        (ChartMetric::Memory, &app.collector.load_history, "57%"),
+        (
+            ChartMetric::Memory,
+            &app.collector.load_history,
+            "57% resident",
+        ),
         (ChartMetric::Gpu, &app.collector.gpu_history, "95%"),
     ] {
         let screen = render_view(40, 4, |frame| {
             app.render_indicator_chart(frame, frame.area(), "metric", history, metric)
         });
-        assert!(screen.contains(label));
-        assert!(screen.contains("Enter: history"));
+        assert!(screen.contains(label), "{screen}");
         assert!(!screen.contains("100"));
+        if metric == ChartMetric::Gpu {
+            assert!(screen.contains("Enter: history"));
+        }
     }
+    // Memory keeps its exact reading with the bar instead of a flat 3-row trace.
+    let screen = render_view(40, 5, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "memory",
+            &app.collector.load_history,
+            ChartMetric::Memory,
+        )
+    });
+    for label in ["20.5 GiB / 36.0 GiB", "57% resident", "wired 3.2 GiB"] {
+        assert!(screen.contains(label), "missing {label}\n{screen}");
+    }
+    assert!(!screen.contains("50%"), "no percentage axis\n{screen}");
     let screen = render_view(40, 4, |frame| {
         app.render_indicator_chart(
             frame,
@@ -580,7 +648,19 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
         )
     });
     assert!(screen.contains("TOTAL 61.9%"));
-    assert!(screen.contains("No interval cache data"));
+    assert!(screen.contains("No cache samples yet"));
+    // Narrow panels keep the whole message rather than clipping "yet".
+    let narrow = render_view(20, 8, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "cache",
+            &app.collector.cache_history,
+            ChartMetric::Cache,
+        )
+    });
+    assert!(narrow.contains("No cache samples"), "{narrow}");
+    assert!(!narrow.contains("samples y"), "{narrow}");
 }
 
 #[test]
@@ -619,7 +699,7 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
             ChartMetric::Prefill,
             "prefill",
             None,
-            vec!["Idle · no live rate samples", "tok/s · auto"],
+            vec!["Idle · no rate samples yet", "tok/s · auto"],
         ),
     ] {
         let mut point = ChartPoint::new(last, Tone::Cyan);
@@ -660,7 +740,7 @@ fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
                 "missing {label} at {width}×{height}\n{screen}"
             );
         }
-        assert_eq!(screen.matches("generation").count(), 1);
+        assert_eq!(screen.matches("┌ generation").count(), 1);
         assert!(!screen.contains("cache / queue"));
         let regions = app.charts.regions.borrow();
         let cache = regions
@@ -673,9 +753,10 @@ fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
             .find(|(chart, _)| *chart == Chart::Queue)
             .unwrap()
             .1;
-        assert_eq!(cache.y, queue.y);
-        assert!(cache.right() <= queue.x);
-        assert_eq!(cache.height, queue.height);
+        // Cache and queue stack in the grid's third column.
+        assert_eq!(cache.x, queue.x);
+        assert_eq!(cache.width, queue.width);
+        assert!(cache.bottom() <= queue.y);
         assert!(screen.contains("active 1"));
         assert!(screen.contains("waiting 0"));
         assert!(!screen.contains("DIAGNOSIS"));
@@ -687,6 +768,7 @@ fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
         (75, Tone::Yellow),
         (89, Tone::Yellow),
         (90, Tone::Red),
+        (100, Tone::Red),
     ] {
         assert_eq!(ChartMetric::Gpu.tone(value, defaults()), tone);
     }
@@ -721,6 +803,25 @@ fn dashboard_terminal_preview() {
     let (mut app, _views) = test_app_with_sender(0);
     populate_dashboard_fixture(&mut app);
     let preview_state = env::var("MLXTOP_PREVIEW_STATE").unwrap_or_default();
+    if preview_state == "nvidia" {
+        app = nvidia_app(4);
+    }
+    if preview_state == "diagnostics" {
+        app.diagnostics_open = true;
+    }
+    if preview_state == "critical" {
+        app.collector.current.pressure = "RED".into();
+        app.collector.current.pressure_tone = Tone::Red;
+    }
+    if preview_state == "alert" {
+        app.collector.current.pressure = "RED".into();
+        app.collector.current.pressure_tone = Tone::Red;
+        app.alert = Some(ActiveAlert {
+            state: "MEMORY BOTTLENECK".into(),
+            summary: "Critical memory pressure · paging 18.0 MiB/s".into(),
+            time: "16:30:52".into(),
+        });
+    }
     if preview_state == "single-idle" {
         populate_single_idle_fixture(&mut app);
     }
@@ -741,7 +842,7 @@ fn dashboard_terminal_preview() {
             .prefill_history
             .push_back(ChartPoint::new(None, Tone::Muted));
         if preview_state == "empty" {
-            app.collector.request_history = request_dashboard::History::default();
+            app.collector.request_history = request_history::History::default();
         }
     }
     app.collector.signals = [
@@ -827,6 +928,8 @@ fn dashboard_terminal_preview() {
             });
         }
     }
+    // Previews show local clocks like a sampled host, where `date` reports the zone.
+    app.collector.current.utc_offset = Some(0);
     enable_raw_mode().unwrap();
     let _guard = TerminalGuard::new();
     let mut output = stdout();
@@ -951,7 +1054,7 @@ fn paging_distinguishes_zero_traffic_from_missing_and_past_activity() {
     assert!(past_activity.contains("KiB/s"));
     history = VecDeque::from([ChartPoint::new(None, Tone::Muted)]);
     let missing = draw(&history);
-    assert!(missing.contains("No samples available"));
+    assert!(missing.contains("No samples yet"));
     assert!(!missing.contains("No paging traffic"));
     history.push_back(ChartPoint::new(Some(1), Tone::Green));
     assert!(!draw(&history).contains("No paging traffic"));
@@ -1038,6 +1141,10 @@ fn chart_colors_follow_load_thresholds() {
         ChartMetric::Swap.tone(16 * 1024 * 1024, defaults()),
         Tone::Red
     );
+    assert_eq!(
+        crate::history::paging_tone(32 * MIB, "SWAP THRASHING", defaults()),
+        Tone::Red
+    );
 }
 
 #[test]
@@ -1063,7 +1170,7 @@ fn user_facing_load_labels_describe_conditions_not_colors() {
     };
     assert_eq!(pressure_state_label(&sample), "critical");
     assert_eq!(gpu_load_label(Some(40), defaults()), "within target");
-    assert_eq!(gpu_load_label(Some(80), defaults()), "loaded");
+    assert_eq!(gpu_load_label(Some(80), defaults()), "busy");
     assert_eq!(gpu_load_label(Some(95), defaults()), "saturated");
     assert_eq!(gpu_load_label(None, defaults()), "unavailable");
 }
@@ -1345,7 +1452,15 @@ fn critical_memory_alarm_survives_missing_counters_and_acknowledgment() {
 fn tab_switches_views_and_arrows_stay_contextual() {
     let mut app = test_app(0);
     render_app(&app, 180, 50);
+    // Host resources sit above prompt load; throughput sits below it.
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.charts.focused, Chart::Memory);
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(app.charts.focused, Chart::Compression);
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.charts.focused, Chart::Prompt);
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.tab, 0);
     assert_eq!(app.charts.focused, Chart::Generation);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1385,7 +1500,10 @@ fn process_details_follow_selection_and_keep_runtime_scoped() {
                 "missing {label} at {width}x{height}\n{screen}"
             );
         }
-        assert!(!screen.contains("throughput"));
+        assert!(
+            !screen.contains("┌ throughput"),
+            "no extra throughput panel"
+        );
         assert!(!screen.contains("SYSINFO"));
     }
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -1412,7 +1530,7 @@ fn chart_controls_focus_zoom_and_expand_without_changing_sampling() {
     let mut app = test_app(0);
     render_app(&app, 180, 50);
     let original_interval = app.interval;
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     assert_eq!(app.charts.focused, Chart::Generation);
     app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
     assert_eq!(app.charts.zoom(Chart::Generation), 2);
@@ -1650,7 +1768,7 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
         .into_iter()
         .enumerate()
     {
-        app.collector.current.llm_requests = vec![providers::RequestUsage {
+        app.collector.current.llm_requests = vec![domain::RequestUsage {
             provider: "oMLX".into(),
             model: "test".into(),
             id: i.to_string(),
@@ -1735,7 +1853,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
     for (i, prompt) in [12000, 20000, 32768].into_iter().enumerate() {
         app.collector
             .request_history
-            .observe(&[providers::RequestUsage {
+            .observe(&[domain::RequestUsage {
                 provider: "oMLX".into(),
                 model: "test-model".into(),
                 id: format!("req-{i}"),
@@ -1783,28 +1901,57 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
 fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
     let mut app = test_app(0);
     for (width, height) in [(80, 24), (100, 40), (170, 42), (180, 50)] {
-        app.collector.request_history = request_dashboard::History::default();
+        app.collector.request_history = request_history::History::default();
         render_app(&app, width, height);
         let empty_regions = app.charts.regions.borrow().clone();
         let region = |chart| empty_regions.iter().find(|(id, _)| *id == chart).unwrap().1;
-        assert!((7..=13).contains(&region(Chart::Prompt).height));
+        assert!((7..=17).contains(&region(Chart::Prompt).height));
+        assert!(
+            region(Chart::Generation).height <= 7,
+            "throughput stays a compact row at {width}x{height}"
+        );
+        assert!(
+            region(Chart::Memory).height > region(Chart::Generation).height,
+            "host resources outrank throughput at {width}x{height}"
+        );
         assert_eq!(region(Chart::Generation).y, region(Chart::Prefill).y);
         assert_eq!(
             region(Chart::Generation).height,
             region(Chart::Prefill).height
         );
         assert!(region(Chart::Generation).right() <= region(Chart::Prefill).x);
-        assert!(region(Chart::Generation).bottom() <= region(Chart::Prompt).y);
+        assert!(region(Chart::Prompt).bottom() <= region(Chart::Generation).y);
         assert_eq!(region(Chart::Prompt).y, region(Chart::Cache).y);
-        assert_eq!(region(Chart::Cache).y, region(Chart::Queue).y);
-        for chart in [Chart::Memory, Chart::Paging] {
-            assert!(region(chart).bottom() <= region(Chart::Generation).y);
-            assert!(region(chart).height <= 8);
+        assert_eq!(
+            region(Chart::Queue).bottom(),
+            region(Chart::Prompt).bottom()
+        );
+        // One column grid: every row's edges line up.
+        assert_eq!(
+            region(Chart::Memory).right(),
+            region(Chart::Generation).right()
+        );
+        assert_eq!(
+            region(Chart::Compression).right(),
+            region(Chart::Prompt).right()
+        );
+        assert_eq!(region(Chart::Paging).x, region(Chart::Cache).x);
+        assert_eq!(region(Chart::Paging).x, region(Chart::Gpu).x);
+        for chart in [Chart::Memory, Chart::Compression, Chart::Paging] {
+            assert_eq!(region(chart).y, region(Chart::Memory).y);
+            assert!(region(chart).bottom() <= region(Chart::Prompt).y);
+            assert!(region(chart).height >= 6);
         }
         assert_eq!(region(Chart::Generation).y, region(Chart::Gpu).y);
-        assert!(region(Chart::Generation).width > region(Chart::Prefill).width);
+        assert!(
+            region(Chart::Generation)
+                .width
+                .abs_diff(region(Chart::Prefill).width)
+                <= 1
+        );
         if height >= 40 {
-            assert!(region(Chart::Prefill).height >= 8);
+            assert!(region(Chart::Memory).height >= 12);
+            assert!(region(Chart::Prefill).height >= 7);
             assert!(region(Chart::Prompt).height >= 9);
         }
         populate_dashboard_fixture(&mut app);
@@ -1848,7 +1995,7 @@ fn prompt_counts_are_visible_and_request_events_use_the_llm_filter() {
 }
 
 #[test]
-fn overview_journal_retains_five_recent_events_at_screenshot_size() {
+fn overview_journal_retains_three_recent_events_at_screenshot_size() {
     let mut app = test_app(0);
     for index in 0..12 {
         app.collector.signals.push_back(SignalEvent {
@@ -1861,16 +2008,16 @@ fn overview_journal_retains_five_recent_events_at_screenshot_size() {
         });
     }
     let screen = render_app(&app, 170, 42);
-    for index in 7..12 {
+    for index in 9..12 {
         assert!(screen.contains(&format!("Event {index:02}")), "{screen}");
     }
-    assert!(!screen.contains("Event 06"), "capacity is five event rows");
-    assert!(screen.find("Event 11") < screen.find("Event 07"));
-    assert!(screen.contains("3 open"));
+    assert!(!screen.contains("Event 08"), "capacity is three event rows");
+    assert!(screen.find("Event 11") < screen.find("Event 09"));
+    assert!(screen.contains("3 full journal"));
     let compact = render_app(&app, 80, 24);
     assert!(
-        compact.contains("Event 11"),
-        "compact Overview retains the latest event"
+        !compact.contains("Event 11"),
+        "compact Overview uses the journal preview space for the assessment"
     );
     assert!(compact.contains("? help q quit"));
 }
@@ -1966,12 +2113,7 @@ fn overview_remains_useful_at_a_classic_eighty_column_size() {
 #[test]
 fn process_table_adapts_to_medium_terminals() {
     let rendered = render_app(&test_app(1), 100, 40);
-    for label in [
-        "PROCESS MONITOR",
-        "SELECTED PROCESS",
-        "PAGEIN/s",
-        "OS STATE",
-    ] {
+    for label in ["MLX TOP", "SELECTED PROCESS", "PAGEIN/s", "OS STATE"] {
         assert!(rendered.contains(label), "missing process label: {label}");
     }
     assert!(!rendered.contains("MEM%"));
@@ -3238,9 +3380,9 @@ fn configured_gpu_thresholds_change_the_reported_load_label() {
         .expect("valid json should parse");
     let thresholds = Thresholds::from_config(&config);
 
-    assert_eq!(gpu_load_label(Some(80), defaults()), "loaded");
+    assert_eq!(gpu_load_label(Some(80), defaults()), "busy");
     assert_eq!(gpu_load_label(Some(80), thresholds), "within target");
-    assert_eq!(gpu_load_label(Some(90), thresholds), "loaded");
+    assert_eq!(gpu_load_label(Some(90), thresholds), "busy");
     assert_eq!(gpu_load_label(Some(96), thresholds), "saturated");
 }
 
@@ -3593,7 +3735,14 @@ fn every_threshold_field_changes_an_observable_result() {
         Probe {
             field: "swap_critical_rate",
             config: r#"{"swap_critical_rate":33554432}"#,
-            observe: |thresholds| tone_name(ChartMetric::Swap.tone(16 * MIB, thresholds)),
+            // Critical paging is a finding (both directions at the rate); the
+            // paging chart's red follows that finding.
+            observe: |thresholds| {
+                impact_after_classify(thresholds, None, |sample| {
+                    sample.swap_in = 16 * MIB;
+                    sample.swap_out = 16 * MIB;
+                })
+            },
         },
         Probe {
             field: "swap_warn_exit",
@@ -3765,7 +3914,7 @@ fn cache_never_replaces_missing_interval_samples_with_cumulative_gauge() {
             "interval —"
         }));
         if missing == 80 {
-            assert!(text.contains("No samples in view"));
+            assert!(text.contains("No samples in this window"));
         }
     }
 }
@@ -3915,4 +4064,261 @@ fn provider_capacity_details_appear_in_top_without_becoming_prompt_counts() {
     let text = render_app(&app, 120, 30);
     assert!(text.contains("context capacity 8192 tokens"));
     assert_eq!(app.collector.current.llm_prompt_tokens, None);
+}
+
+#[test]
+fn overview_review_fixes_keep_one_reading_per_fact_and_identity_during_alarms() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+
+    // The live request speed equals the generation headline, so it appears once;
+    // a different per-request speed (concurrency) is still shown.
+    let screen = render_app(&app, 120, 40);
+    assert_eq!(screen.matches("LIVE 35.5 tok/s").count(), 1, "{screen}");
+    assert!(screen.contains("Healthy · no bottleneck"), "{screen}");
+    assert!(screen.contains("PRESSURE normal"));
+    app.collector.current.llm_generation_tps = Some(50.0);
+    assert!(render_app(&app, 120, 40).contains("OUT 1,200 · LIVE 35.5 tok/s"));
+    app.collector.current.llm_generation_tps = Some(35.5);
+
+    // Full view names fit at the minimum width; narrow charts keep units.
+    let narrow = render_app(&app, 80, 24);
+    for label in [
+        "1 Overview",
+        "3 Journal",
+        "35.5 tok/s",
+        "decoding",
+        "20.5/36.0 GiB · 57%",
+    ] {
+        assert!(narrow.contains(label), "missing {label}\n{narrow}");
+    }
+    assert!(!narrow.contains("int 64%"));
+
+    // Tall terminals give surplus rows to requests, not throughput.
+    render_app(&app, 220, 56);
+    let regions = app.charts.regions.borrow().clone();
+    let height = |chart| {
+        regions
+            .iter()
+            .find(|(id, _)| *id == chart)
+            .unwrap()
+            .1
+            .height
+    };
+    // Tall terminals spend extra rows on host resources, not sparse panels.
+    assert!(height(Chart::Generation) <= 10);
+    assert!(height(Chart::Prompt) <= 14);
+    assert!(height(Chart::Memory) > height(Chart::Prompt));
+
+    // An alarm replaces the assessment rows, never SYSINFO's identity and age.
+    app.alert = Some(ActiveAlert {
+        state: "MEMORY BOTTLENECK".into(),
+        summary: "Critical memory pressure".into(),
+        time: "16:30:52".into(),
+    });
+    let alarm = render_app(&app, 120, 40);
+    for label in [
+        "SYSINFO",
+        "Qwen3.8-27B-oQ4e-mtp",
+        "LIVE · ",
+        "⚠ MEMORY BOTTLENECK",
+        "a acknowledge",
+    ] {
+        assert!(alarm.contains(label), "missing {label}\n{alarm}");
+    }
+    assert!(!alarm.contains("Healthy"));
+    app.diagnostics_open = true;
+    assert!(render_app(&app, 120, 40).contains("a acknowledge"));
+    app.diagnostics_open = false;
+    app.tab = 1;
+    assert!(render_app(&app, 120, 40).contains("⚠ MEMORY BOTTLENECK"));
+    app.tab = 0;
+    app.alert = None;
+
+    // Compact paging uses the assessment's warning threshold for "active".
+    for (rate, label) in [
+        (4_096, "Light paging · below warning"),
+        (2 * 1024 * 1024, "Watch paging"),
+        (4 * 1024 * 1024, "Paging active"),
+    ] {
+        let mut history = VecDeque::new();
+        push_history_with_tone(&mut history, Some(rate), Tone::Green, 10);
+        let screen = render_view(40, 5, |frame| {
+            app.render_indicator_chart(frame, frame.area(), "paging", &history, ChartMetric::Swap)
+        });
+        assert!(screen.contains(label), "missing {label}\n{screen}");
+    }
+}
+
+#[test]
+fn host_row_leads_with_memory_compression_and_paging_on_macos_only() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    let screen = render_app(&app, 120, 40);
+    for label in [
+        "PRESSURE normal",
+        "wired 3.2 GiB",
+        "4.6 GiB stored in 1.6 GiB · 2.9× ratio",
+        "COMP 3.0 MiB/s · DECOMP 1.5 MiB/s",
+        "1.6/36.0 GiB 4%",
+    ] {
+        assert!(screen.contains(label), "missing {label}\n{screen}");
+    }
+    let regions = app.charts.regions.borrow().clone();
+    let region = |chart| regions.iter().find(|(id, _)| *id == chart).map(|r| r.1);
+    let memory = region(Chart::Memory).unwrap();
+    let compression = region(Chart::Compression).unwrap();
+    assert_eq!(memory.y, compression.y);
+    assert!(memory.bottom() <= region(Chart::Prompt).unwrap().y);
+    // Expanding compression keeps its own history and readings.
+    app.charts.focused = Chart::Compression;
+    app.charts.expanded = true;
+    assert!(render_app(&app, 120, 40).contains("compression"));
+    app.charts.expanded = false;
+
+    // Linux exposes no compressor counters: no empty compression panel.
+    app.collector.platform = Platform::Linux;
+    render_app(&app, 120, 40);
+    let regions = app.charts.regions.borrow().clone();
+    assert!(regions
+        .iter()
+        .all(|(chart, _)| *chart != Chart::Compression));
+    let memory = regions.iter().find(|(c, _)| *c == Chart::Memory).unwrap().1;
+    assert_eq!(
+        memory.width, 80,
+        "memory spans two grid columns beside paging"
+    );
+}
+
+#[test]
+fn chart_colors_agree_with_the_assessment_at_every_threshold() {
+    use crate::history::{compression_tone, paging_tone};
+    let t = defaults();
+    let host = Sample {
+        rate_ready: true,
+        vm_available: true,
+        swap_available: true,
+        total_memory: 32 * 1024 * MIB,
+        availability: Some(50),
+        pressure: "GREEN".into(),
+        pressure_meaning: "normal".into(),
+        gpu_util: Some(0),
+        ..Sample::default()
+    };
+    let classified = |edit: &dyn Fn(&mut Sample), previous: Option<&Sample>| {
+        let mut sample = host.clone();
+        edit(&mut sample);
+        crate::analysis::classify(&mut sample, previous, t);
+        sample
+    };
+    // Paging: the chart's color never outranks the finding, and red appears
+    // exactly with a critical paging finding.
+    for (swap_in, swap_out, chart, impact) in [
+        (0, 0, Tone::Green, "IDLE"),
+        (512 * 1024, 0, Tone::Green, "IDLE"),
+        (MIB, 0, Tone::Yellow, "WATCH PAGING"),
+        (4 * MIB, 0, Tone::Yellow, "PAGING ACTIVE"),
+        (15 * MIB, 0, Tone::Yellow, "PAGING ACTIVE"),
+        (20 * MIB, 0, Tone::Red, "PAGING ACTIVE"),
+        (16 * MIB, 16 * MIB, Tone::Red, "SWAP THRASHING"),
+        (0, 32 * MIB, Tone::Red, "HEAVY PAGING"),
+        (40 * MIB, 0, Tone::Red, "PAGE-IN RECOVERY"),
+    ] {
+        let sample = classified(
+            &|s| {
+                s.swap_in = swap_in;
+                s.swap_out = swap_out;
+            },
+            None,
+        );
+        assert_eq!(sample.impact, impact, "{swap_in}/{swap_out}");
+        let tone = paging_tone(swap_in + swap_out, &sample.impact, t);
+        assert_eq!(tone, chart, "{swap_in}/{swap_out}");
+        if impact != "IDLE" {
+            assert_eq!(
+                tone, sample.impact_tone,
+                "chart and finding agree for {impact}"
+            );
+        }
+    }
+    // Compression: the chart keeps the finding's enter/exit hysteresis.
+    let mut previous: Option<Sample> = None;
+    let mut previous_tone = None;
+    for (rate, active) in [
+        (63 * MIB, false),
+        (64 * MIB, true),
+        (40 * MIB, true),
+        (32 * MIB, true),
+        (31 * MIB, false),
+        (40 * MIB, false),
+    ] {
+        let sample = classified(&|s| s.compress = rate, previous.as_ref());
+        let tone = compression_tone(rate, previous_tone, t);
+        assert_eq!(sample.impact == "COMPRESSION ACTIVE", active, "{rate}");
+        assert_eq!(
+            tone == Tone::Yellow,
+            active,
+            "chart follows the finding at {rate}"
+        );
+        previous = Some(sample);
+        previous_tone = Some(tone);
+    }
+    // GPU utilization uses its configured bands.
+    for (load, tone) in [
+        (74, Tone::Green),
+        (75, Tone::Yellow),
+        (89, Tone::Yellow),
+        (90, Tone::Red),
+    ] {
+        assert_eq!(ChartMetric::Gpu.tone(load, t), tone);
+    }
+}
+
+#[test]
+fn throughput_and_cache_charts_grade_against_their_thresholds() {
+    use crate::history::baseline_tone;
+    // Throughput (tenths of tok/s) is graded against the rolling median.
+    let mut history = VecDeque::new();
+    assert_eq!(baseline_tone(100, &history), Tone::Green, "no baseline yet");
+    for _ in 0..10 {
+        history.push_back(ChartPoint::new(Some(500), Tone::Green));
+    }
+    history.push_back(ChartPoint::new(None, Tone::Muted));
+    for (value, tone) in [
+        (520, Tone::Green),
+        (460, Tone::Green),  // −8%: within the slowdown band
+        (450, Tone::Yellow), // −10% and −5 tok/s
+        (351, Tone::Yellow),
+        (350, Tone::Red), // −30%
+        (0, Tone::Red),
+    ] {
+        assert_eq!(baseline_tone(value, &history), tone, "{value}");
+    }
+    // A 10% drop smaller than 2 tok/s is noise, not a slowdown.
+    let slow: VecDeque<_> = (0..5)
+        .map(|_| ChartPoint::new(Some(100), Tone::Green))
+        .collect();
+    assert_eq!(baseline_tone(85, &slow), Tone::Green);
+
+    // Generation follows the assessment: a 30% drop is red whatever its cause.
+    let mut insight = CorrelationInsight {
+        direction: ThroughputDirection::Down,
+        cause: CorrelationCause::GpuSaturation,
+        delta_percent: Some(-15.0),
+        ..CorrelationInsight::default()
+    };
+    assert_eq!(insight.tone(), Tone::Yellow);
+    insight.delta_percent = Some(-30.0);
+    assert_eq!(insight.tone(), Tone::Red);
+
+    // Cache reuse: green from 50%, yellow from 20%, red below.
+    for (value, tone) in [
+        (100, Tone::Green),
+        (50, Tone::Green),
+        (49, Tone::Yellow),
+        (20, Tone::Yellow),
+        (19, Tone::Red),
+    ] {
+        assert_eq!(ChartMetric::Cache.tone(value, defaults()), tone, "{value}");
+    }
 }
