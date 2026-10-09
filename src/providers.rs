@@ -474,7 +474,23 @@ impl Adapter {
     fn poll_mlx_serve(&mut self, now: Instant) -> Option<LlmTelemetry> {
         let body = self.get(MLX_SERVE_PORT, "/metrics")?;
         let mut result = self.metrics.observe("mlx-serve", &body, now)?;
-        if let Some(value) = self.get_json(MLX_SERVE_PORT, "/metrics.json") {
+        if self.metrics.sessions_known_missing() {
+            return Some(result);
+        }
+        let reply = self
+            .endpoint
+            .get(self.port.unwrap_or(MLX_SERVE_PORT), "/metrics.json");
+        if matches!(reply, Err(ProbeIssue::Http(404))) {
+            self.metrics.note_sessions_missing();
+        }
+        let mut diagnostics = self.diagnostics.borrow_mut();
+        let value = diagnostics.record("/metrics.json", reply).and_then(|body| {
+            diagnostics.record(
+                "/metrics.json",
+                serde_json::from_str(&body).map_err(|_| ProbeIssue::InvalidResponse),
+            )
+        });
+        if let Some(value) = value {
             native::apply_mlx_serve_sessions(&mut result, &value, SystemTime::now());
         }
         Some(result)

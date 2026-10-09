@@ -296,90 +296,97 @@ pub(super) fn metric_sum(text: &str, name: &str) -> Option<f64> {
     Metrics::parse(text).sum(name)
 }
 
-/// How far back the prefill rate looks while a prefill is in flight.
-const PREFILL_WINDOW: Duration = Duration::from_secs(10);
 /// How long the speed of a request that just finished stays shown once nothing is prefilling.
 const PREFILL_HOLD: Duration = Duration::from_secs(3);
 
-/// One poll of mlx-serve's prefill series.
-struct PrefillSample {
-    at: Instant,
-    /// Tokens the prefill in flight has forwarded so far; 0 when none is.
+/// The prefill in flight: where its gauge started, where it last advanced, and where it is now.
+struct PrefillRun {
+    start: (Instant, f64),
+    advanced: (Instant, f64),
     live: f64,
-    prefilling: bool,
-    /// Prompt tokens and prefill seconds of finished requests. Both move only when a request ends.
-    tokens: f64,
-    seconds: f64,
 }
 
 /// mlx-serve's prefill speed.
 #[derive(Default)]
 struct PrefillWindow {
-    samples: Vec<PrefillSample>,
+    run: Option<PrefillRun>,
+    polled: bool,
+    /// Prompt tokens and prefill seconds of finished requests. Both move only when a request ends.
+    finished: Option<(f64, f64)>,
+    /// When a prefill was last seen in flight.
+    last_prefilling: Option<Instant>,
+    /// Whether the previous poll saw nothing running.
+    was_idle: bool,
+    /// The latest measured speed and when it was taken.
+    last: Option<(f64, Instant)>,
 }
 
 impl PrefillWindow {
     /// Prefill tokens/s and whether it is live.
     ///
-    /// While a request is prefilling, divide the live gauge's growth over `PREFILL_WINDOW` by the time it
-    /// was prefilling: the gauge advances in chunks of thousands of tokens, so one second of it reads 0 or
-    /// twice the true speed. A prefill that starts and ends between two polls never moves the gauge. When
-    /// the finished-request counters (which move together, but only when a request ends) moved in the last
-    /// `PREFILL_HOLD`, report that request's speed as not live. Otherwise report a live 0.
+    /// The live gauge advances in chunks of thousands of tokens, so a fixed window reads 0 or twice the
+    /// true speed. Instead, while a prefill is in flight, divide its growth since the prefill was first
+    /// seen by the time from then to the gauge's latest advance: that reads the true speed between
+    /// chunks, and nothing until the first chunk lands. Once nothing is prefilling the last speed stays
+    /// shown, not live, for `PREFILL_HOLD`. A request that ends right after a prefill, or after an idle
+    /// poll, replaces it with its own speed from the finished-request counters; one that ends after a
+    /// long decode is not a prefill reading. Otherwise report a live 0.
     fn rate(&mut self, now: Instant, metrics: &Metrics) -> Option<(f64, bool)> {
-        let sample = PrefillSample {
-            at: now,
-            live: metrics.sum("mlx_serve:prefill_tokens_live")?,
-            prefilling: metrics
-                .sum("mlx_serve:requests_prefilling")
-                .is_some_and(|n| n > 0.0),
-            tokens: metrics.sum("mlx_serve:prefill_tokens_total")?,
-            seconds: metrics
-                .sum("vllm:request_prefill_time_seconds_sum")
-                .unwrap_or(0.0),
-        };
-        if self
-            .samples
-            .last()
-            .is_some_and(|last| sample.tokens < last.tokens || sample.seconds < last.seconds)
-        {
-            self.samples.clear(); // a restart reset the counters
+        let live = metrics.sum("mlx_serve:prefill_tokens_live")?;
+        // A server without the flag is prefilling whenever the gauge is above 0.
+        let prefilling = metrics
+            .sum("mlx_serve:requests_prefilling")
+            .map_or(live > 0.0, |n| n > 0.0);
+        let finished = metrics
+            .sum("mlx_serve:prefill_tokens_total")
+            .zip(metrics.sum("vllm:request_prefill_time_seconds_sum"));
+        let idle = !prefilling
+            && metrics
+                .sum("vllm:num_requests_running")
+                .is_some_and(|n| n == 0.0);
+        let was_idle = std::mem::replace(&mut self.was_idle, idle);
+        let polled = std::mem::replace(&mut self.polled, true);
+        let counters = std::mem::replace(&mut self.finished, finished);
+        if prefilling {
+            return self.in_flight(now, live);
         }
-        self.samples.push(sample);
-        let age = |s: &PrefillSample| now.saturating_duration_since(s.at);
-        self.samples.retain(|s| age(s) <= PREFILL_WINDOW);
-        let [.., last] = self.samples.as_slice() else {
-            return None;
-        };
-        if self.samples.len() < 2 {
-            return None;
-        }
-        let (mut grew, mut busy) = (0.0, 0.0);
-        for pair in self.samples.windows(2) {
-            let (a, b) = (&pair[0], &pair[1]);
-            // A drop is a prefill ending, not negative progress.
-            if b.live >= a.live {
-                grew += b.live - a.live;
-                if a.prefilling || b.prefilling {
-                    busy += b.at.saturating_duration_since(a.at).as_secs_f64();
-                }
+        self.run = None;
+        let held = |at: Instant| now.saturating_duration_since(at) <= PREFILL_HOLD;
+        if let Some(((tokens, seconds), (old_tokens, old_seconds))) = finished.zip(counters) {
+            let fresh = was_idle || self.last_prefilling.is_some_and(held);
+            if fresh && tokens > old_tokens && seconds > old_seconds {
+                self.last = Some(((tokens - old_tokens) / (seconds - old_seconds), now));
             }
         }
-        if grew > 0.0 && busy > 0.0 {
-            return Some((grew / busy, true));
+        if let Some((rate, _)) = self.last.filter(|(_, at)| held(*at)) {
+            return Some((rate, false));
         }
-        // Start from the newest sample older than the hold, so a request that ended just inside it counts.
-        let first = self
-            .samples
-            .iter()
-            .rev()
-            .find(|s| age(s) > PREFILL_HOLD)
-            .unwrap_or(&self.samples[0]);
-        let seconds = last.seconds - first.seconds;
-        Some(if seconds > 0.0 {
-            ((last.tokens - first.tokens) / seconds, false)
-        } else {
-            (0.0, true)
+        polled.then_some((0.0, true))
+    }
+
+    fn in_flight(&mut self, now: Instant, live: f64) -> Option<(f64, bool)> {
+        self.last_prefilling = Some(now);
+        // The gauge falling means that prefill ended and another began.
+        let mut run = self
+            .run
+            .take()
+            .filter(|run| live >= run.live)
+            .unwrap_or(PrefillRun {
+                start: (now, live),
+                advanced: (now, live),
+                live,
+            });
+        if live > run.live {
+            run.advanced = (now, live);
+        }
+        run.live = live;
+        let ((start, from), (advanced, to)) = (run.start, run.advanced);
+        let seconds = advanced.saturating_duration_since(start).as_secs_f64();
+        self.run = Some(run);
+        let rate = (to - from) / seconds;
+        rate.is_finite().then(|| {
+            self.last = Some((rate, now));
+            (rate, true)
         })
     }
 }
@@ -388,6 +395,8 @@ impl PrefillWindow {
 pub(super) struct MetricsHistory {
     previous: Option<(String, Instant, Metrics)>,
     prefill: PrefillWindow,
+    /// Start time of the mlx-serve process that answered `/metrics.json` with a 404.
+    no_sessions: Option<f64>,
 }
 
 /// The metric names one engine publishes, so `observe` has no per-engine branches.
@@ -442,6 +451,20 @@ fn series(provider: &str) -> Option<Series> {
 }
 
 impl MetricsHistory {
+    fn start_time(&self) -> Option<f64> {
+        let (_, _, metrics) = self.previous.as_ref()?;
+        metrics.sum("process_start_time_seconds")
+    }
+
+    /// A build without `/metrics.json` is asked again only after the server restarts.
+    pub fn sessions_known_missing(&self) -> bool {
+        self.no_sessions.is_some() && self.no_sessions == self.start_time()
+    }
+
+    pub fn note_sessions_missing(&mut self) {
+        self.no_sessions = self.start_time();
+    }
+
     /// What mlx-serve adds to the shared vLLM-shaped result: MLX memory, the prefill rate, and the
     /// progress of the prefill in flight.
     fn mlx_serve_extras(
@@ -460,10 +483,10 @@ impl MetricsHistory {
             ));
         }
         result.model_memory = metrics.count("mlx_serve:mlx_active_bytes");
-        if let Some((tps, live)) = self.prefill.rate(now, metrics) {
-            result.prefill_tps = Some(tps);
-            result.prefill_tps_live = live;
-        }
+        // Always assigned: the generic gauge delta must never stand in for the prefill speed.
+        let (tps, live) = self.prefill.rate(now, metrics).unzip();
+        result.prefill_tps = tps;
+        result.prefill_tps_live = live.unwrap_or(false);
     }
 
     pub fn observe(&mut self, provider: &str, text: &str, now: Instant) -> Option<LlmTelemetry> {
@@ -580,15 +603,18 @@ pub(super) fn apply_mlx_serve_sessions(result: &mut LlmTelemetry, value: &Value,
     }
     result.requests = sessions
         .iter()
+        .filter(|s| matches!(s["phase"].as_str(), Some("prefill" | "decode")))
         .enumerate()
-        .filter(|(_, s)| matches!(s["phase"].as_str(), Some("prefill" | "decode")))
         .filter_map(|(index, s)| {
             let context = counter(s, &["context_tokens"])?;
             let output = counter(s, &["generated_tokens"])?;
             Some(RequestUsage {
                 provider: "mlx-serve".into(),
                 model: identifier(s, "model").unwrap_or_default(),
-                id: identifier(s, "request_id").unwrap_or_else(|| format!("slot-{index}")),
+                // The server's id 0 means none.
+                id: identifier(s, "request_id")
+                    .filter(|id| id != "0")
+                    .unwrap_or_else(|| format!("slot-{index}")),
                 prompt: context.saturating_sub(output),
                 cached: counter(s, &["cached_tokens"]),
                 output: Some(output),

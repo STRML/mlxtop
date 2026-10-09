@@ -135,7 +135,7 @@ fn a_prefill_that_ends_between_polls_shows_briefly_as_a_last_sample_and_then_rea
     let now = Instant::now();
     let mut history = MetricsHistory::default();
     let mut poll = |second: u64, tokens: u64, seconds: f64| {
-        let text = mlx_serve_prefill(0, false, tokens, seconds);
+        let text = mlx_serve_prefill(0, false, tokens, seconds).replace("running 1", "running 0");
         let result = history
             .observe("mlx-serve", &text, now + Duration::from_secs(second))
             .unwrap();
@@ -154,7 +154,7 @@ fn a_prefill_that_ends_between_polls_shows_briefly_as_a_last_sample_and_then_rea
 }
 
 #[test]
-fn an_idle_server_reads_a_live_zero_and_old_samples_age_out_of_the_window() {
+fn an_idle_server_reads_a_live_zero_after_a_long_gap_too() {
     let now = Instant::now();
     let mut history = MetricsHistory::default();
     for second in 0..3_u64 {
@@ -174,8 +174,8 @@ fn an_idle_server_reads_a_live_zero_and_old_samples_age_out_of_the_window() {
         .observe("mlx-serve", &text, now + Duration::from_secs(60))
         .unwrap();
     assert_eq!(
-        later.prefill_tps, None,
-        "the window holds one sample, so no rate yet"
+        (later.prefill_tps, later.prefill_tps_live),
+        (Some(0.0), true)
     );
 }
 
@@ -476,4 +476,119 @@ fn http_errors_redirects_and_oversized_bodies_never_become_telemetry() {
         assert!(Endpoint::default().get(port, "/models").is_err());
         server.join().unwrap();
     }
+}
+
+fn poll_at(
+    history: &mut MetricsHistory,
+    now: Instant,
+    second: u64,
+    text: &str,
+) -> (Option<f64>, bool) {
+    let r = history
+        .observe("mlx-serve", text, now + Duration::from_secs(second))
+        .unwrap();
+    (r.prefill_tps, r.prefill_tps_live)
+}
+
+#[test]
+fn mlx_serve_prefill_is_not_live_once_the_prefill_ends() {
+    let (now, mut h) = (Instant::now(), MetricsHistory::default());
+    for (t, live) in [(0, 0), (1, 4096), (2, 8192), (3, 12288), (4, 16384)] {
+        poll_at(&mut h, now, t, &mlx_serve_prefill(live, true, 0, 0.0));
+    }
+    for t in 5..=15 {
+        let (rate, live) = poll_at(&mut h, now, t, &mlx_serve_prefill(0, false, 0, 0.0));
+        assert!(
+            !(live && rate.unwrap_or(0.0) > 0.0),
+            "t={t}: {rate:?} still live"
+        );
+    }
+}
+
+#[test]
+fn mlx_serve_slow_chunked_prefill_reads_its_true_speed() {
+    let (now, mut h) = (Instant::now(), MetricsHistory::default());
+    // 512 tok/s: an 8192-token chunk lands every 16 s, polled every second.
+    for t in 0..48_u64 {
+        let live = (t / 16) * 8192;
+        let (rate, is_live) = poll_at(&mut h, now, t, &mlx_serve_prefill(live, true, 0, 0.0));
+        match rate {
+            Some(rate) => assert!(is_live && (460.0..=565.0).contains(&rate), "t={t}: {rate}"),
+            None => assert!(t < 16, "t={t}: no reading once a chunk has landed"),
+        }
+    }
+}
+
+#[test]
+fn mlx_serve_prefill_reading_does_not_reappear_when_a_long_decode_ends() {
+    let (now, mut h) = (Instant::now(), MetricsHistory::default());
+    for (t, live) in [(0, 0), (1, 8192), (2, 16384)] {
+        poll_at(&mut h, now, t, &mlx_serve_prefill(live, true, 0, 0.0));
+    }
+    for t in 3..60 {
+        poll_at(&mut h, now, t, &mlx_serve_prefill(0, false, 0, 0.0));
+    }
+    let (rate, live) = poll_at(&mut h, now, 60, &mlx_serve_prefill(0, false, 16384, 2.0));
+    assert!(
+        live || rate.is_none(),
+        "a stale prefill speed shows at decode end: {rate:?}"
+    );
+}
+
+#[test]
+fn mlx_serve_prefill_rate_ignores_the_raw_gauge_and_missing_series() {
+    // A restart mid-prefill: the first poll has nothing to measure from.
+    let (now, mut h) = (Instant::now(), MetricsHistory::default());
+    poll_at(&mut h, now, 0, &mlx_serve_prefill(0, false, 50_000, 10.0));
+    let (rate, live) = poll_at(&mut h, now, 1, &mlx_serve_prefill(4096, true, 0, 0.0));
+    assert!(!(live && rate.is_some()), "restart reads {rate:?} live");
+    // An older build without the finished-request counters reads like one with them.
+    let full = |live: u64| mlx_serve_prefill(live, true, 0, 0.0);
+    let bare = |live: u64| {
+        format!("vllm:num_requests_running 1\nmlx_serve:generation_tokens_live 0\nmlx_serve:prefill_tokens_live {live}\nmlx_serve:requests_prefilling 1\n")
+    };
+    let (mut with, mut without) = (MetricsHistory::default(), MetricsHistory::default());
+    for (t, live) in [(0, 0), (1, 8192), (2, 8192), (3, 16384)] {
+        assert_eq!(
+            poll_at(&mut with, now, t, &full(live)),
+            poll_at(&mut without, now, t, &bare(live)),
+            "t={t}"
+        );
+    }
+    // No requests_prefilling gauge: a growing prefill is still live.
+    let flagless = |live: u64| {
+        format!("vllm:num_requests_running 1\nmlx_serve:generation_tokens_live 0\nmlx_serve:prefill_tokens_live {live}\nmlx_serve:prefill_tokens_total 0\nvllm:request_prefill_time_seconds_sum 0\n")
+    };
+    let mut h = MetricsHistory::default();
+    let mut last = (None, false);
+    for (t, live) in [(0, 0), (1, 4096), (2, 8192), (3, 12288)] {
+        last = poll_at(&mut h, now, t, &flagless(live));
+    }
+    assert!(last.1 && last.0.is_some_and(|rate| rate > 0.0), "{last:?}");
+}
+
+#[test]
+fn mlx_serve_fallback_ids_follow_the_running_request() {
+    let now = SystemTime::now();
+    let ids = |sessions: Value| {
+        let mut r = LlmTelemetry::default();
+        apply_mlx_serve_sessions(&mut r, &json!({ "sessions": sessions }), now);
+        r.requests.iter().map(|q| q.id.clone()).collect::<Vec<_>>()
+    };
+    let decode = |generated: u64| json!({"phase":"decode","context_tokens":700,"generated_tokens":generated});
+    let cached = json!({"phase":"cached","context_tokens":50000});
+    let with_cached = ids(json!([cached, decode(30), decode(40)]));
+    let evicted = ids(json!([decode(31), decode(41)]));
+    assert_eq!(with_cached.len(), 2);
+    assert_ne!(with_cached[0], with_cached[1]);
+    assert_eq!(
+        with_cached, evicted,
+        "a cached row ahead of a request must not rename it"
+    );
+    // The server's id 0 means "none", not a request named "0".
+    let zero = ids(json!([
+        {"phase":"decode","context_tokens":700,"generated_tokens":3,"request_id":0},
+        {"phase":"decode","context_tokens":900,"generated_tokens":5,"request_id":0}
+    ]));
+    assert_ne!(zero[0], zero[1]);
 }
