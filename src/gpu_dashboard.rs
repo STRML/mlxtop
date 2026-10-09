@@ -46,7 +46,7 @@ fn state(device: &gpu::Device, thresholds: Thresholds) -> &'static str {
         None => "unavailable",
         Some(0) => "idle",
         Some(load) if load >= thresholds.gpu_critical_load => "saturated",
-        Some(load) if load >= thresholds.gpu_warn_load => "loaded",
+        Some(load) if load >= thresholds.gpu_warn_load => "busy",
         Some(_) => "active",
     }
 }

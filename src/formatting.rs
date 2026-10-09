@@ -104,7 +104,7 @@ pub(crate) fn pressure_state_label(sample: &Sample) -> &'static str {
 pub(crate) fn gpu_load_label(value: Option<u8>, thresholds: Thresholds) -> &'static str {
     match value.map(u64::from) {
         Some(value) if value >= thresholds.gpu_critical_load => "saturated",
-        Some(value) if value >= thresholds.gpu_warn_load => "loaded",
+        Some(value) if value >= thresholds.gpu_warn_load => "busy",
         Some(_) => "within target",
         None => "unavailable",
     }

@@ -8,17 +8,20 @@ use crate::chart_render::{
     stretch_chart_columns, trace_connector, trace_point, TraceCell, TraceStyle,
 };
 use crate::cli::VERSION;
+use crate::config::PAGING_ACTIVE_ENTER_RATE;
 use crate::domain::{ChartMetric, ChartPoint, Tone};
 use crate::formatting::{
     bytes, compact_label, gpu_load_label, llm_generation_rate_label, llm_prefill_rate_label,
     percent, pressure_state_label, rate, telemetry_age, telemetry_source,
 };
+use crate::host::Platform;
 use crate::processes::process_provider;
 use crate::theme::{
     centered_rect, panel, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED, YELLOW,
 };
 use crate::{
-    gpu_dashboard, model_dashboard, operator_charts, process_memory, request_dashboard, swap_usage,
+    gpu_dashboard, memory_composition, model_dashboard, operator_charts, process_memory,
+    request_dashboard, swap_usage,
 };
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -29,6 +32,26 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use std::collections::VecDeque;
+
+/// Throughput is the outcome, shown compactly; host resources get the space.
+const RATES_HEIGHT: u16 = 7;
+const RATES_MAX_HEIGHT: u16 = 10;
+/// Short terminals keep each rate in its title; Enter expands the history.
+const RATES_COMPACT_HEIGHT: u16 = 4;
+/// Prompt bars and Journal stop growing once more rows add no information.
+const REQUEST_MAX_HEIGHT: u16 = 14;
+const JOURNAL_MAX_HEIGHT: u16 = 10;
+/// The host row takes all remaining height, never less than this.
+const HOST_MIN_HEIGHT: u16 = 6;
+/// SYSINFO strip, then the borderless two-row assessment beneath it.
+const OVERVIEW_INFO_HEIGHT: u16 = 3;
+const OVERVIEW_SUMMARY_HEIGHT: u16 = 2;
+
+/// The shared Overview column grid: three equal columns.
+fn overview_grid(area: Rect) -> [Rect; 3] {
+    Layout::horizontal([Constraint::Ratio(1, 3); 3]).areas(area)
+}
+
 impl App {
     pub(crate) fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
@@ -66,7 +89,11 @@ impl App {
             self.charts.decorate(frame);
         }
         if self.alert.is_some() {
-            self.draw_alert_banner(frame, outer[1]);
+            if self.alert_uses_assessment_strip() {
+                self.draw_alert_strip(frame, outer[1]);
+            } else {
+                self.draw_alert_banner(frame, outer[1]);
+            }
         }
         if self.diagnostics_open {
             self.draw_diagnostics(frame, outer[1]);
@@ -74,6 +101,59 @@ impl App {
         if self.help {
             self.draw_help(frame, area);
         }
+    }
+
+    /// Overview keeps SYSINFO (what is running, and how fresh) visible during an
+    /// incident: the alarm replaces the assessment rows that would repeat it.
+    pub(crate) fn alert_uses_assessment_strip(&self) -> bool {
+        self.tab == 0 && !self.charts.expanded
+    }
+
+    /// Rows at the top of the tab content that an active alarm occupies.
+    pub(crate) fn alert_rows(&self) -> u16 {
+        match (&self.alert, self.alert_uses_assessment_strip()) {
+            (None, _) => 0,
+            (Some(_), true) => OVERVIEW_INFO_HEIGHT + OVERVIEW_SUMMARY_HEIGHT,
+            (Some(_), false) => 3,
+        }
+    }
+
+    pub(crate) fn draw_alert_strip(&self, frame: &mut Frame, area: Rect) {
+        let Some(alert) = &self.alert else {
+            return;
+        };
+        if area.height < OVERVIEW_INFO_HEIGHT + OVERVIEW_SUMMARY_HEIGHT || area.width < 20 {
+            return;
+        }
+        let strip = Rect::new(
+            area.x,
+            area.y + OVERVIEW_INFO_HEIGHT,
+            area.width,
+            OVERVIEW_SUMMARY_HEIGHT,
+        );
+        frame.render_widget(Clear, strip);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!(" ⚠ {} ", alert.state),
+                        Style::default().fg(RED).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        alert.summary.clone(),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    format!(" raised {}  ·  a acknowledge", alert.time),
+                    Style::default().fg(MUTED),
+                )),
+            ])
+            .style(Style::default().bg(PANEL)),
+            strip,
+        );
     }
 
     /// Overlay strip at the top of the tab content: a critical condition demands
@@ -121,7 +201,8 @@ impl App {
     }
 
     pub(crate) fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let compact_tabs = area.width < 96;
+        // Full view names fit from the 80-column minimum supported width.
+        let compact_tabs = area.width < 80;
         let tab_labels = if compact_tabs {
             vec![
                 Line::from("1 OVR"),
@@ -138,7 +219,7 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(24),
+                Constraint::Length(21),
                 Constraint::Length(if compact_tabs { 30 } else { 42 }),
                 Constraint::Fill(1),
             ])
@@ -235,6 +316,11 @@ impl App {
                     ),
                     Chart::Memory => ("memory", &self.collector.load_history, ChartMetric::Memory),
                     Chart::Paging => ("paging", &self.collector.swap_history, ChartMetric::Swap),
+                    Chart::Compression => (
+                        "compression",
+                        &self.collector.compression_history,
+                        ChartMetric::Compression,
+                    ),
                     _ => unreachable!("indicator chart expected"),
                 };
                 self.render_indicator_chart(frame, area, name, history, metric);
@@ -256,7 +342,7 @@ impl App {
 
     pub(crate) fn draw_overview_layout(&self, frame: &mut Frame, area: Rect, devices: bool) {
         let compact = area.height < 30;
-        let info_height = 3;
+        let info_height = OVERVIEW_INFO_HEIGHT;
         let device_height = if devices {
             gpu_dashboard::height(
                 self.collector.current.gpus.len(),
@@ -265,52 +351,57 @@ impl App {
         } else {
             0
         };
-        // Keep idle geometry stable, but give throughput and request bars enough
-        // vertical resolution. Resources remain visible in a compact first row.
-        let journal_height = if compact { 0 } else { 5 };
-        let summary_height = 2;
-        let request_height = if compact {
-            if devices {
-                6
-            } else {
-                7
-            }
+        // Host-critical resources come first and take the space: memory,
+        // compression and paging decide whether a model keeps its speed.
+        // Prompt size drives KV-cache memory, so it follows. Throughput is the
+        // outcome and stays a compact, fixed-height row. Geometry is stable
+        // across idle and live states.
+        let summary_height = OVERVIEW_SUMMARY_HEIGHT;
+        // Rows left for charts and Journal once the context strips are placed.
+        let available = area
+            .height
+            .saturating_sub(info_height + summary_height + device_height);
+        // Supporting rows grow slowly and stop where more height adds nothing:
+        // prompt bars, a short throughput trace and a few Journal events. The
+        // host row takes every remaining row, so tall terminals widen the
+        // resource histories instead of stretching sparse panels.
+        let journal_height = if compact {
+            0
         } else {
-            (area.height / 4).clamp(9, 13)
+            (5 + available.saturating_sub(35) / 3).min(JOURNAL_MAX_HEIGHT)
         };
-        let remaining = area.height.saturating_sub(
-            info_height + summary_height + device_height + journal_height + request_height,
-        );
-        let resource_height = (remaining / 2).clamp(4, 8).min(remaining);
-        let rates_height = remaining.saturating_sub(resource_height);
+        let request_height = match (compact, devices) {
+            (true, true) => 6,
+            (true, false) => 7,
+            (false, _) => (available * 28 / 100).clamp(9, REQUEST_MAX_HEIGHT),
+        };
+        let mut rates_height = if compact {
+            RATES_COMPACT_HEIGHT
+        } else {
+            (available * 15 / 100).clamp(RATES_HEIGHT, RATES_MAX_HEIGHT)
+        };
+        let mut host_height =
+            available.saturating_sub(journal_height + request_height + rates_height);
+        // Very short terminals keep a readable host row before throughput.
+        if host_height < HOST_MIN_HEIGHT {
+            let borrowed = (HOST_MIN_HEIGHT - host_height).min(rates_height.saturating_sub(3));
+            rates_height -= borrowed;
+            host_height += borrowed;
+        }
         // Fit every captured observation into even the narrowest plot, then
         // widen those same observations across larger panels. No decimation.
-        let resources =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(area);
-        let rates = Layout::horizontal([
-            Constraint::Percentage(40),
-            Constraint::Percentage(35),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-        let supporting = Layout::horizontal([
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-        let queue_width = operator_charts::queue_plot_width(
-            &self.collector.operator_history,
-            supporting[2].width,
-        );
+        let host = self.host_columns(area);
+        let grid = overview_grid(area);
+        let queue_width =
+            operator_charts::queue_plot_width(&self.collector.operator_history, grid[2].width);
         let samples = [
-            resources[0].width.saturating_sub(7),
-            resources[1].width.saturating_sub(14),
-            rates[0].width.saturating_sub(8),
-            rates[1].width.saturating_sub(8),
-            rates[2].width.saturating_sub(7),
-            supporting[1].width.saturating_sub(7),
+            host[0].width.saturating_sub(7),
+            host[1].width.saturating_sub(14),
+            host.last()
+                .map_or(0, |column| column.width.saturating_sub(14)),
+            grid[0].width.saturating_sub(8),
+            grid[1].width.saturating_sub(8),
+            grid[2].width.saturating_sub(7),
             queue_width,
         ]
         .into_iter()
@@ -322,9 +413,9 @@ impl App {
             Constraint::Length(info_height),
             Constraint::Length(summary_height),
             Constraint::Length(device_height),
-            Constraint::Length(resource_height),
-            Constraint::Length(rates_height),
+            Constraint::Length(host_height),
             Constraint::Length(request_height),
+            Constraint::Length(rates_height),
             Constraint::Length(journal_height),
         ])
         .split(area);
@@ -345,8 +436,8 @@ impl App {
             );
         }
         self.draw_resource_charts(frame, rows[3]);
-        self.draw_workload_charts(frame, rows[4]);
-        self.draw_supporting_charts(frame, rows[5]);
+        self.draw_supporting_charts(frame, rows[4]);
+        self.draw_workload_charts(frame, rows[5]);
         if rows[6].height > 0 {
             if self.collector.operator_history.has_latency() && area.width >= 120 {
                 let columns =
@@ -360,9 +451,25 @@ impl App {
         }
     }
 
+    /// macOS has compressor counters; Linux has none to chart, so its host
+    /// row keeps memory and paging at half width each.
+    pub(crate) fn shows_compression(&self) -> bool {
+        self.collector.platform == Platform::MacOs
+    }
+
+    /// Every Overview row shares one three-column grid, so panel edges line
+    /// up vertically. Linux has no compression panel; memory spans two columns.
+    pub(crate) fn host_columns(&self, area: Rect) -> Vec<Rect> {
+        let [first, second, third] = overview_grid(area);
+        if self.shows_compression() {
+            vec![first, second, third]
+        } else {
+            vec![first.union(second), third]
+        }
+    }
+
     pub(crate) fn draw_resource_charts(&self, frame: &mut Frame, area: Rect) {
-        let columns = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(area);
+        let columns = self.host_columns(area);
         self.render_indicator_chart(
             frame,
             columns[0],
@@ -370,40 +477,43 @@ impl App {
             &self.collector.load_history,
             ChartMetric::Memory,
         );
+        if self.shows_compression() {
+            self.render_indicator_chart(
+                frame,
+                columns[1],
+                "compression",
+                &self.collector.compression_history,
+                ChartMetric::Compression,
+            );
+        }
         self.render_indicator_chart(
             frame,
-            columns[1],
+            columns[columns.len() - 1],
             "paging / I/O",
             &self.collector.swap_history,
             ChartMetric::Swap,
         );
     }
 
+    /// Prompt load spans two grid columns for its bars; cache and queue stack
+    /// in the third, since each carries one or two readings.
     pub(crate) fn draw_supporting_charts(&self, frame: &mut Frame, area: Rect) {
-        let columns = Layout::horizontal([
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
-        self.draw_request_chart(frame, columns[0]);
+        let [first, second, third] = overview_grid(area);
+        self.draw_request_chart(frame, first.union(second));
+        let [cache, queue] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(third);
         self.render_indicator_chart(
             frame,
-            columns[1],
+            cache,
             "cache",
             &self.collector.cache_history,
             ChartMetric::Cache,
         );
-        self.draw_operator_chart(frame, columns[2], Chart::Queue);
+        self.draw_operator_chart(frame, queue, Chart::Queue);
     }
 
     pub(crate) fn draw_workload_charts(&self, frame: &mut Frame, area: Rect) {
-        let columns = Layout::horizontal([
-            Constraint::Percentage(40),
-            Constraint::Percentage(35),
-            Constraint::Percentage(25),
-        ])
-        .split(area);
+        let columns = overview_grid(area);
         self.render_indicator_chart(
             frame,
             columns[0],
@@ -447,63 +557,65 @@ impl App {
         let zoom = usize::from(self.charts.zoom(Chart::from(metric)));
         let current = history.back().and_then(|point| point.value);
         let current_label = match metric {
+            // Drop qualifiers before units: a bare number is never the reading.
             ChartMetric::Generation | ChartMetric::Prefill => current
                 .map(|value| {
+                    let rate = format!("{:.1} tok/s", value as f64 / 10.0);
                     if area.width < 38 {
-                        format!("{:.1}", value as f64 / 10.0)
+                        rate
                     } else {
-                        format!("LIVE {:.1} tok/s", value as f64 / 10.0)
+                        format!("LIVE {rate}")
                     }
                 })
                 .unwrap_or_else(|| {
                     let label = chart_inactive_rate_label(metric, &self.collector.current);
                     if area.width < 38 {
-                        label.replace(" active", "")
+                        match label.as_str() {
+                            "decode active" => "decoding".into(),
+                            "prefill active" => "prefilling".into(),
+                            _ => label,
+                        }
                     } else {
                         label
                     }
                 }),
-            ChartMetric::Cache => current
-                .map(|value| {
-                    if area.width < 28 {
-                        format!("int {value}%")
-                    } else {
-                        format!("interval {value}%")
-                    }
-                })
-                .unwrap_or_else(|| {
-                    if area.width < 28 {
-                        "int —".into()
-                    } else {
-                        "interval —".into()
-                    }
-                }),
+            ChartMetric::Cache => {
+                let value = current.map_or_else(|| "—".into(), |value| format!("{value}%"));
+                if area.width < 28 {
+                    value
+                } else {
+                    format!("interval {value}")
+                }
+            }
             ChartMetric::Gpu => current
                 .map(|value| format!("{value}%"))
                 .unwrap_or_else(|| "—".into()),
-            ChartMetric::Memory => current
-                .map(|value| {
-                    if area.width >= 24 {
-                        format!("{value}% resident")
-                    } else {
-                        format!("{value}%")
-                    }
-                })
-                .unwrap_or_else(|| "—".into()),
-            ChartMetric::Swap => current.map(rate).unwrap_or_else(|| "—".into()),
+            // OS pressure is the memory verdict; resident occupancy (which
+            // includes file cache) is the supporting reading beneath it.
+            ChartMetric::Memory => {
+                let state = pressure_state_label(&self.collector.current);
+                if area.width >= 34 {
+                    format!("PRESSURE {state}")
+                } else {
+                    state.into()
+                }
+            }
+            ChartMetric::Swap | ChartMetric::Compression => {
+                current.map(rate).unwrap_or_else(|| "—".into())
+            }
         };
         let chart_tone = metric.chart_tone();
         let current_tone = history
             .back()
             .map(|point| point.tone)
             .unwrap_or(Tone::Muted);
-        let current_tone = if metric == ChartMetric::Memory && current.is_some() {
-            Tone::Cyan
+        let current_tone = if metric == ChartMetric::Memory {
+            self.collector.current.pressure_tone
         } else {
             current_tone
         };
         let rate_chart = matches!(metric, ChartMetric::Generation | ChartMetric::Prefill);
-        let label_width = if metric == ChartMetric::Swap {
+        let label_width = if metric.is_byte_rate() {
             12
         } else if rate_chart {
             6
@@ -520,20 +632,20 @@ impl App {
             .all(|point| point.value.is_none());
         let scale = chart_scale(history, metric, visible_count);
         let top_axis = chart_axis_label(metric, scale.1);
-        let mut axis_label = if rate_chart || metric == ChartMetric::Swap {
+        let mut axis_label = if rate_chart || metric.is_byte_rate() {
             format!("{}–{} auto", chart_axis_label(metric, scale.0), top_axis)
         } else {
             "0–100%".into()
         };
         let (average, peak) = chart_stats_for_width(history, metric, visible_count);
-        if metric == ChartMetric::Swap && peak == Some(0) {
+        if metric.is_byte_rate() && peak == Some(0) {
             axis_label = "zero traffic".into();
         }
         let window = format!(
             "{} · {zoom}×",
             chart_window_label(history.len().min(visible_count), self.interval)
         );
-        let name = if metric == ChartMetric::Memory && area.width < 30 {
+        let name = if metric == ChartMetric::Memory && area.width < 20 {
             "RAM"
         } else if metric == ChartMetric::Swap && area.width < 34 {
             "paging"
@@ -608,34 +720,59 @@ impl App {
                 Some(llm_prefill_rate_label(sample))
             }
             ChartMetric::Generation | ChartMetric::Prefill => Some("tok/s · auto".into()),
-            ChartMetric::Memory => Some(if area.width < 24 {
-                pressure_state_label(sample).into()
-            } else {
-                format!("PRESSURE {}", pressure_state_label(sample))
-            }),
+            ChartMetric::Memory => Some("Includes file cache".into()),
             ChartMetric::Gpu => Some(if current == Some(0) {
                 "idle".into()
             } else {
                 gpu_load_label(sample.gpu_util, self.thresholds).into()
             }),
-            ChartMetric::Swap => Some(format!(
-                "IN {} OUT {}",
-                if sample.rate_ready {
-                    rate(sample.swap_in).replace(' ', "")
+            ChartMetric::Compression => {
+                let (compress, decompress) = if sample.rate_ready && sample.vm_available {
+                    (rate(sample.compress), rate(sample.decompress))
                 } else {
-                    "—".into()
-                },
-                if sample.rate_ready {
-                    rate(sample.swap_out).replace(' ', "")
+                    ("—".into(), "—".into())
+                };
+                // Narrow panels share one unit instead of abbreviating names.
+                let shared_unit = compress
+                    .rsplit_once(' ')
+                    .zip(decompress.rsplit_once(' '))
+                    .filter(|((_, a), (_, b))| a == b)
+                    .map(|((c, unit), (d, _))| format!("COMP {c} · DECOMP {d} {unit}"));
+                let fits = |text: &String| {
+                    Line::from(text.as_str()).width() + 2
+                        <= usize::from(area.width.saturating_sub(2))
+                };
+                [
+                    Some(format!("COMP {compress} · DECOMP {decompress}")),
+                    shared_unit,
+                ]
+                .into_iter()
+                .flatten()
+                .find(fits)
+                .or_else(|| Some(format!("COMP {compress}")))
+            }
+            ChartMetric::Swap => {
+                let (swap_in, swap_out) = if sample.rate_ready {
+                    (rate(sample.swap_in), rate(sample.swap_out))
                 } else {
-                    "—".into()
-                }
-            )),
+                    ("—".into(), "—".into())
+                };
+                let spaced = format!("IN {swap_in} · OUT {swap_out}");
+                Some(
+                    if Line::from(spaced.as_str()).width() + 2
+                        <= usize::from(area.width.saturating_sub(2))
+                    {
+                        spaced
+                    } else {
+                        format!("IN {swap_in} OUT {swap_out}")
+                    },
+                )
+            }
             ChartMetric::Cache => Some(if area.width < 38 {
                 format!("TOTAL {}", percent(sample.llm_cache_efficiency))
             } else {
                 format!(
-                    "TOTAL {} · PREFIX HIT {}",
+                    "SERVER TOTAL {} · PREFIX HIT {}",
                     percent(sample.llm_cache_efficiency),
                     percent(sample.llm_prefix_hit_rate)
                 )
@@ -648,23 +785,16 @@ impl App {
                 } else {
                     summary.replacen("AVG ", "SERVER AVG ", 1)
                 }
-            } else if metric == ChartMetric::Memory
-                && Line::from(summary.as_str()).width() + 2
-                    > usize::from(area.width.saturating_sub(2))
-            {
-                summary.replace("process ", "OS ")
             } else {
                 summary
             };
             block = block.title_bottom(Line::from(Span::styled(
                 format!(" {summary} "),
-                if metric == ChartMetric::Memory {
-                    Style::default()
-                        .fg(sample.pressure_tone.color())
-                        .add_modifier(Modifier::BOLD)
+                Style::default().fg(if metric == ChartMetric::Memory {
+                    MUTED
                 } else {
-                    Style::default().fg(chart_tone.color())
-                },
+                    chart_tone.color()
+                }),
             )));
         }
         let mut inner = block.inner(area);
@@ -672,24 +802,119 @@ impl App {
         if inner.is_empty() {
             return;
         }
-        if metric == ChartMetric::Memory && inner.height >= 5 {
-            let usage = sample
-                .resident_memory
-                .map(|used| format!("{} / {}", bytes(used), bytes(sample.total_memory)))
-                .unwrap_or_else(|| "RAM reading unavailable".into());
-            let combined = format!("{usage} · Includes file cache");
-            let lines = if Line::from(combined.as_str()).width() <= usize::from(inner.width) {
-                vec![combined]
-            } else {
-                vec![usage, "Includes file cache".into()]
+        if metric == ChartMetric::Memory {
+            let usage = match (sample.resident_memory, current) {
+                (Some(used), _) => format!("{} / {}", bytes(used), bytes(sample.total_memory)),
+                (None, Some(_)) if sample.total_memory > 0 => {
+                    format!("RAM {}", bytes(sample.total_memory))
+                }
+                (None, Some(_)) => "RAM —".into(),
+                (None, None) => "RAM reading unavailable".into(),
             };
-            for text in lines {
+            // Keep the occupancy percentage on narrow panels by sharing the unit.
+            let compact_usage = sample.resident_memory.and_then(|used| {
+                let (used, unit) = bytes(used)
+                    .rsplit_once(' ')
+                    .map(|(n, u)| (n.to_owned(), u.to_owned()))?;
+                let (total, total_unit) = bytes(sample.total_memory)
+                    .rsplit_once(' ')
+                    .map(|(n, u)| (n.to_owned(), u.to_owned()))?;
+                (unit == total_unit).then(|| format!("{used}/{total} {unit}"))
+            });
+            let mut line = Line::from(Span::styled(usage.clone(), Style::default().fg(MUTED)));
+            if let Some(value) = current {
+                let candidates = [
+                    (usage, format!(" · {value}% resident")),
+                    (
+                        compact_usage.clone().unwrap_or_default(),
+                        format!(" · {value}% resident"),
+                    ),
+                    (compact_usage.unwrap_or_default(), format!(" · {value}%")),
+                ];
+                if let Some((text, resident)) = candidates.into_iter().find(|(text, resident)| {
+                    !text.is_empty()
+                        && Line::from(format!("{text}{resident}").as_str()).width()
+                            <= usize::from(inner.width)
+                }) {
+                    line = Line::from(vec![
+                        Span::styled(text, Style::default().fg(MUTED)),
+                        Span::styled(resident, Style::default().fg(CYAN)),
+                    ]);
+                }
+            }
+            frame.render_widget(
+                Paragraph::new(line),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            if inner.height < 2 {
+                return;
+            }
+            inner.y += 1;
+            inner.height -= 1;
+            // What the RAM holds matters more than how full it is: wired memory
+            // cannot be compressed or swapped; cache and free are headroom.
+            // Short panels give the legend every row; taller ones keep at
+            // least three rows for the occupancy trace.
+            let rows = if inner.height < 6 {
+                inner.height
+            } else {
+                (inner.height - 3).min(3)
+            };
+            let used = memory_composition::draw(
+                frame,
+                Rect::new(inner.x, inner.y, inner.width, rows),
+                sample,
+            );
+            inner.y += used;
+            inner.height -= used;
+            // Short panels cannot hold a meaningful trace: the exact reading and
+            // composition replace a flat line against a 0–100% axis.
+            if inner.height < 3 {
+                return;
+            }
+        }
+        if metric == ChartMetric::Compression {
+            if inner.height >= 5 && sample.compressor > 0 && sample.compressed_logical > 0 {
+                let (stored, held) = (bytes(sample.compressed_logical), bytes(sample.compressor));
+                let ratio = sample.compressed_logical as f64 / sample.compressor as f64;
+                let text = [
+                    format!("{stored} stored in {held} · {ratio:.1}× ratio"),
+                    format!("{stored} in {held} · {ratio:.1}×"),
+                    format!("{ratio:.1}× ratio"),
+                ]
+                .into_iter()
+                .find(|text| Line::from(text.as_str()).width() <= usize::from(inner.width))
+                .unwrap_or_default();
                 frame.render_widget(
                     Paragraph::new(text).style(Style::default().fg(MUTED)),
                     Rect::new(inner.x, inner.y, inner.width, 1),
                 );
                 inner.y += 1;
                 inner.height -= 1;
+            }
+            swap_usage::draw_compressor(
+                frame,
+                Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+                sample,
+            );
+            inner.height = inner.height.saturating_sub(1);
+            if inner.is_empty() {
+                return;
+            }
+            if inner.height < 3 {
+                frame.render_widget(
+                    Paragraph::new(match current {
+                        Some(0) => "No compression traffic",
+                        Some(rate) if rate >= self.thresholds.compression_warn_rate => {
+                            "Compression active"
+                        }
+                        Some(_) => "Light compression · below warning",
+                        None => "Compression unavailable",
+                    })
+                    .style(Style::default().fg(current_tone.color())),
+                    inner,
+                );
+                return;
             }
         }
         if metric == ChartMetric::Swap {
@@ -704,9 +929,12 @@ impl App {
             }
             if inner.height < 3 {
                 frame.render_widget(
+                    // Match the assessment: "active" starts at the warning rate.
                     Paragraph::new(match current {
                         Some(0) => "No paging traffic",
-                        Some(_) => "Paging active",
+                        Some(rate) if rate >= PAGING_ACTIVE_ENTER_RATE => "Paging active",
+                        Some(rate) if rate >= self.thresholds.swap_warn_rate => "Watch paging",
+                        Some(_) => "Light paging · below warning",
                         None => "Paging unavailable",
                     })
                     .style(Style::default().fg(current_tone.color())),
@@ -763,17 +991,24 @@ impl App {
             return;
         }
         if visible_missing {
+            // One vocabulary for absent data: "in this window" when older
+            // samples exist, "yet" when none have been captured.
+            let idle = sample.llm_status == "idle";
             let message = match metric {
-                _ if history.iter().any(|point| point.value.is_some()) => "No samples in view",
-                ChartMetric::Cache if inner.width < 22 => "No cache samples",
-                ChartMetric::Cache => "No interval cache data",
-                ChartMetric::Generation | ChartMetric::Prefill
-                    if sample.llm_status == "idle" && inner.width >= 28 =>
-                {
-                    "Idle · no live rate samples"
+                _ if history.iter().any(|point| point.value.is_some()) => {
+                    if idle && inner.width >= 32 {
+                        "Idle · no samples in this window"
+                    } else {
+                        "No samples in this window"
+                    }
                 }
-                ChartMetric::Generation | ChartMetric::Prefill => "No live rate samples",
-                _ => "No samples available",
+                ChartMetric::Cache if inner.width < 20 => "No cache samples",
+                ChartMetric::Cache => "No cache samples yet",
+                ChartMetric::Generation | ChartMetric::Prefill if idle && inner.width >= 26 => {
+                    "Idle · no rate samples yet"
+                }
+                ChartMetric::Generation | ChartMetric::Prefill => "No rate samples yet",
+                _ => "No samples yet",
             };
             frame.render_widget(
                 Paragraph::new(message)
@@ -790,7 +1025,7 @@ impl App {
         }
         // Zero is a measurement, not an absent sample. Keep the zero trace
         // and its gaps, but do not invent a 1 B/s ceiling for an idle window.
-        let paging_idle = metric == ChartMetric::Swap && peak == Some(0);
+        let paging_idle = metric.is_byte_rate() && peak == Some(0);
         if rate_chart && inner.height < 3 {
             frame.render_widget(
                 Paragraph::new("Enter: history").style(Style::default().fg(MUTED)),
@@ -843,14 +1078,7 @@ impl App {
         // resolution. Auto-scaling changes coordinates, never captured values,
         // ordering or colors; there is no future-sample smoothing.
         let points = chart_columns_for_plot(history, visible_count, metric, plot_height, scale);
-        let mut visible_points = stretch_chart_columns(&points, plot_width);
-        if metric == ChartMetric::Memory {
-            for point in &mut visible_points {
-                if point.value.is_some() {
-                    point.tone = Tone::Cyan;
-                }
-            }
-        }
+        let visible_points = stretch_chart_columns(&points, plot_width);
         let mut cells = vec![
             vec![
                 TraceCell {
@@ -980,10 +1208,11 @@ impl App {
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
         if paging_idle && inner.height >= 4 {
             frame.render_widget(
-                Paragraph::new(if inner.width >= 32 {
-                    "No paging traffic in this window"
-                } else {
-                    "No paging traffic"
+                Paragraph::new(match (metric, inner.width >= 32) {
+                    (ChartMetric::Compression, true) => "No compression in this window",
+                    (ChartMetric::Compression, false) => "No compression",
+                    (_, true) => "No paging traffic in this window",
+                    (_, false) => "No paging traffic",
                 })
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(MUTED)),
@@ -995,7 +1224,7 @@ impl App {
     pub(crate) fn draw_signal_log(&self, frame: &mut Frame, area: Rect) {
         let block = panel("RECENT JOURNAL", Tone::Muted)
             .title(
-                Line::from(Span::styled(" 3 open ", Style::default().fg(CYAN)))
+                Line::from(Span::styled(" 3 full journal ", Style::default().fg(CYAN)))
                     .alignment(Alignment::Right),
             )
             .title_bottom(Line::from(Span::styled(
@@ -1147,7 +1376,7 @@ impl App {
                 }))
                 .collect::<Vec<_>>(),
             )
-            .block(panel("PROCESS MONITOR · LOCAL OS READINGS", Tone::Cyan)),
+            .block(panel("MLX TOP · LOCAL OS READINGS", Tone::Cyan)),
             rows[0],
         );
         let selected = self.top_selected.min(filtered.len().saturating_sub(1));
@@ -1369,10 +1598,14 @@ impl App {
                         Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
-                        format!(
-                            "{event_count} {} events · {total_count} total · f/[/] filter",
-                            self.journal_filter.label(),
-                        ),
+                        if event_count == total_count {
+                            format!("{total_count} events · f/[/] filter")
+                        } else {
+                            format!(
+                                "{event_count} {} of {total_count} events · f/[/] filter",
+                                self.journal_filter.label(),
+                            )
+                        },
                         Style::default().fg(Color::White),
                     ),
                     Span::styled("  ·  ", Style::default().fg(DIM)),
@@ -1414,7 +1647,7 @@ impl App {
                 Line::from(vec![
                     Span::styled(format!(" {} ", event.time), Style::default().fg(DIM)),
                     Span::styled(
-                        format!("{:^16}", compact_label(&event.state, 16)),
+                        format!("{:<16}", compact_label(&event.state, 16)),
                         Style::default()
                             .fg(event.tone.color())
                             .add_modifier(Modifier::BOLD),
@@ -1598,7 +1831,8 @@ impl App {
             Line::from("1 / 2 / 3       Overview / MLX Top / Journal"),
             Line::from("d               diagnostics and runtime setup"),
             Line::from("Tab / Shift-Tab next / previous view"),
-            Line::from("p / Space       pause or resume; r resets history"),
+            Line::from("p / Space       pause or resume"),
+            Line::from("r               reset history, chart zoom and alarm"),
             Line::from("{ / }           change refresh interval (1–60s)"),
             Line::from("a               acknowledge critical system alarm"),
             Line::from("q / Ctrl-C      quit; ? / h closes help"),

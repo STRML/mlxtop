@@ -87,10 +87,9 @@ fn wrapped(text: &[String], width: usize) -> Vec<Line<'static>> {
 
 impl App {
     pub(crate) fn draw_diagnostics(&self, frame: &mut Frame, mut area: Rect) {
-        if self.alert.is_some() {
-            area.y += 3;
-            area.height = area.height.saturating_sub(3);
-        }
+        let reserved = self.alert_rows().min(area.height);
+        area.y += reserved;
+        area.height -= reserved;
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" Diagnostics ")

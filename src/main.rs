@@ -20,6 +20,7 @@ mod history;
 mod host;
 mod json;
 mod logging;
+mod memory_composition;
 mod model_dashboard;
 mod omlx;
 mod operator_charts;

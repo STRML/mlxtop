@@ -68,22 +68,31 @@ pub(crate) enum ChartMetric {
     Cache,
     Memory,
     Swap,
+    Compression,
     Gpu,
 }
 
 impl ChartMetric {
+    /// Byte-rate series share automatic zero-based ceilings and rate labels.
+    pub(crate) fn is_byte_rate(self) -> bool {
+        matches!(self, Self::Swap | Self::Compression)
+    }
+
     pub(crate) fn chart_tone(self) -> Tone {
         match self {
             Self::Generation | Self::Prefill | Self::Cache => Tone::Cyan,
-            Self::Memory => Tone::Cyan,
-            Self::Swap => Tone::Yellow,
+            Self::Memory | Self::Swap | Self::Compression => Tone::Cyan,
             Self::Gpu => Tone::Blue,
         }
     }
 
     pub(crate) fn tone(self, value: u64, thresholds: Thresholds) -> Tone {
         match self {
-            Self::Generation | Self::Prefill | Self::Cache => Tone::Cyan,
+            // Throughput is graded against its rolling baseline when captured.
+            Self::Generation | Self::Prefill => Tone::Cyan,
+            Self::Cache if value >= CACHE_GOOD_PERCENT => Tone::Green,
+            Self::Cache if value >= CACHE_LOW_PERCENT => Tone::Yellow,
+            Self::Cache => Tone::Red,
             // Linux derives pressure from unavailable memory (MemAvailable),
             // using these bands. Resident RAM history records pressure from
             // the sample instead; occupied file cache is not a pressure signal.
@@ -92,6 +101,8 @@ impl ChartMetric {
                 thresholds.memory_warn_load,
                 thresholds.memory_critical_load,
             ),
+            // Saturation is graded red on the chart; it never rings the
+            // alarm or becomes a finding without a measured slowdown.
             Self::Gpu => load_tone(
                 value,
                 thresholds.gpu_warn_load,
@@ -102,6 +113,9 @@ impl ChartMetric {
                 thresholds.swap_warn_rate,
                 thresholds.swap_critical_rate,
             ),
+            // Compression trades CPU for RAM; alone it is a warning, never critical.
+            Self::Compression if value >= thresholds.compression_warn_rate => Tone::Yellow,
+            Self::Compression => Tone::Green,
         }
     }
 }
@@ -264,7 +278,16 @@ pub(crate) struct CorrelationInsight {
     pub(crate) summary: String,
     pub(crate) details: String,
     pub(crate) event_key: Option<CorrelationKey>,
+    /// Change from the rolling throughput baseline, in percent.
+    pub(crate) delta_percent: Option<f64>,
 }
+
+/// Cache reuse bands, shared by the cache chart and the prompt's CACHED share.
+pub(crate) const CACHE_GOOD_PERCENT: u64 = 50;
+pub(crate) const CACHE_LOW_PERCENT: u64 = 20;
+
+/// A drop this far below the rolling baseline is critical on its own.
+pub(crate) const THROUGHPUT_CRITICAL_DROP_PERCENT: f64 = 30.0;
 
 impl CorrelationInsight {
     pub(crate) fn is_material_drop(&self) -> bool {
@@ -274,12 +297,17 @@ impl CorrelationInsight {
     pub(crate) fn tone(&self) -> Tone {
         match self.direction {
             ThroughputDirection::Down => {
-                if matches!(
-                    self.cause,
-                    CorrelationCause::Paging
-                        | CorrelationCause::MemoryPressure
-                        | CorrelationCause::Thermal
-                ) {
+                let severe = self
+                    .delta_percent
+                    .is_some_and(|percent| percent <= -THROUGHPUT_CRITICAL_DROP_PERCENT);
+                if severe
+                    || matches!(
+                        self.cause,
+                        CorrelationCause::Paging
+                            | CorrelationCause::MemoryPressure
+                            | CorrelationCause::Thermal
+                    )
+                {
                     Tone::Red
                 } else {
                     Tone::Yellow
@@ -332,6 +360,9 @@ pub(crate) struct LlmTelemetry {
 pub(crate) struct Sample {
     pub(crate) runtime: crate::runtime_diagnostics::RuntimeReport,
     pub(crate) updated: String,
+    /// Local offset from UTC in seconds, read alongside `updated`. Request
+    /// times use it so every clock on screen shares the Journal's zone.
+    pub(crate) utc_offset: Option<i32>,
     pub(crate) pressure: String,
     pub(crate) pressure_meaning: String,
     pub(crate) pressure_tone: Tone,
@@ -415,6 +446,7 @@ impl Default for Sample {
         Self {
             runtime: Default::default(),
             updated: "waiting".into(),
+            utc_offset: None,
             pressure: "UNKNOWN".into(),
             pressure_meaning: "unavailable".into(),
             pressure_tone: Tone::Muted,

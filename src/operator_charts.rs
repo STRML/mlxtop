@@ -206,11 +206,14 @@ pub(super) fn queue(
     let last = history.points.back();
     let active = last.and_then(|p| p.active);
     let waiting = last.and_then(|p| p.waiting);
+    // Yellow means "worth inspecting": an empty wait queue stays neutral.
+    let waiting_color = |queued: bool| if queued { YELLOW } else { MUTED };
     // A short terminal still gets a separate, selectable queue panel with
     // both exact counts. Expanding it reveals the full history.
     if area.height <= 5 {
+        let queued_color = waiting_color(waiting.is_some_and(|n| n > 0));
         let active = format!("active {}", count(active));
-        let waiting = format!("waiting {}", count(waiting));
+        let waiting_label = format!("waiting {}", count(waiting));
         let mut block = panel(
             &if area.height <= 2 {
                 format!("queue {active}")
@@ -225,13 +228,13 @@ pub(super) fn queue(
         }
         if area.height >= 4 {
             lines.push(Line::from(Span::styled(
-                waiting,
-                Style::default().fg(YELLOW),
+                waiting_label,
+                Style::default().fg(queued_color),
             )));
         } else {
             block = block.title_bottom(Line::from(Span::styled(
-                format!(" {waiting} "),
-                Style::default().fg(YELLOW),
+                format!(" {waiting_label} "),
+                Style::default().fg(queued_color),
             )));
         }
         if area.height >= 5 {
@@ -246,6 +249,14 @@ pub(super) fn queue(
     let narrow = area.width < 38;
     let (label_width, ceiling, visible) =
         queue_axis(history, area.width.saturating_sub(2), zoom, window);
+    let waiting_tone = waiting_color(
+        history
+            .points
+            .iter()
+            .rev()
+            .take(visible)
+            .any(|point| point.waiting.is_some_and(|n| n > 0)),
+    );
     let ceiling_label = queue_tick(ceiling);
     let counts = format!("active {} waiting {}", count(active), count(waiting));
     let split_counts = narrow && counts.len() > usize::from(area.width.saturating_sub(2));
@@ -285,31 +296,36 @@ pub(super) fn queue(
     if plot.height < 2 || plot.width <= label_width {
         return;
     }
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
+    let legend_width = usize::from(area.width.saturating_sub(if narrow { 2 } else { 4 }));
+    let legend = if narrow {
+        Line::from(vec![
             Span::styled(
                 if split_counts {
                     String::new()
-                } else if narrow {
-                    format!("active {} ", count(active))
                 } else {
-                    "active ".into()
+                    format!("active {} ", count(active))
                 },
                 Style::default().fg(CYAN),
             ),
             Span::styled(
-                if narrow {
-                    format!("waiting {}", count(waiting))
-                } else {
-                    "waiting ".into()
-                },
-                Style::default().fg(YELLOW),
+                format!("waiting {}", count(waiting)),
+                Style::default().fg(waiting_tone),
             ),
-            Span::styled(
-                if narrow { "" } else { "═ equal" },
-                Style::default().fg(Color::White),
-            ),
-        ])),
+        ])
+    } else {
+        // Swatches name each stroke; ═ marks samples where both counts match.
+        let mut legend = Line::from(vec![
+            Span::styled("━ active  ", Style::default().fg(CYAN)),
+            Span::styled("━ waiting", Style::default().fg(waiting_tone)),
+        ]);
+        let equal = Span::styled("  ═ equal", Style::default().fg(Color::White));
+        if legend.width() + equal.width() <= legend_width {
+            legend.spans.push(equal);
+        }
+        legend
+    };
+    frame.render_widget(
+        Paragraph::new(legend),
         // Keep the legend in the bottom border so a six-row panel still has
         // three plot rows: the 0, 1 and 2 levels must remain distinguishable.
         Rect::new(
@@ -367,11 +383,19 @@ pub(super) fn queue(
             (cell.fg == CYAN).then_some((x, y, cell.symbol().chars().next().unwrap_or(' ')))
         })
         .collect();
-    trace(frame, graph, &waiting_values, &breaks, ceiling, YELLOW, 1);
+    trace(
+        frame,
+        graph,
+        &waiting_values,
+        &breaks,
+        ceiling,
+        waiting_tone,
+        1,
+    );
     // Equality is a fact about the samples, not an intersection of rasterized
     // connectors. Preserve stroke geometry and mark rounded collisions separately.
     for (x, y, active_glyph) in active_cells {
-        if frame.buffer_mut()[(x, y)].fg == YELLOW {
+        if frame.buffer_mut()[(x, y)].fg == waiting_tone {
             let column = usize::from(x - graph.x);
             let equal = active_values[column]
                 .zip(waiting_values[column])
@@ -402,8 +426,18 @@ pub(super) fn queue(
         .chain(&waiting_values)
         .all(Option::is_none)
     {
+        // Same empty-state vocabulary as the indicator charts.
+        let earlier = history
+            .points
+            .iter()
+            .any(|point| point.active.is_some() || point.waiting.is_some());
         frame.render_widget(
-            Paragraph::new("No queue samples").style(Style::default().fg(MUTED)),
+            Paragraph::new(if earlier {
+                "No samples in this window"
+            } else {
+                "No queue samples yet"
+            })
+            .style(Style::default().fg(MUTED)),
             graph,
         );
     }

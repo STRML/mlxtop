@@ -376,8 +376,8 @@ pub(crate) fn macos_host() -> FakeHost {
             "/bin/ps -axo pid=,rss=,%cpu=,%mem=,state=,pagein=,comm=,args=",
             MACOS_PS,
         )
-        .command("/bin/date +%H:%M:%S", "12:00:01\n")
-        .command("/bin/date +%H:%M:%S", "12:00:02\n")
+        .command("/bin/date +%H:%M:%S %z", "12:00:01 -0500\n")
+        .command("/bin/date +%H:%M:%S %z", "12:00:02\n")
 }
 
 pub(crate) const LINUX_MEMINFO: &str = "MemTotal:       16000000 kB\n\
@@ -419,8 +419,8 @@ pub(crate) fn linux_host() -> FakeHost {
             "ps -axo pid=,rss=,%cpu=,%mem=,stat=,maj_flt=,comm=,args=",
             "  77 8388608 150.0 50.0 Sl 9 ollama /usr/local/bin/ollama serve\n",
         )
-        .command("/bin/date +%H:%M:%S", "08:00:00\n")
-        .command("/bin/date +%H:%M:%S", "08:00:01\n")
+        .command("/bin/date +%H:%M:%S %z", "08:00:00\n")
+        .command("/bin/date +%H:%M:%S %z", "08:00:01\n")
 }
 
 /// A config that points the oMLX client at a port nothing listens on.
@@ -445,6 +445,8 @@ pub(crate) fn empty_view() -> CollectorView {
         cache_history: VecDeque::new(),
         load_history: VecDeque::new(),
         swap_history: VecDeque::new(),
+        compression_history: VecDeque::new(),
+        platform: Platform::MacOs,
         gpu_history: VecDeque::new(),
         signals: VecDeque::new(),
         request_history: request_history::History::default(),

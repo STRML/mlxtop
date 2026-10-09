@@ -105,11 +105,28 @@ pub(crate) fn command_text(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-pub(crate) fn now_clock(host: &dyn Host) -> String {
-    if let Some(value) = host.command("/bin/date", &["+%H:%M:%S"]) {
-        return value.trim().to_string();
+/// Local wall-clock time and the local offset from UTC (`+HHMM`) in seconds.
+pub(crate) fn now_clock(host: &dyn Host) -> (String, Option<i32>) {
+    let Some(value) = host.command("/bin/date", &["+%H:%M:%S %z"]) else {
+        return ("??:??:??".into(), None);
+    };
+    let mut fields = value.split_whitespace();
+    let clock = fields.next().unwrap_or("??:??:??").to_string();
+    (clock, fields.next().and_then(parse_utc_offset))
+}
+
+fn parse_utc_offset(text: &str) -> Option<i32> {
+    let (sign, digits) = match text.as_bytes().first()? {
+        b'+' => (1, &text[1..]),
+        b'-' => (-1, &text[1..]),
+        _ => return None,
+    };
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
     }
-    "??:??:??".into()
+    let hours: i32 = digits[..2].parse().ok()?;
+    let minutes: i32 = digits[2..].parse().ok()?;
+    (hours <= 23 && minutes <= 59).then_some(sign * (hours * 3_600 + minutes * 60))
 }
 // Operating-system inputs read by the collectors.
 //

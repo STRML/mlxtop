@@ -11,7 +11,10 @@ use crate::formatting::{
     bytes, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label,
     pressure_state_label, rate,
 };
-use crate::history::{delta, push_history, push_history_with_tone, rate_bytes, signed_rate_bytes};
+use crate::history::{
+    baseline_tone, compression_tone, delta, paging_tone, push_history, push_history_with_tone,
+    rate_bytes, signed_rate_bytes,
+};
 use crate::host::{now_clock, Host, Platform};
 use crate::logging::{
     diagnostics_log, log_field, log_optional_f64, log_optional_u64, log_optional_u8,
@@ -46,6 +49,9 @@ pub(crate) struct CollectorView {
     pub(crate) cache_history: VecDeque<ChartPoint>,
     pub(crate) load_history: VecDeque<ChartPoint>,
     pub(crate) swap_history: VecDeque<ChartPoint>,
+    pub(crate) compression_history: VecDeque<ChartPoint>,
+    /// Which host counters exist; Linux has no compressor counters to chart.
+    pub(crate) platform: Platform,
     pub(crate) gpu_history: VecDeque<ChartPoint>,
     pub(crate) signals: VecDeque<SignalEvent>,
     pub(crate) request_history: request_history::History,
@@ -77,6 +83,7 @@ pub(crate) struct Collector {
     pub(crate) cache_history: VecDeque<ChartPoint>,
     pub(crate) load_history: VecDeque<ChartPoint>,
     pub(crate) swap_history: VecDeque<ChartPoint>,
+    pub(crate) compression_history: VecDeque<ChartPoint>,
     pub(crate) gpu_history: VecDeque<ChartPoint>,
     pub(crate) signals: VecDeque<SignalEvent>,
     pub(crate) request_history: request_history::History,
@@ -154,6 +161,7 @@ impl Collector {
             cache_history: VecDeque::with_capacity(history_limit),
             load_history: VecDeque::with_capacity(history_limit),
             swap_history: VecDeque::with_capacity(history_limit),
+            compression_history: VecDeque::with_capacity(history_limit),
             gpu_history: VecDeque::with_capacity(history_limit),
             signals: VecDeque::with_capacity(8),
             request_history: request_history::History::default(),
@@ -411,7 +419,7 @@ impl Collector {
         sample.llm_waiting_requests = llm_stats.and_then(|stats| stats.waiting_requests);
         sample.llm_model_memory = llm_stats.and_then(|stats| stats.model_memory);
         sample.llm_model_memory_max = llm_stats.and_then(|stats| stats.model_memory_max);
-        sample.updated = now_clock(self.host.as_ref());
+        (sample.updated, sample.utc_offset) = now_clock(self.host.as_ref());
         let previous = if self.current.updated == "waiting" {
             None
         } else {
@@ -434,12 +442,16 @@ impl Collector {
             self.history_limit,
             self.thresholds,
         );
-        push_history(
+        // Prefill has no fixed threshold: grade against its own rolling baseline.
+        let prefill = chart_rate_value(&sample, ChartMetric::Prefill);
+        let prefill_tone = prefill
+            .map(|value| baseline_tone(value, &self.prefill_history))
+            .unwrap_or(Tone::Muted);
+        push_history_with_tone(
             &mut self.prefill_history,
-            chart_rate_value(&sample, ChartMetric::Prefill),
-            ChartMetric::Prefill,
+            prefill,
+            prefill_tone,
             self.history_limit,
-            self.thresholds,
         );
         push_history(
             &mut self.cache_history,
@@ -455,9 +467,10 @@ impl Collector {
             point.tone = if point.value.is_none() {
                 Tone::Muted
             } else if sample.correlation.is_material_drop() {
+                // Graded against the rolling baseline, like the assessment.
                 sample.correlation.tone()
             } else {
-                Tone::Cyan
+                Tone::Green
             };
         }
         push_history_with_tone(
@@ -466,13 +479,32 @@ impl Collector {
             sample.pressure_tone,
             self.history_limit,
         );
-        push_history(
+        // Captured tones follow the assessment's states, so a chart never
+        // shows a severity the headline does not report.
+        let paging = (sample.swap_available && sample.rate_ready)
+            .then_some(sample.swap_in.saturating_add(sample.swap_out));
+        push_history_with_tone(
             &mut self.swap_history,
-            (sample.swap_available && sample.rate_ready)
-                .then_some(sample.swap_in.saturating_add(sample.swap_out)),
-            ChartMetric::Swap,
+            paging,
+            paging
+                .map(|churn| paging_tone(churn, &sample.impact, self.thresholds))
+                .unwrap_or(Tone::Muted),
             self.history_limit,
-            self.thresholds,
+        );
+        let compression = (sample.vm_available && sample.rate_ready)
+            .then_some(sample.compress.saturating_add(sample.decompress));
+        let previous_tone = self
+            .compression_history
+            .back()
+            .filter(|point| point.value.is_some())
+            .map(|point| point.tone);
+        push_history_with_tone(
+            &mut self.compression_history,
+            compression,
+            compression
+                .map(|churn| compression_tone(churn, previous_tone, self.thresholds))
+                .unwrap_or(Tone::Muted),
+            self.history_limit,
         );
         push_history(
             &mut self.gpu_history,
@@ -523,6 +555,8 @@ impl Collector {
             cache_history: self.cache_history.clone(),
             load_history: self.load_history.clone(),
             swap_history: self.swap_history.clone(),
+            compression_history: self.compression_history.clone(),
+            platform: self.platform,
             gpu_history: self.gpu_history.clone(),
             signals: self.signals.clone(),
             request_history: self.request_history.clone(),
@@ -663,18 +697,27 @@ impl Collector {
             let previous_paging = previous.swap_in.saturating_add(previous.swap_out) > 0;
             let paging = sample.swap_in.saturating_add(sample.swap_out) > 0;
             if previous_paging != paging {
+                // Same band as the paging chart: traffic below the warning
+                // rate is light paging, not a condition worth inspecting.
+                let churn = sample.swap_in.saturating_add(sample.swap_out);
+                let tone = ChartMetric::Swap.tone(churn, self.thresholds);
                 add(
                     "PAGING",
                     if paging {
                         format!(
-                            "active · in {} · out {}",
+                            "{} · in {} · out {}",
+                            if tone == Tone::Green {
+                                "light"
+                            } else {
+                                "active"
+                            },
                             rate(sample.swap_in),
                             rate(sample.swap_out)
                         )
                     } else {
                         "cleared · no current paging traffic".into()
                     },
-                    if paging { Tone::Yellow } else { Tone::Green },
+                    if paging { tone } else { Tone::Green },
                 );
             }
 
@@ -752,6 +795,7 @@ impl Collector {
         self.cache_history.clear();
         self.load_history.clear();
         self.swap_history.clear();
+        self.compression_history.clear();
         self.gpu_history.clear();
         self.signals.clear();
         self.current = Sample::default();

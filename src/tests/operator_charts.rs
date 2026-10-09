@@ -135,7 +135,11 @@ fn unequal_queue_counts_use_one_scale_and_missing_series_is_not_overlap() {
         .unwrap();
     let buffer = terminal.backend().buffer();
     assert_eq!(buffer[(40, 3)].fg, CYAN);
-    assert_eq!(buffer[(40, 8)].fg, YELLOW);
+    assert_eq!(
+        buffer[(40, 8)].fg,
+        MUTED,
+        "an empty wait queue is not a warning"
+    );
     history = History::default();
     sample.llm_active_requests = None;
     for _ in 0..40 {
@@ -154,7 +158,7 @@ fn unequal_queue_counts_use_one_scale_and_missing_series_is_not_overlap() {
         })
         .unwrap();
     assert_eq!(terminal.backend().buffer()[(40, 8)].symbol(), "━");
-    assert_eq!(terminal.backend().buffer()[(40, 8)].fg, YELLOW);
+    assert_eq!(terminal.backend().buffer()[(40, 8)].fg, MUTED);
 }
 
 #[test]
@@ -189,7 +193,7 @@ fn queue_large_ticks_fit_their_gutter_without_truncating_or_covering_the_trace()
             "leave a gap before the trace"
         );
         assert!((2..8).any(|y| buffer[(42, y)].fg == CYAN));
-        assert_eq!(buffer[(42, 8)].fg, YELLOW);
+        assert_eq!(buffer[(42, 8)].fg, MUTED);
     }
 }
 
@@ -288,7 +292,35 @@ fn six_row_queue_distinguishes_one_request_from_the_two_request_tick() {
     assert_eq!(buffer[(1, 2)].symbol(), "2");
     assert_ne!(buffer[(48, 2)].fg, CYAN);
     assert_eq!(buffer[(48, 3)].fg, CYAN);
-    assert_eq!(buffer[(48, 4)].fg, YELLOW);
+    assert_eq!(buffer[(48, 4)].fg, MUTED);
+}
+
+#[test]
+fn waiting_requests_turn_the_waiting_series_yellow() {
+    let mut history = History::default();
+    let mut sample = live();
+    sample.llm_active_requests = Some(2);
+    sample.llm_waiting_requests = Some(0);
+    history.observe(&sample, 80);
+    sample.llm_waiting_requests = Some(1);
+    history.observe(&sample, 80);
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(50, 8)).unwrap();
+    terminal
+        .draw(|frame| {
+            queue(
+                frame,
+                frame.area(),
+                &history,
+                Duration::from_secs(1),
+                1,
+                None,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(buffer.content.iter().any(|cell| cell.fg == YELLOW));
+    let legend: String = (0..50).map(|x| buffer[(x, 7)].symbol()).collect();
+    assert!(legend.contains("━ active  ━ waiting  ═ equal"), "{legend}");
 }
 
 #[test]

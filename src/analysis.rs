@@ -147,7 +147,12 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
     } else if paging_active {
         (
             "PAGING ACTIVE",
-            Tone::Yellow,
+            // Same band as the paging chart: red from the critical rate.
+            if swap_churn >= swap_critical_rate {
+                Tone::Red
+            } else {
+                Tone::Yellow
+            },
             Some(65),
             "CONSTRAINED",
             "active paging",
@@ -725,6 +730,7 @@ pub(crate) fn correlate_observations(
         summary,
         details,
         event_key,
+        delta_percent,
     }
 }
 

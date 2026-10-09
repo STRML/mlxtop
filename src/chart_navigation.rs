@@ -19,6 +19,7 @@ pub(super) enum Chart {
     Paging,
     Queue,
     Latency,
+    Compression,
 }
 
 impl From<ChartMetric> for Chart {
@@ -30,6 +31,7 @@ impl From<ChartMetric> for Chart {
             ChartMetric::Gpu => Self::Gpu,
             ChartMetric::Memory => Self::Memory,
             ChartMetric::Swap => Self::Paging,
+            ChartMetric::Compression => Self::Compression,
         }
     }
 }
@@ -46,6 +48,7 @@ impl Chart {
             Self::Paging => "paging",
             Self::Queue => "queue",
             Self::Latency => "first token",
+            Self::Compression => "compression",
         }
     }
 }
@@ -53,7 +56,7 @@ impl Chart {
 pub(super) struct Navigation {
     pub focused: Chart,
     pub expanded: bool,
-    zoom: [u16; 9],
+    zoom: [u16; 10],
     pub overview_samples: Cell<Option<usize>>,
     pub regions: RefCell<Vec<(Chart, Rect)>>,
 }
@@ -63,7 +66,7 @@ impl Default for Navigation {
         Self {
             focused: Chart::Prompt,
             expanded: false,
-            zoom: [1; 9],
+            zoom: [1; 10],
             overview_samples: Cell::new(None),
             regions: RefCell::new(Vec::new()),
         }

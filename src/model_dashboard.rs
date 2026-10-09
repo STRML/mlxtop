@@ -51,6 +51,16 @@ fn work_parts(sample: &Sample, history: &request_history::History) -> Vec<String
     ]
 }
 
+/// Overview's prompt load panel already shows the latest request's prompt and
+/// output. Keep runtime counters here only when they add a different reading.
+fn prompt_panel_covers(sample: &Sample, history: &request_history::History) -> bool {
+    history.latest_for(sample).is_some_and(|(request, _)| {
+        sample
+            .llm_prompt_tokens
+            .is_none_or(|prompt| prompt == request.prompt)
+    })
+}
+
 fn hardware_parts(sample: &Sample) -> Vec<String> {
     if sample.has_nvidia_gpus() {
         return vec![if sample.gpus.len() == 1 {
@@ -164,11 +174,13 @@ pub(super) fn draw(
     let wide = width >= 130;
     let tone = llm_status_tone(&sample.llm_status);
     let title = fitted_parts(
-        std::iter::once("SYSINFO".into()).chain(if compact {
-            work_parts(sample, history)
-        } else {
-            Vec::new()
-        }),
+        std::iter::once("SYSINFO".into()).chain(
+            if compact && !prompt_panel_covers(sample, history) {
+                work_parts(sample, history)
+            } else {
+                Vec::new()
+            },
+        ),
         width.saturating_sub(2),
     );
     let footer = if compact {

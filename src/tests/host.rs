@@ -30,3 +30,23 @@ fn platform_matches_the_build_target() {
     };
     assert_eq!(Platform::current(), expected);
 }
+
+#[test]
+fn clock_reports_the_local_offset_for_request_times() {
+    use crate::test_support::FakeHost;
+    let host = FakeHost::default()
+        .command("/bin/date +%H:%M:%S %z", "16:30:45 -0400\n")
+        .command("/bin/date +%H:%M:%S %z", "08:00:00 +0530\n")
+        .command("/bin/date +%H:%M:%S %z", "08:00:00 EST\n");
+    assert_eq!(now_clock(&host), ("16:30:45".into(), Some(-4 * 3_600)));
+    assert_eq!(
+        now_clock(&host),
+        ("08:00:00".into(), Some(5 * 3_600 + 1_800))
+    );
+    // An unparseable zone keeps the clock and leaves request times in UTC.
+    assert_eq!(now_clock(&host), ("08:00:00".into(), None));
+    assert_eq!(now_clock(&FakeHost::default()), ("??:??:??".into(), None));
+    for invalid in ["", "0400", "+04", "+2460", "+0475", "+04:0"] {
+        assert_eq!(parse_utc_offset(invalid), None, "{invalid}");
+    }
+}

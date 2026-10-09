@@ -208,6 +208,8 @@ impl App {
                 cache_history: VecDeque::new(),
                 load_history: VecDeque::new(),
                 swap_history: VecDeque::new(),
+                compression_history: VecDeque::new(),
+                platform: crate::host::Platform::current(),
                 gpu_history: VecDeque::new(),
                 signals: VecDeque::new(),
                 request_history: request_history::History::default(),

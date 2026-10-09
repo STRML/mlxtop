@@ -100,15 +100,17 @@ fn missing_speed_updates_preserve_last_measured_age_and_model_scope() {
     for invalid in [None, Some(f64::NAN), Some(-1.0), Some(f64::INFINITY)] {
         request.output_tps = invalid;
         history.observe(&[request.clone()]);
-        let line = output_summary(&history.entries[0], true, 90).to_string();
+        let line = output_summary(&history.entries[0], true, &Sample::default(), 90).to_string();
         assert!(line.contains("LAST 0.0 tok/s · 20s old"), "{line}");
     }
     request.model = "another-model".into();
     request.output_tps = None;
     history.observe(&[request]);
-    assert!(output_summary(&history.entries[1], true, 90)
-        .to_string()
-        .contains("SPEED —"));
+    assert!(
+        output_summary(&history.entries[1], true, &Sample::default(), 90)
+            .to_string()
+            .contains("SPEED —")
+    );
 }
 
 #[test]
@@ -209,7 +211,7 @@ fn selected_prompt_identifies_previous_model_without_losing_measurements() {
             "REQUEST oMLX · previous-model",
             "12,000 tokens",
             "REPORTED",
-            "CACHE 75%",
+            "CACHED 75%",
             "2m old",
             "UTC",
             "12.0k▲",
@@ -249,7 +251,7 @@ fn recent_sizes_keep_model_boundaries_and_ignore_future_requests() {
     }
     let summary = size_summary(&history, 3, 100).to_string();
     assert!(summary.contains("RECENT 4"));
-    assert!(summary.contains("MEDIAN 20,277.5 tokens"));
+    assert!(summary.contains("MEDIAN 20,278 tokens"));
     assert!(summary.contains("RANGE 20,000–21,000"));
     assert!(!summary.contains("40,000"));
     let mut other = usage("other", 100000);
@@ -299,7 +301,9 @@ fn cache_metadata_does_not_inflate_short_bars() {
         assert_eq!(buffer[(82, y)].bg, PANEL);
         assert_ne!(buffer[(75, y)].fg, GREEN);
     }
-    assert_eq!(buffer[(82, 5)].fg, GREEN);
+    // A mixed partial cell stays unsplit: equal cache ratios must not flip
+    // color with rounding. The readout carries the exact reuse.
+    assert_eq!(buffer[(82, 5)].fg, buffer[(75, 5)].fg);
 }
 
 #[test]
@@ -349,7 +353,7 @@ fn every_visible_bar_has_a_size_at_supported_sizes() {
         for label in [
             "31,616 tokens",
             "REPORTED",
-            "CACHE —",
+            "CACHED —",
             "22:23:15",
             "UTC",
             "PREVIOUS OBSERVED",
@@ -413,15 +417,30 @@ fn full_cell_stacks_preserve_both_segments_and_timestamp_rollover_is_explicit() 
     assert_eq!(buffer[(0, 0)].bg, BLUE);
     assert_eq!(buffer[(0, 2)].fg, GREEN);
     assert_eq!(
-        clock_stamp(SystemTime::UNIX_EPOCH + Duration::from_secs(86_399)),
-        "23:59:59"
+        clock_stamp(SystemTime::UNIX_EPOCH + Duration::from_secs(86_399), None),
+        "23:59:59 UTC"
     );
     assert_eq!(
-        clock_stamp(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400)),
-        "00:00:00"
+        clock_stamp(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400), None),
+        "00:00:00 UTC"
+    );
+    // A known local offset matches Journal's unlabeled local clock, across midnight.
+    assert_eq!(
+        clock_stamp(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(3_600),
+            Some(-5 * 3_600)
+        ),
+        "20:00:00"
     );
     assert_eq!(
-        clock_stamp(SystemTime::UNIX_EPOCH - Duration::from_secs(1)),
+        clock_stamp(
+            SystemTime::UNIX_EPOCH + Duration::from_secs(86_399),
+            Some(5_400)
+        ),
+        "01:29:59"
+    );
+    assert_eq!(
+        clock_stamp(SystemTime::UNIX_EPOCH - Duration::from_secs(1), Some(0)),
         "--:--:--"
     );
 }
@@ -461,7 +480,7 @@ fn prompt_sizes_and_cache_render_without_growth_warnings() {
         "LIVE",
         "OBSERVED",
         "40,000 tokens",
-        "CACHE 90%",
+        "CACHED 90%",
         "4,000 uncached",
         "MEDIAN 20,000 tokens",
         "RANGE 10,000–40,000",
@@ -558,4 +577,28 @@ fn zoom_changes_history_range_without_changing_selected_prompt_size() {
         );
         assert!(labels.contains("27.2k▲"));
     }
+}
+
+#[test]
+fn cached_share_uses_the_cache_chart_bands_for_large_prompts() {
+    let color_of = |prompt: u64, cached: u64| {
+        let mut request = usage("graded", prompt);
+        request.cached = Some(cached);
+        let mut history = History::default();
+        history.observe(&[request]);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 10)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &history, &Sample::default(), 0, 1))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..60)
+            .find(|&x| buffer[(x, 1)].symbol() == "C")
+            .map(|x| buffer[(x, 1)].fg)
+            .expect("CACHED label")
+    };
+    assert_eq!(color_of(40_000, 30_000), GREEN);
+    assert_eq!(color_of(40_000, 12_000), YELLOW);
+    assert_eq!(color_of(40_000, 2_000), RED);
+    // Reuse barely matters for small prompts: neutral, never a warning.
+    assert_eq!(color_of(2_000, 0), CYAN);
 }

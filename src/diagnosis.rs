@@ -70,7 +70,7 @@ fn assess_observation(sample: &Sample) -> Finding {
         _ => None,
     };
     if let Some(action) = action {
-        finding.title = impact.into();
+        finding.title = sentence_case(impact);
         finding.next = action;
         finding.actionable = true;
         finding.tone = if sample.pressure == "RED" {
@@ -161,8 +161,10 @@ fn assess_observation(sample: &Sample) -> Finding {
         finding.tone = Tone::Yellow;
         return finding;
     }
-    if sample.gpu_util.is_some_and(|value| value >= 80) {
-        finding.title = "GPU busy · bottleneck unconfirmed".into();
+    // Lead with the verdict. High GPU use stays evidence, never the headline.
+    if pressure_state_label(sample) == "normal" {
+        finding.title = "Healthy · no bottleneck".into();
+        finding.tone = Tone::Green;
     }
     if live
         && matches!(
@@ -171,10 +173,22 @@ fn assess_observation(sample: &Sample) -> Finding {
         )
     {
         finding.next = "No generation slowdown measured.";
+    } else if !live && matches!(sample.llm_status.as_str(), "idle" | "ready") {
+        finding.next = "Idle · waiting for the next request.";
     } else if !live {
         finding.next = "Live generation rate unavailable.";
     }
     finding
+}
+
+/// Findings share one headline slot, so native state names use sentence case.
+fn sentence_case(state: &str) -> String {
+    let lower = state.to_ascii_lowercase();
+    let mut chars = lower.chars();
+    chars
+        .next()
+        .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

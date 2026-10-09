@@ -125,11 +125,13 @@ fn last_prompt_stays_scoped_to_runtime_and_unknown_os_values_stay_unknown() {
     assert!(!render(&sample, &history, 180, 5).contains("LAST PROMPT"));
     request.model = sample.llm_model.clone();
     history.observe(&[request]);
-    for height in [3, 5] {
-        let screen = render(&sample, &history, 80, height);
-        assert!(screen.contains("LAST PROMPT 12.0k"), "{screen}");
-        assert!(screen.contains("2m old"), "{screen}");
-    }
+    let screen = render(&sample, &history, 80, 5);
+    assert!(screen.contains("LAST PROMPT 12.0k"), "{screen}");
+    assert!(screen.contains("2m old"), "{screen}");
+    // Overview's strip leaves the latest request to the prompt load panel.
+    let strip = render(&sample, &history, 80, 3);
+    assert!(!strip.contains("LAST PROMPT"), "{strip}");
+    assert!(strip.contains("SYSINFO"), "{strip}");
     sample.llm_provider = "Ollama".into();
     assert!(!render(&sample, &history, 180, 5).contains("LAST PROMPT"));
 
@@ -139,4 +141,32 @@ fn last_prompt_stays_scoped_to_runtime_and_unknown_os_values_stay_unknown() {
     }
     assert!(!screen.contains("CPU 0.0%"));
     assert!(!screen.contains("RAM 0 B"));
+}
+
+#[test]
+fn strip_keeps_runtime_counters_only_when_they_differ_from_the_latest_request() {
+    let sample = live_sample();
+    let mut history = request_history::History::default();
+    let mut request = domain::RequestUsage {
+        provider: sample.llm_provider.clone(),
+        model: sample.llm_model.clone(),
+        id: "request-1".into(),
+        prompt: 12_000,
+        cached: None,
+        output: Some(80),
+        completed: false,
+        ttft_ms: None,
+        output_tps: None,
+        observed_at: Some(SystemTime::now()),
+    };
+    history.observe(&[request.clone()]);
+    // Concurrent slots: the runtime total is a different reading, so it stays.
+    assert!(render(&sample, &history, 80, 3).contains("PROMPT 32.8k"));
+    request.prompt = sample.llm_prompt_tokens.unwrap();
+    history.observe(&[request]);
+    let strip = render(&sample, &history, 80, 3);
+    assert!(
+        !strip.contains("PROMPT"),
+        "prompt load already shows it\n{strip}"
+    );
 }

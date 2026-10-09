@@ -598,7 +598,7 @@ fn journal_keys_scroll_newest_first_and_cycle_filters() {
     press(&mut app, &[KeyCode::Home]);
     let newest = render_app(&app, 120, 30);
     assert!(newest.contains("JOURNAL"));
-    assert!(newest.contains("30 ALL events · 30 total"));
+    assert!(newest.contains("30 events · f/[/] filter"));
     assert!(newest.contains("LATEST  event 29"));
     assert!(newest.contains("EVENTS · ALL · 1–"));
     assert!(newest.contains("of 30"));
@@ -627,7 +627,7 @@ fn journal_keys_scroll_newest_first_and_cycle_filters() {
     );
     assert_eq!(app.journal_filter, JournalFilter::Paging);
     let paging = render_app(&app, 120, 30);
-    assert!(paging.contains("15 PAGING events · 30 total"));
+    assert!(paging.contains("15 PAGING of 30 events"));
     assert!(paging.contains("│  event 28") && !paging.contains("event 29"));
     press(&mut app, &[KeyCode::Char(']')]);
     assert_eq!(app.filtered_journal_events().len(), 15, "GPU events");

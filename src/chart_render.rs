@@ -22,7 +22,10 @@ pub(crate) struct RenderPoint {
 
 pub(crate) fn normalize_chart_value(metric: ChartMetric, value: u64) -> u64 {
     match metric {
-        ChartMetric::Generation | ChartMetric::Prefill | ChartMetric::Swap => value,
+        ChartMetric::Generation
+        | ChartMetric::Prefill
+        | ChartMetric::Swap
+        | ChartMetric::Compression => value,
         ChartMetric::Cache | ChartMetric::Memory | ChartMetric::Gpu => value.min(100),
     }
 }
@@ -37,10 +40,9 @@ where
     for value in points.into_iter().filter_map(|point| point.value) {
         // Paging stats stay in bytes/s: a percent of the log scale would be
         // meaningless next to the byte-rate label shown for the live value.
-        let value = if matches!(
-            metric,
-            ChartMetric::Generation | ChartMetric::Prefill | ChartMetric::Swap
-        ) {
+        let value = if metric.is_byte_rate()
+            || matches!(metric, ChartMetric::Generation | ChartMetric::Prefill)
+        {
             value
         } else {
             normalize_chart_value(metric, value)
@@ -73,7 +75,9 @@ pub(crate) fn chart_stat_label(metric: ChartMetric, value: Option<u64>) -> Strin
         ChartMetric::Generation | ChartMetric::Prefill => value
             .map(|value| format!("{:.1}", value as f64 / 10.0))
             .unwrap_or_else(|| "—".into()),
-        ChartMetric::Swap => value.map(rate).unwrap_or_else(|| "—".into()),
+        ChartMetric::Swap | ChartMetric::Compression => {
+            value.map(rate).unwrap_or_else(|| "—".into())
+        }
         ChartMetric::Cache | ChartMetric::Memory | ChartMetric::Gpu => value
             .map(|value| format!("{value}%"))
             .unwrap_or_else(|| "—".into()),
@@ -93,7 +97,7 @@ pub(crate) fn chart_scale(
                 .filter_map(|point| point.value),
             10,
         )
-    } else if metric == ChartMetric::Swap {
+    } else if metric.is_byte_rate() {
         (
             0,
             crate::chart_scale::ceiling(
@@ -120,7 +124,7 @@ pub(crate) fn chart_axis_label(metric: ChartMetric, value: u64) -> String {
         } else {
             format!("{:.1}", value as f64 / 10.0)
         }
-    } else if metric == ChartMetric::Swap {
+    } else if metric.is_byte_rate() {
         rate(value)
     } else {
         format!("{value}%")
@@ -128,10 +132,7 @@ pub(crate) fn chart_axis_label(metric: ChartMetric, value: u64) -> String {
 }
 
 pub(crate) fn chart_display_value(metric: ChartMetric, value: u64, scale: (u64, u64)) -> u64 {
-    if matches!(
-        metric,
-        ChartMetric::Generation | ChartMetric::Prefill | ChartMetric::Swap
-    ) {
+    if metric.is_byte_rate() || matches!(metric, ChartMetric::Generation | ChartMetric::Prefill) {
         (u128::from(value.saturating_sub(scale.0)) * 100
             / u128::from(scale.1.saturating_sub(scale.0).max(1)))
         .min(100) as u64
@@ -300,7 +301,7 @@ pub(crate) fn trace_connector(
     let height = cells.len();
     for (offset, row_cells) in cells.iter_mut().enumerate().take(lower).skip(upper + 1) {
         let fraction = chart_row_value(offset, height);
-        let display_value = if metric == ChartMetric::Swap {
+        let display_value = if metric.is_byte_rate() {
             scale.0.saturating_add(
                 (u128::from(scale.1.saturating_sub(scale.0)) * u128::from(fraction) / 100) as u64,
             )
@@ -361,7 +362,7 @@ pub(crate) fn chart_transition_tone(
         // crossing an occupancy percentage between two normal observations.
         ChartMetric::Cache | ChartMetric::Memory => tone,
         ChartMetric::Gpu => metric.tone(display_value, thresholds),
-        ChartMetric::Swap => metric.tone(display_value, thresholds),
+        ChartMetric::Swap | ChartMetric::Compression => metric.tone(display_value, thresholds),
     }
 }
 

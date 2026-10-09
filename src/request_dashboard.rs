@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
-use crate::domain::{Sample, TelemetrySource};
+use crate::config::Thresholds;
+use crate::domain::{ChartMetric, Sample, TelemetrySource};
+
+/// Prompts smaller than this keep a neutral CACHED color.
+const CACHE_GRADED_PROMPT: u64 = 4096;
 use crate::formatting::{compact_label, compact_tokens, telemetry_age};
 use crate::request_history::{same_request, Entry, History};
-use crate::theme::{BLUE, CYAN, DIM, GREEN, MUTED, PANEL, YELLOW};
+use crate::theme::{BLUE, CYAN, DIM, GREEN, MUTED, PANEL};
 use crate::{chart_scale, domain};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -22,15 +26,19 @@ fn exact(n: u64) -> String {
     output
 }
 
-fn clock_stamp(at: SystemTime) -> String {
+/// Local time when the offset is known, matching Journal; otherwise labeled UTC.
+fn clock_stamp(at: SystemTime, utc_offset: Option<i32>) -> String {
     let Ok(elapsed) = at.duration_since(SystemTime::UNIX_EPOCH) else {
         return "--:--:--".into();
     };
-    let seconds = elapsed.as_secs() % 86_400;
+    let shifted =
+        i64::try_from(elapsed.as_secs()).unwrap_or(0) + i64::from(utc_offset.unwrap_or(0));
+    let suffix = if utc_offset.is_some() { "" } else { " UTC" };
+    let seconds = shifted.rem_euclid(86_400);
     let hours = seconds / 3_600;
     let minutes = (seconds % 3_600) / 60;
     let seconds = seconds % 60;
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
+    format!("{hours:02}:{minutes:02}:{seconds:02}{suffix}")
 }
 
 fn compact_comparison(current: &domain::RequestUsage, previous: Option<&Entry>) -> String {
@@ -107,11 +115,8 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
     }
     let middle = sizes.len() / 2;
     let sum = u128::from(sizes[middle]) + u128::from(sizes[(sizes.len() - 1) / 2]);
-    let median = format!(
-        "{}{}",
-        exact((sum / 2) as u64),
-        if sum % 2 == 0 { "" } else { ".5" }
-    );
+    // Token counts are whole numbers; round an even-sized median half up.
+    let median = exact(sum.div_ceil(2) as u64);
     append_detail(&mut line, format!("MEDIAN {median} tokens"), MUTED, width);
     append_detail(
         &mut line,
@@ -153,7 +158,18 @@ fn append_detail(line: &mut Line<'static>, text: String, color: Color, width: u1
     }
 }
 
-fn output_summary(entry: &Entry, live: bool, width: u16) -> Line<'static> {
+/// The generation chart already shows the live aggregate rate. Repeat a live
+/// request's speed only when it differs, as with concurrent requests.
+fn repeats_generation_rate(entry: &Entry, sample: &Sample) -> bool {
+    sample.llm_generation_tps_live
+        && entry
+            .output_speed
+            .zip(sample.llm_generation_tps)
+            .is_some_and(|(speed, rate)| (speed.tps - rate).abs() < 0.05)
+}
+
+fn output_summary(entry: &Entry, live: bool, sample: &Sample, width: u16) -> Line<'static> {
+    let live_duplicate = live && repeats_generation_rate(entry, sample);
     let speed = entry.output_speed.map(|speed| {
         let state = if speed.completed {
             "AVG"
@@ -180,12 +196,14 @@ fn output_summary(entry: &Entry, live: bool, width: u16) -> Line<'static> {
         format!("OUT {count}"),
         Style::default().fg(CYAN),
     ));
-    append_detail(
-        &mut line,
-        speed_label.into(),
-        if speed.is_some() { CYAN } else { MUTED },
-        width,
-    );
+    if !(live_duplicate && speed.as_ref().is_some_and(|(_, state)| *state == "LIVE")) {
+        append_detail(
+            &mut line,
+            speed_label.into(),
+            if speed.is_some() { CYAN } else { MUTED },
+            width,
+        );
+    }
     if speed.is_some_and(|(_, state)| state == "LAST") {
         append_detail(
             &mut line,
@@ -235,16 +253,9 @@ fn draw_bar(
             (blocks[cached_part], GREEN, color)
         } else {
             // A partial cell has an empty area too: keep its measured height
-            // and use the dominant segment. The readout retains exact reuse.
-            (
-                blocks[part],
-                if cached_part * 2 >= part {
-                    GREEN
-                } else {
-                    color
-                },
-                PANEL,
-            )
+            // and leave a mixed cell unsplit, so equal cache ratios never flip
+            // color with rounding. The readout retains exact reuse.
+            (blocks[part], color, PANEL)
         };
         frame.buffer_mut()[(area.x, area.bottom() - 1 - row)]
             .set_symbol(glyph)
@@ -292,10 +303,6 @@ pub(super) fn draw(
     let cached = selected.and_then(|i| {
         let usage = &history.entries[i].usage;
         usage.cached.filter(|n| *n <= usage.prompt)
-    });
-    let low_cache = selected.is_some_and(|i| {
-        let prompt = history.entries[i].usage.prompt;
-        prompt >= 4096 && cached.is_some_and(|n| u128::from(n) * 5 < u128::from(prompt))
     });
     let mut title = Line::from(vec![
         Span::styled(
@@ -383,19 +390,19 @@ pub(super) fn draw(
             } else {
                 n as f64 / entry.usage.prompt as f64
             };
-            format!("CACHE {:.0}%", ratio * 100.0)
+            format!("CACHED {:.0}%", ratio * 100.0)
         })
-        .unwrap_or_else(|| "CACHE —".into());
-    let cache_color = if cached.is_none() {
-        MUTED
-    } else if low_cache {
-        YELLOW
-    } else if entry.usage.prompt > 0
-        && cached.is_some_and(|n| u128::from(n) * 5 >= u128::from(entry.usage.prompt) * 4)
-    {
-        GREEN
-    } else {
-        CYAN
+        .unwrap_or_else(|| "CACHED —".into());
+    // The cache chart's bands; reuse barely matters for small prompts.
+    let cache_color = match cached {
+        None => MUTED,
+        Some(_) if entry.usage.prompt < CACHE_GRADED_PROMPT => CYAN,
+        Some(n) => ChartMetric::Cache
+            .tone(
+                (u128::from(n) * 100 / u128::from(entry.usage.prompt)) as u64,
+                Thresholds::default(),
+            )
+            .color(),
     };
     let cache_span = Span::styled(cache_label, Style::default().fg(cache_color));
     let mut headline = Line::from(vec![
@@ -414,7 +421,7 @@ pub(super) fn draw(
         MUTED,
         headline_width,
     );
-    let timestamp = format!("{} UTC", clock_stamp(entry.last_seen));
+    let timestamp = clock_stamp(entry.last_seen, sample.utc_offset);
     let before_clock = headline.width();
     append_detail(&mut headline, timestamp.clone(), MUTED, headline_width);
     let clock_in_header = headline.width() > before_clock;
@@ -488,7 +495,7 @@ pub(super) fn draw(
         Paragraph::new(if inner.height >= 5 {
             details
         } else {
-            let mut output = output_summary(entry, live, inner.width);
+            let mut output = output_summary(entry, live, sample, inner.width);
             if other_runtime {
                 append_detail(
                     &mut output,
@@ -502,7 +509,7 @@ pub(super) fn draw(
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
     );
     let metadata_height = if inner.height >= 5 {
-        let mut output = output_summary(entry, live, inner.width);
+        let mut output = output_summary(entry, live, sample, inner.width);
         if !clock_in_header {
             append_detail(&mut output, timestamp, MUTED, inner.width);
             append_detail(

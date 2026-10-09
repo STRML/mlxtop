@@ -90,7 +90,7 @@ to each point, so future samples never change an older plotted point. Raw values
 remain the source for headlines and statistics. The tone is only a secondary
 visual cue:
 visible labels use meaningful states such as `normal`,
-`watch`, `critical`, `loaded` and `saturated` rather than asking users to
+`watch`, `critical`, `busy` and `saturated` rather than asking users to
 interpret color names. On narrower terminals, the detailed cards collapse
 by keeping numeric readings when a secondary trace cannot fit. Journal records
 transitions rather than duplicating the live process table.
@@ -299,14 +299,18 @@ terminal's selection modifier (usually Shift) to select text with the mouse.
 ### Critical system alarms
 
 Critical memory pressure, heavy paging, swap thrashing and page-in recovery
-ring the terminal bell once and display a banner. Enable the audible bell in
+ring the terminal bell once and display a banner. In Overview the banner takes
+the place of the assessment rows, so SYSINFO's model, state and data age stay
+visible. Enable the audible bell in
 your terminal settings to hear it. `a` dismisses the banner for the rest of
 that episode; a confirmed recovery re-arms the alarm. Missing system counters
 do not count as recovery. High GPU utilization is normal workload activity
 and never triggers this alarm by itself.
 
-Diagnostics distinguish measured throughput drops from resource usage. A busy
-GPU alone is labeled **bottleneck unconfirmed**. A measured drop shows the rate
+Diagnostics distinguish measured throughput drops from resource usage. When
+nothing needs action and memory pressure is normal, the assessment reads
+**Healthy · no bottleneck**; GPU utilization appears as evidence beside it, and
+a busy GPU alone never becomes the finding. A measured drop shows the rate
 change, an associated signal with confidence, and a short suggested check.
 Linux temperature readings are shown as measurements, not inferred throttling.
 

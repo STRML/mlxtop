@@ -327,6 +327,7 @@ fn journal_records_llm_queue_gpu_thermal_and_throughput_transitions() {
                 direction: ThroughputDirection::Down,
                 cause: CorrelationCause::Thermal,
             }),
+            delta_percent: Some(-20.0),
         },
         ..Sample::default()
     };
@@ -484,7 +485,7 @@ fn sampler_stops_when_either_channel_closes() {
 
 #[test]
 fn sampler_panic_is_contained_and_reported_as_a_disconnect() {
-    let host = linux_host().panic_on("/bin/date +%H:%M:%S");
+    let host = linux_host().panic_on("/bin/date +%H:%M:%S %z");
     let sampler = Sampler::start(Duration::from_secs(1), move || {
         collector(host, Platform::Linux, None)
     });

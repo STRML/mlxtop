@@ -24,26 +24,43 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
 ## Information hierarchy and space
 
 - Overview answers: what is running, is it healthy, what is limiting it, and
-  what should the operator inspect? Put memory pressure and paging first,
-  then use throughput to show how the workload is behaving.
+  what should the operator inspect? Host-critical resources come first:
+  memory (pressure and composition), compression and paging, then prompt size,
+  which drives KV-cache memory. Throughput is the outcome and stays compact.
 - Charts show trends and comparisons. Keep their primary reading, units and
   freshness adjacent. Keep supporting explanations shorter than the chart.
 - Use one border per chart. Place a dense full-width SYSINFO strip above the
   histories; do not wrap charts in another throughput box.
   SYSINFO owns hardware identity, cores, RAM, CPU/RSS, thermal and GPU allocation.
   Put a fixed borderless two-row assessment below SYSINFO: finding and fitting
-  evidence, then the complete next check or neutral observation. Use `d` for full
-  evidence and runtime setup; do not add another diagnosis card.
-  Memory/pressure and paging share the first row equally, capped at eight rows.
-  Generation, prefill and GPU use 40/35/25 percent widths and receive the
-  remaining height. Prompt history takes half of the next row, with Cache and
-  Queue taking one quarter each. Paging includes the swap capacity bar.
+  evidence, then the complete next check or neutral observation. Lead with the
+  verdict: when nothing is actionable and OS pressure is normal, say
+  `Healthy · no bottleneck` in green; high GPU use is evidence, never the
+  headline. Findings use sentence case. Use `d` for full evidence and runtime
+  setup; do not add another diagnosis card. A critical alarm replaces these two
+  rows, never SYSINFO.
+  Show each fact once. SYSINFO's title repeats runtime prompt counters only when
+  they differ from the request shown in prompt load.
+  Every row shares one grid of three equal columns, so panel edges line up.
+  The host row takes all remaining height (at least six rows): memory,
+  compression and paging on macOS; on Linux, which has no compressor counters,
+  memory spans two columns beside paging. The memory reading slot shows
+  PRESSURE; bytes and resident percentage follow, then a composition bar
+  (wired, app, compressed, cache, free) with the GPU wired limit marked when
+  known. Compression charts compress + decompress traffic with compressor
+  occupancy; paging includes the swap capacity bar. Prompt history takes half
+  Prompt history spans two columns of the next row (about 28% of the height,
+  nine to fourteen rows); Cache and Queue stack in the third. Generation,
+  prefill and GPU take one column each in a seven- to ten-row row (four on
+  short terminals, where readings stay in the titles). Journal grows from five
+  to ten rows on tall terminals; everything else goes to the host row.
   OS footprint remains in MLX Top and the static report, without a chart.
   Show measured latency beside Journal when space permits.
 - At very short chart heights, use percentage capacity bars and exact readings
   instead of one-row traces with misleading axes. Preserve units on standalone
   narrow rate charts. Keep an accessible help hint and separate chart/view keys.
-- Give prompt history nine to thirteen rows on regular terminals, seven on
+- Give prompt history nine to thirteen rows on regular terminals (more on tall
+  terminals, see above), seven on
   short macOS terminals and six with a compact NVIDIA table. Journal gets
   five rows on regular terminals (three event lines) and no compact preview; the full Journal is available with `3`. Wrap summaries to at most
   two rows, align time/state columns, and mark shortened messages.
@@ -82,8 +99,11 @@ Use the existing palette; do not introduce per-widget color schemes.
 | Live request in prompt history | Cyan plus LIVE |
 | Historical request in prompt history | Blue plus LAST SEEN or REPORTED and age |
 | Prompt size changes | Muted numeric comparison; never warning markers on bars |
-| Resident RAM | Cyan shows occupancy including file cache; the separate PRESSURE label carries OS severity |
-| GPU utilization | Green/yellow/red configured load bands, with a numeric reading and load label |
+| Resident RAM | Bytes and percentage in cyan; the PRESSURE label and the occupancy trace carry OS pressure severity |
+| GPU utilization | Green/yellow/red configured load bands with a numeric reading and load label (`within target`, `busy`, `saturated`) |
+| Throughput | Green at or above the rolling baseline; yellow and red for measured drops of 10% and 30% |
+| Cache reuse | Green from 50%, yellow from 20%, red below 20% (prompt CACHED share from 4,096 tokens) |
+| Queue waiting series | Yellow only while requests wait in view; muted at zero |
 | Supporting text, unknown data, historical advice | Muted |
 
 Never require color alone to interpret severity, freshness or selection. Use
@@ -115,12 +135,13 @@ colors in time-series history instead of recoloring old samples on refresh.
   changes appear numerically; do not mark growth as an alarm. `↑` marks scale
   overflow. Keep the selected `▲` beside its bar's size label. Compact labels
   use `k` for thousands of tokens and `M` for millions, never KB. The selected
-  observation's UTC timestamp stays in the headline when it fits; output speed
+  observation's local timestamp (Journal's zone; labeled UTC only when the
+  offset is unknown) stays in the headline when it fits; output speed
   takes priority on narrow panels, with full metadata in the expanded view. Horizontal spacing
   represents request order.
   Cache availability must not alter bar height. Partial cells that cannot fit
-  both segment colors and empty space use the dominant segment; the selected
-  readout retains the precise count and reported cache reuse.
+  both segment colors and empty space stay unsplit in the request color; the
+  selected readout retains the precise count and reported cache reuse (`CACHED`).
 - Keep OS process memory in MLX Top and the static report, attributed to its
   PID and source. Keep footprint, RSS and allocator counters distinct.
 - Suggestions must follow visible evidence. Prompt history emphasizes actual

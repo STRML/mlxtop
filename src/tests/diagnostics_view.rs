@@ -71,14 +71,16 @@ fn summary_shows_evidence_without_turning_gpu_load_into_a_bottleneck() {
     app.collector.current.correlation = Default::default();
     for (w, h) in [(80, 24), (120, 40), (180, 50)] {
         let screen = render_app(&app, w, h);
-        assert!(screen.contains("GPU busy · bottleneck unconfirmed"));
+        assert!(screen.contains("Healthy · no bottleneck"), "{screen}");
+        assert!(screen.contains("GPU 99%"), "{screen}");
+        assert!(!screen.contains("GPU busy"));
         assert!(screen.contains("d diagnostics"));
-        assert!(screen.contains("prompt load") && screen.contains("paging / I/O"));
+        assert!(screen.contains("prompt load") && screen.contains("paging"));
     }
     app.collector.current.llm_remote = true;
     assert!(render_app(&app, 80, 24).contains("Local host:"));
     assert!(render_app(&app, 80, 24)
         .contains("Remote inference is not correlated with local hardware."));
     app.collector.current.pressure = "RED".into();
-    assert!(render_app(&app, 80, 24).contains("Local host: MEMORY BOTTLENECK"));
+    assert!(render_app(&app, 80, 24).contains("Local host: Memory bottleneck"));
 }

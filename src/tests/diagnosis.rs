@@ -25,10 +25,22 @@ fn high_gpu_usage_is_evidence_not_a_slowdown_or_alarm() {
     sample.correlation.direction = ThroughputDirection::Flat;
     let finding = assess(&sample);
     assert!(!finding.actionable);
-    assert!(finding.title.contains("unconfirmed"));
+    assert_eq!(finding.title, "Healthy · no bottleneck");
+    assert_eq!(finding.tone, Tone::Green);
     assert!(finding.evidence.contains("99%"));
     assert_eq!(finding.next, "No generation slowdown measured.");
+    // The chart grades saturation red; the finding still reports no bottleneck.
     assert_eq!(ChartMetric::Gpu.tone(100, Thresholds::default()), Tone::Red);
+    // Without normal OS pressure the verdict stays neutral.
+    sample.pressure = "YELLOW".into();
+    let finding = assess(&sample);
+    assert_eq!(finding.title, "No bottleneck established");
+    assert_eq!(finding.tone, Tone::Muted);
+    // An idle runtime is waiting, not missing a reading.
+    sample.pressure = "GREEN".into();
+    sample.llm_generation_tps_live = false;
+    sample.llm_status = "idle".into();
+    assert_eq!(assess(&sample).next, "Idle · waiting for the next request.");
 }
 
 #[test]
@@ -59,7 +71,7 @@ fn missing_live_rates_do_not_hide_critical_memory_pressure() {
         ..Sample::default()
     };
     let finding = assess(&sample);
-    assert_eq!(finding.title, "MEMORY BOTTLENECK");
+    assert_eq!(finding.title, "Memory bottleneck");
     assert_eq!(finding.tone, Tone::Red);
     assert!(finding.actionable);
     sample.pressure = "UNKNOWN".into();
@@ -77,7 +89,7 @@ fn compression_and_queue_findings_name_their_evidence() {
         ..busy_sample()
     };
     let finding = assess(&compression);
-    assert_eq!(finding.title, "COMPRESSION ACTIVE");
+    assert_eq!(finding.title, "Compression active");
     assert_eq!(finding.evidence, "Compression 80.0 MiB/s · paging 0 B/s");
     assert_eq!(finding.next, "Check whether paging also rises.");
     assert_eq!(finding.tone, Tone::Yellow);
