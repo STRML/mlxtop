@@ -1,8 +1,9 @@
 # Changelog
 
-## Unreleased
+## 3.0.0 — 2026-10-17
 
-Next major version (3.0), developed on the `next/3.0` branch.
+mlxtop now covers local LLMs beyond Apple Silicon: NVIDIA GPUs and Windows,
+plus the mlx-serve and Splash runtimes.
 
 - Windows (x86_64) support: memory, commit charge, processes and runtime
   detection through the Windows APIs, NVIDIA GPUs through `nvidia-smi`, logs in
