@@ -14,6 +14,13 @@ Next major version (3.0), developed on the `next/3.0` branch.
   thermal, power-brake or hardware clock slowdowns on a busy card. The GPU
   panel's STATE column shows the clock-limit reason, and full VRAM turns the
   card's memory reading yellow.
+- Add Splash (`MLXTOP_PROVIDER=splash`, default port 8000), detected by its
+  Metal engine process. It polls `/status` for the model, each running request's
+  prompt and output counts with prefill progress, waiting requests, a generation
+  rate from the engine's decode counter, the prefill speed of its prefill
+  commands, prefix-cache reuse, Metal memory against its limit, DFlash draft
+  acceptance, server TTFT p50, and released weights, thermal state and memory
+  pressure. An API key goes in `MLXTOP_PROVIDER_API_KEY`.
 - Add mlx-serve (`MLXTOP_PROVIDER=mlx-serve`, default port 11234) with process
   detection. It polls `/metrics` for queues, a live generation rate that counts
   tokens of requests still running, a prefill rate that follows the prompt being

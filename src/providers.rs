@@ -14,9 +14,12 @@ use std::{env, fs};
 
 #[path = "provider_native.rs"]
 mod native;
+#[path = "provider_splash.rs"]
+mod splash;
 
 const MAX_USAGE_BYTES: u64 = 256 * 1024;
 const MLX_SERVE_PORT: u16 = 11234;
+const SPLASH_PORT: u16 = 8000;
 
 pub(super) fn new_request_summary(
     seen: &mut VecDeque<(String, u64)>,
@@ -252,6 +255,7 @@ fn canonical_provider(name: &str) -> Option<&'static str> {
         "vllm" => Some("vLLM"),
         "mlx-serve" | "mlx_serve" | "mlxserve" => Some("mlx-serve"),
         "sglang" => Some("SGLang"),
+        "splash" => Some("Splash"),
         "jan" => Some("Jan"),
         "gpt4all" => Some("GPT4All"),
         _ => None,
@@ -270,6 +274,7 @@ pub(super) struct Adapter {
     kobold_session: u64,
     endpoint: native::Endpoint,
     metrics: native::MetricsHistory,
+    splash: splash::SplashHistory,
     diagnostics: RefCell<RuntimeReport>,
     config_error: Option<ProbeIssue>,
 }
@@ -291,6 +296,7 @@ impl Adapter {
             kobold_session: 0,
             endpoint: native::Endpoint::from_env(),
             metrics: native::MetricsHistory::default(),
+            splash: splash::SplashHistory::default(),
             diagnostics: RefCell::default(),
             config_error: env::var("MLXTOP_PROVIDER_PORT").ok().and_then(|s| {
                 if s.parse::<u16>().is_ok_and(|p| p > 0) {
@@ -316,6 +322,7 @@ impl Adapter {
             self.backoff = Duration::from_secs(1);
             self.kobold_uptime = None;
             self.metrics = native::MetricsHistory::default();
+            self.splash = splash::SplashHistory::default();
             self.kobold_session = self.kobold_session.saturating_add(1);
         }
         self.usage_file.is_some() || self.selected.as_deref().is_some_and(|s| s != "oMLX")
@@ -387,6 +394,9 @@ impl Adapter {
                     body.and_then(|body| self.metrics.observe(provider, &body, now))
                 }
                 Some("mlx-serve") => self.poll_mlx_serve(now),
+                Some("Splash") => self
+                    .get_json(SPLASH_PORT, "/status")
+                    .and_then(|value| self.splash.observe(&value, now)),
                 Some("Ollama") => self
                     .get_json(11434, "/api/ps")
                     .and_then(|value| native::ollama(&value)),

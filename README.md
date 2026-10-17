@@ -310,6 +310,7 @@ and isn't read.
 | LM Studio / llmster | Loaded instances and context capacity from native APIs, with older API fallback; completed counts, speed and first-token timing through the usage recorder |
 | vLLM, SGLang | Prometheus active/waiting queues, sampled server token rates, cache statistics, KV occupancy and cumulative mean first-token timing |
 | mlx-serve | Prometheus active/waiting queues, live generation rate (running requests included), prefill rate and progress while a prompt is being processed, prefix-token cache reuse and MLX memory; the model and each running request's prompt, cached and output counts from `/metrics.json`. Start the server with `--metrics`. |
+| Splash | Running and waiting requests with each one's prompt and output counts, prefill progress, generation rate from the engine's decode counter, prefill speed of its prefill commands, prefix-cache reuse, Metal memory against its limit, DFlash draft acceptance, server TTFT p50, released weights, thermal state and memory pressure, all from `/status` |
 | MLX-LM, LocalAI, Jan, GPT4All | Process detection and available-model catalogue; completed request counts and explicitly supplied timing through the usage recorder |
 
 Provider URLs, bearer authentication, default ports and client setup are covered

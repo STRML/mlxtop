@@ -221,6 +221,12 @@ pub(crate) fn process_provider(name: &str, command: &str) -> Option<String> {
         "llama.cpp"
     } else if candidates.iter().any(|token| token == "mlxserve") {
         "mlx-serve"
+    } else if std::iter::once(name)
+        .chain(command_tokens.first().copied())
+        .any(|token| normalize_process_token(token) == "splash")
+    {
+        // Splash's Metal engine, `…/engine/splash`; its Python HTTP server names no runtime.
+        "Splash"
     } else if has("mlxlm") {
         "mlx-lm"
     } else {

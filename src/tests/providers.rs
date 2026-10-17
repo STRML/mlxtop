@@ -85,6 +85,7 @@ fn usage_file_supplements_live_slots_and_filters_other_providers() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
         config_error: None,
     };
@@ -146,6 +147,7 @@ fn llama_http_polls_metrics_even_when_slots_are_disabled() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
         config_error: None,
     };
@@ -443,6 +445,7 @@ fn kobold_restart_does_not_reuse_request_identity() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
         config_error: None,
     };
@@ -521,6 +524,7 @@ fn provider_switch_drops_cached_counts() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
         config_error: None,
     };
@@ -568,6 +572,7 @@ fn native_poll_uses_get_and_preserves_last_result_age() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
         config_error: None,
     };
@@ -765,6 +770,7 @@ fn every_new_adapter_polls_its_native_read_only_endpoint() {
             kobold_session: 0,
             endpoint: native::Endpoint::default(),
             metrics: native::MetricsHistory::default(),
+            splash: splash::SplashHistory::default(),
             diagnostics: Default::default(),
             config_error: None,
         };
@@ -817,6 +823,7 @@ fn diagnostic_adapter(provider: &str, port: u16) -> Adapter {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
         config_error: None,
     }
@@ -954,6 +961,7 @@ fn mlx_serve_stops_asking_for_metrics_json_after_a_404_until_restart() {
         kobold_session: 0,
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
+        splash: splash::SplashHistory::default(),
         diagnostics: Default::default(),
         config_error: None,
     };

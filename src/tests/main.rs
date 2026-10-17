@@ -2206,6 +2206,11 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
             "/home/user/.local/bin/mlx-serve --serve --port 11234",
             "mlx-serve",
         ),
+        (
+            "splash",
+            "/opt/homebrew/Cellar/splash/1.0.0/libexec/engine/splash",
+            "Splash",
+        ),
     ] {
         assert!(is_llm_process(name, command), "{command}");
         assert_eq!(
@@ -2227,6 +2232,16 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
             Some("mlx-serve"),
             "{command}"
         );
+    }
+    // Only Splash's engine binary: not its client launcher or a file named splash.
+    for (name, command) in [
+        ("vim", "vim splash"),
+        (
+            "python3.13",
+            "python3.13 -u /opt/homebrew/Cellar/splash/1.0.0/libexec/install/launcher.py opencode",
+        ),
+    ] {
+        assert_eq!(process_provider(name, command), None, "{command}");
     }
 }
 

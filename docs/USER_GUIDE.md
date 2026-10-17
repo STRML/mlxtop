@@ -572,6 +572,7 @@ sessions to monitor independent endpoints concurrently.
 | `llama.cpp` | 8080 | `/slots`, `/metrics` (requires `--metrics`) |
 | `koboldcpp` | 5001 | `/api/extra/perf` |
 | `mlx-serve` | 11234 | `/metrics` (requires `--metrics`), `/metrics.json` |
+| `splash` | 8000 | `/status` |
 | `mlx-lm`, `localai` | 8080 | `/v1/models` |
 | `jan` | 6767 | `/v1/models`; for older desktop servers set port 1337 |
 | `gpt4all` | 4891 | `/v1/models`; enable the local API server in GPT4All |
@@ -651,6 +652,21 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   shown, not live, for three seconds, replaced by the finished request's own speed when
   it ends inside that time. A server without `/metrics.json` is asked once per restart. Cache reuse is tokens
   restored from the prefix cache over all prompt tokens. Sampling follows the vLLM rules.
+- **Splash:** polls `/status` (set `MLXTOP_PROVIDER_API_KEY` when the server runs with
+  `--api-key` or `SPLASH_API_KEY`, and `MLXTOP_PROVIDER_PORT` to match `splash serve --port`).
+  It is detected by its Metal engine process, `…/engine/splash`. Each request in prefill,
+  decode or waiting for a grammar mask is listed with its prompt and generated counts;
+  queued requests and those waiting for memory or a prefix count as waiting. Generation
+  rate is the growth of `metrics.decode_output_tokens` between captures; a busy engine
+  answers with its last snapshot, so each capture is dated by `transport.status_age_ms`
+  and a repeated one keeps the previous rate. Prefill speed is prefilled tokens over the
+  GPU time of the prefill commands (`metrics.prefill_wall_ms`), because both move once per
+  chunk; while a prompt is still in prefill the last chunk's speed stays live, and it
+  shows nothing until the first chunk lands. Once nothing is prefilling the last speed
+  stays shown, not live, for three seconds. Cache reuse is `cache.reused_tokens` over
+  reused plus prefilled tokens. An engine restart or a gap longer than 30 seconds
+  produces no rate. Memory is Splash's Metal allocations (`memory_actual`), not process
+  RSS, against `memory_governor.limit_bytes`.
 - **MLX-LM, LocalAI, Jan and GPT4All:** `/v1/models` supplies the available model
   catalogue. This is not proof that models are loaded or processing a request.
   Completion usage needs client integration, and missing counts/rates stay
@@ -685,7 +701,7 @@ optional. Example shape (replace the timestamp with the completion time):
 
 Supported provider names: `omlx`, `mlx-lm` (also `mlx_lm.server`), `ollama`,
 `llama.cpp` (also `llama-server`), `lmstudio` (also `LM Studio`), `koboldcpp`,
-`localai`, `vllm`, `sglang`, `jan`, `gpt4all`, and `mlx-serve`.
+`localai`, `vllm`, `sglang`, `jan`, `gpt4all`, `mlx-serve`, and `splash`.
 
 Copy only usage counters from the response, with the required envelope above:
 
