@@ -27,7 +27,7 @@ first.
    brew style --fix --formula mlxtop
    ```
 
-4. Commit as `mlxtop 2.1.1 (new formula)` and open a pull request. Complete the
+4. Commit as `mlxtop 3.0.0 (new formula)` and open a pull request. Complete the
    template, including whether AI assisted.
 
 Once it merges, `brew install mlxtop` works without a tap. Then remove the tap
