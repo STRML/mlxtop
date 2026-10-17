@@ -884,7 +884,7 @@ all, pass its tag. The script picks the archive for the remote's platform and
 verifies it against the release's `SHA256SUMS` before installing:
 
 ```sh
-./scripts/cicd.sh --release v2.1.1 --host example.local --user deploy
+./scripts/cicd.sh --release v3.0.0 --host example.local --user deploy
 ```
 
 Useful overrides:

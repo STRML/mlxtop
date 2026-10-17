@@ -7,18 +7,32 @@ GPUs are. NVIDIA systems on Linux and Windows show each card's utilization, VRAM
 temperature and clock limits in Overview, with `[` / `]` navigation for larger
 GPU sets. The assessment names the NVIDIA problems that slow local models: a
 model partly running on the CPU, a card whose VRAM is full, and clocks held down
-by heat or power. With oMLX, vLLM or
-SGLang, you can also follow generation speed and request activity as your model
+by heat or power. With oMLX, vLLM, SGLang, mlx-serve or
+Splash, you can also follow generation speed and request activity as your model
 responds.
 
-![mlxtop 2.1.1 Overview on Apple Silicon: memory pressure with RAM composition, compression and paging first, then prompt load and a compact throughput row, colored by threshold](docs/screenshots/overview.png)
+![mlxtop Overview on Apple Silicon: memory pressure with RAM composition, compression and paging first, then prompt load and a compact throughput row, colored by threshold](docs/screenshots/overview.png)
 
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
 
-**mlxtop 2.1.1** is the current stable release for Apple Silicon macOS and
-Linux (x86_64 and ARM64). [Download 2.1.1](https://github.com/maximpri/mlxtop/releases/tag/v2.1.1)
-or use the installer below.
+**mlxtop 3.0.0** is the current stable release for Apple Silicon macOS,
+Linux (x86_64 and ARM64) and Windows (x86_64). [Download 3.0.0](https://github.com/maximpri/mlxtop/releases/tag/v3.0.0)
+or use the installers below.
+
+## What's new in 3.0
+
+- **Windows:** memory, commit charge, processes and runtime detection on
+  Windows x86_64, with NVIDIA GPUs through `nvidia-smi` and a PowerShell
+  installer. Windows offers no paging counters, so paging shows as unavailable.
+- **NVIDIA verdicts:** the assessment names a model partly or fully on the CPU
+  (Ollama placement), a card whose VRAM is full, and clocks held down by heat,
+  power or the hardware.
+- **Two new runtimes:** [mlx-serve](https://github.com/ddalcu/mlx-serve) with live
+  generation and prefill rates and running requests, and
+  [Splash](https://github.com/incoai/splash) with running requests and prefill
+  progress, decode and prefill speed, prefix-cache reuse, Metal memory and
+  DFlash draft acceptance.
 
 ## What's new in 2.1
 
@@ -89,7 +103,7 @@ Linux downloads are static binaries with no runtime dependencies. Then run:
 
 Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
-example `curl -fsSL … | MLXTOP_VERSION=2.1.1 sh`.
+example `curl -fsSL … | MLXTOP_VERSION=3.0.0 sh`.
 
 ### Install on Windows
 
