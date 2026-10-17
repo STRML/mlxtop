@@ -31,7 +31,7 @@ pub(super) fn assess(sample: &Sample) -> Finding {
 }
 
 fn assess_observation(sample: &Sample) -> Finding {
-    let paging = if sample.swap_available && sample.vm_available && sample.rate_ready {
+    let paging = if sample.paging_measured() && sample.vm_available {
         rate(sample.swap_in.saturating_add(sample.swap_out))
     } else {
         "—".into()
@@ -84,6 +84,14 @@ fn assess_observation(sample: &Sample) -> Finding {
                 rate(sample.compress.saturating_add(sample.decompress))
             );
         }
+        return finding;
+    }
+    if let Some(issue) = &sample.gpu_issue {
+        finding.title = issue.title();
+        finding.evidence = issue.evidence();
+        finding.next = issue.next();
+        finding.actionable = true;
+        finding.tone = Tone::Yellow;
         return finding;
     }
     if sample.impact == "SAMPLING" || !sample.rate_ready {

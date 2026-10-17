@@ -1357,7 +1357,7 @@ fn nvidia_selection_follows_uuid_and_missing_utilization_remains_visible() {
 fn nvidia_dashboard_requires_linux_and_detected_cards() {
     for count in [0, 2] {
         let mut app = nvidia_app(count);
-        let expected = cfg!(target_os = "linux") && count > 0;
+        let expected = cfg!(any(target_os = "linux", target_os = "windows")) && count > 0;
         assert_eq!(app.collector.current.has_nvidia_gpus(), expected);
         for (width, height) in [(80, 24), (180, 50)] {
             let screen = render_app(&app, width, height);
@@ -2206,6 +2206,11 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
             "/home/user/.local/bin/mlx-serve --serve --port 11234",
             "mlx-serve",
         ),
+        (
+            "splash",
+            "/opt/homebrew/Cellar/splash/1.0.0/libexec/engine/splash",
+            "Splash",
+        ),
     ] {
         assert!(is_llm_process(name, command), "{command}");
         assert_eq!(
@@ -2227,6 +2232,16 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
             Some("mlx-serve"),
             "{command}"
         );
+    }
+    // Only Splash's engine binary: not its client launcher or a file named splash.
+    for (name, command) in [
+        ("vim", "vim splash"),
+        (
+            "python3.13",
+            "python3.13 -u /opt/homebrew/Cellar/splash/1.0.0/libexec/install/launcher.py opencode",
+        ),
+    ] {
+        assert_eq!(process_provider(name, command), None, "{command}");
     }
 }
 
@@ -2301,6 +2316,7 @@ fn process_pagein_rates_are_pid_scoped() {
     assert_eq!(current[0].pagein_rate, Some(10.0));
 }
 
+#[cfg(unix)]
 #[test]
 fn command_text_drains_large_child_output() {
     let output = command_text(
@@ -2312,6 +2328,23 @@ fn command_text_drains_large_child_output() {
     )
     .expect("large child output should be collected");
     assert_eq!(output.len(), 2048 * 64);
+}
+
+#[cfg(windows)]
+#[test]
+fn command_text_runs_windows_commands_and_rejects_failures() {
+    assert_eq!(
+        command_text("cmd", &["/C", "echo 42"])
+            .as_deref()
+            .map(str::trim),
+        Some("42")
+    );
+    assert_eq!(command_text("cmd", &["/C", "exit 3"]), None);
+    assert_eq!(command_text("mlxtop-no-such-program", &[]), None);
+}
+
+fn is_llm_process(name: &str, command: &str) -> bool {
+    process_provider(name, command).is_some()
 }
 
 #[test]
