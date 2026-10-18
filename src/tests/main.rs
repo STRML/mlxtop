@@ -2246,6 +2246,23 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
 }
 
 #[test]
+fn splash_engine_under_another_runtime_never_becomes_the_provider() {
+    let omlx = "100 2097152 3.0 1.0 S 0 omlx-server /usr/local/bin/omlx-server --port 8000";
+    let engine = "200 20971520 90.0 30.0 R 0 splash \
+                  /opt/homebrew/Cellar/splash/1.3.0/libexec/engine/splash --port 53122";
+    // oMLX 0.7.1 serves models through a Splash child on a private port;
+    // either ps order selects oMLX, and both count as LLM processes.
+    for rows in [format!("{omlx}\n{engine}"), format!("{engine}\n{omlx}")] {
+        let snapshot = parse_processes(&rows);
+        assert_eq!(snapshot.provider.as_deref(), Some("oMLX"), "{rows}");
+        assert_eq!(snapshot.llm_count, 2);
+        assert_eq!(snapshot.top_llm.map(|process| process.pid), Some(200));
+    }
+    // Splash on its own is still Splash.
+    assert_eq!(parse_processes(engine).provider.as_deref(), Some("Splash"));
+}
+
+#[test]
 fn detects_bionic_and_lmstudio_helpers_with_resource_totals() {
     let snapshot = parse_processes(
         "101 4096 12.5 0.1 S 0 Bionic /Applications/Bionic.app/Contents/MacOS/Bionic\n\
