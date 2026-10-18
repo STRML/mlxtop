@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Add `mlxtop update`, which replaces the running binary with the latest
+  release, and `mlxtop update --rc`, which also considers release candidates.
+  It downloads the archive for this platform from GitHub, checks it against the
+  release's `SHA256SUMS` and the binary's reported version, and renames it into
+  place, so a failed update leaves the old binary. Homebrew installs are pointed
+  to `brew upgrade mlxtop`; a root-owned install (the macOS package) needs sudo.
+- Release candidates tagged `vX.Y.Z-rc.N` are built on GitHub's runners and
+  published as prereleases, which installers and plain `mlxtop update` skip.
+
 ## 3.0.0 — 2026-10-17
 
 mlxtop now covers local LLMs beyond Apple Silicon: NVIDIA GPUs and Windows,

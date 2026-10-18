@@ -82,19 +82,23 @@ HOST` builds a native RC locally, stages it on a matching remote test host
 (for example an Apple Silicon Mac running the runtime under test) and leaves
 stable installs untouched; `python3 scripts/rc.py run HOST` opens it there.
 See [Private RC testing over SSH](docs/USER_GUIDE.md#private-rc-testing-over-ssh).
-Candidates get no Git tag and no GitHub release; only final versions are
-tagged and built on GitHub-hosted runners. The README links and
-`scripts/install.sh` follow GitHub's latest release, so they need no
-per-release edits.
+
+To offer a candidate to testers, publish it as a GitHub prerelease: follow
+[Publishing a release](#publishing-a-release) with a `vX.Y.Z-rc.N` tag.
+`mlxtop update --rc` installs the newest published release or prerelease.
+Prereleases never become GitHub's latest release, so the README links,
+`scripts/install.sh`, `scripts/install.ps1` and plain `mlxtop update` keep
+following the latest final release and need no per-release edits.
 
 ## Publishing a release
 
-GitHub-hosted runners build every final release asset; release candidates
-stay local (see above).
+GitHub-hosted runners build every published release asset, for final
+releases and for release candidates offered as prereleases.
 
 1. Update the version in `Cargo.toml` and `Cargo.lock`, add a
-   `## X.Y.Z — YYYY-MM-DD` section to `CHANGELOG.md`, and merge the change
-   through a pull request.
+   `## X.Y.Z — YYYY-MM-DD` section to `CHANGELOG.md` (a candidate may add
+   `## X.Y.Z-rc.N — YYYY-MM-DD`; without one its notes are a one-line
+   placeholder), and merge the change through a pull request.
 2. Tag the merge commit on `main` and push the tag:
 
    ~~~sh
@@ -107,12 +111,13 @@ stay local (see above).
    license texts once for all targets, `scripts/package-release.sh` assembles
    each archive with `BUILD-INFO.json`, and one `SHA256SUMS` covers all four
    downloads. The workflow creates a **draft** release whose notes start from
-   the version's changelog section. Only `vX.Y.Z` tags trigger it; RC tags
-   such as `vX.Y.Z-rc.N` do not.
+   the version's changelog section; a `vX.Y.Z-rc.N` tag makes a draft
+   prerelease.
 4. Review the draft's notes and assets, then publish it:
 
    ~~~sh
    gh release edit vX.Y.Z --draft=false --latest
+   gh release edit vX.Y.Z-rc.N --draft=false   # a candidate stays a prerelease
    ~~~
 
 Pull requests that change the workflow or packaging scripts run the same
