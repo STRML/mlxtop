@@ -181,7 +181,14 @@ fn assess_observation(sample: &Sample) -> Finding {
         )
     {
         finding.next = "No generation slowdown measured.";
-    } else if !live && matches!(sample.llm_status.as_str(), "idle" | "ready") {
+    } else if !live
+        && (matches!(sample.llm_status.as_str(), "idle" | "ready")
+            // oMLX reports `healthy` once no model has requests left.
+            || (fresh
+                && sample.llm_status == "healthy"
+                && sample.llm_active_requests == Some(0)
+                && sample.llm_waiting_requests.unwrap_or(0) == 0))
+    {
         finding.next = "Idle · waiting for the next request.";
     } else if !live {
         finding.next = "Live generation rate unavailable.";
