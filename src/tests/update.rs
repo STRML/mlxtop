@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 use super::*;
 use crate::test_support::TempDir;
-use std::collections::HashMap;
 
 fn version(text: &str) -> Version {
     Version::parse(text).unwrap()
@@ -201,6 +200,7 @@ fn executables_are_replaced_by_rename_and_windows_keeps_the_old_file_aside() {
 #[cfg(unix)]
 mod end_to_end {
     use super::*;
+    use std::collections::HashMap;
     use std::os::unix::fs::PermissionsExt;
 
     const TARGET: &str = "aarch64-apple-darwin";

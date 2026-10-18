@@ -8,6 +8,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RELEASES_URL: &str = "https://api.github.com/repos/maximpri/mlxtop/releases?per_page=30";
@@ -172,11 +173,16 @@ struct WorkDir(PathBuf);
 
 impl WorkDir {
     fn new() -> io::Result<Self> {
+        // The clock alone can repeat (macOS ticks in microseconds).
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
-        let path =
-            std::env::temp_dir().join(format!("mlxtop-update-{}-{nanos}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "mlxtop-update-{}-{nanos}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir(&path)?;
         Ok(Self(path))
     }
