@@ -3,7 +3,8 @@
 use crate::domain::Sample;
 use crate::formatting::{
     bytes, compact_label, compact_tokens, compressed_memory_label, llm_context_label,
-    optional_tokens, process_count_label, signed_rate, telemetry_age, telemetry_source,
+    llm_runtime_label, optional_tokens, process_count_label, signed_rate, telemetry_age,
+    telemetry_source,
 };
 use crate::theme::{card_block, llm_status_tone, tone_badge, BLUE, MUTED};
 use crate::{gpu, request_history};
@@ -141,7 +142,7 @@ fn plain(value: String, color: Color) -> Line<'static> {
 fn identity(sample: &Sample, width: usize) -> Line<'static> {
     Line::from(Span::styled(
         compact_label(
-            &format!("{} · {}", sample.llm_provider, sample.llm_model),
+            &format!("{} · {}", llm_runtime_label(sample), sample.llm_model),
             width,
         ),
         Style::default()

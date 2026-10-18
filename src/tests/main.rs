@@ -2257,9 +2257,13 @@ fn splash_engine_under_another_runtime_never_becomes_the_provider() {
         assert_eq!(snapshot.provider.as_deref(), Some("oMLX"), "{rows}");
         assert_eq!(snapshot.llm_count, 2);
         assert_eq!(snapshot.top_llm.map(|process| process.pid), Some(200));
+        assert_eq!(snapshot.hosted_splash_cpu, Some(90.0));
     }
-    // Splash on its own is still Splash.
-    assert_eq!(parse_processes(engine).provider.as_deref(), Some("Splash"));
+    // Splash on its own is still Splash, and hosts nothing.
+    let alone = parse_processes(engine);
+    assert_eq!(alone.provider.as_deref(), Some("Splash"));
+    assert_eq!(alone.hosted_splash_cpu, None);
+    assert_eq!(parse_processes(omlx).hosted_splash_cpu, None);
 }
 
 #[test]

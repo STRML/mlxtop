@@ -249,6 +249,24 @@ fn report(sample: &Sample, platform: Platform) -> String {
 }
 
 #[test]
+fn static_report_names_the_hosted_engine_instead_of_mlx_readings() {
+    let sample = Sample {
+        llm_provider: "oMLX".into(),
+        llm_engine: Some("Splash".into()),
+        llm_status: "untracked".into(),
+        llm_model: "Qwen3.8-27B-oQ4e-mtp".into(),
+        ..Sample::default()
+    };
+    let text = report(&sample, Platform::MacOs);
+    assert!(
+        text.contains("LLM          oMLX · Splash · untracked · "),
+        "{text}"
+    );
+    assert!(text.contains("ENGINE       Splash under oMLX · engine status is private to oMLX"));
+    assert!(!text.contains("MLX          version"));
+}
+
+#[test]
 fn static_report_lists_memory_paging_runtime_and_diagnosis() {
     let mut sample = Sample {
         impact: "LLM READY".into(),

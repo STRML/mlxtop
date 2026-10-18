@@ -1004,6 +1004,15 @@ impl App {
                 }
                 ChartMetric::Cache if inner.width < 20 => "No cache samples",
                 ChartMetric::Cache => "No cache samples yet",
+                ChartMetric::Generation | ChartMetric::Prefill
+                    if sample.llm_status == "untracked" =>
+                {
+                    if inner.width >= 34 {
+                        "Busy outside oMLX · no live rates"
+                    } else {
+                        "No live rates"
+                    }
+                }
                 ChartMetric::Generation | ChartMetric::Prefill if idle && inner.width >= 26 => {
                     "Idle · no rate samples yet"
                 }

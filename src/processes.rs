@@ -73,6 +73,7 @@ pub(crate) fn snapshot(rows: Vec<ProcessRow>) -> ProcessSnapshot {
     let mut llm_rss = 0;
     let mut llm_cpu = 0.0;
     let mut provider: Option<String> = None;
+    let mut splash_cpu: Option<f64> = None;
     let mut consumers: Vec<Consumer> = Vec::new();
     let mut llm_processes: Vec<LlmProcess> = Vec::new();
 
@@ -96,7 +97,10 @@ pub(crate) fn snapshot(rows: Vec<ProcessRow>) -> ProcessSnapshot {
                 .as_deref()
                 .is_none_or(|current| current == "Splash")
             {
-                provider = Some(detected);
+                provider = Some(detected.clone());
+            }
+            if detected == "Splash" {
+                splash_cpu = Some(splash_cpu.unwrap_or(0.0) + cpu);
             }
             llm_count += 1;
             llm_rss += rss;
@@ -133,6 +137,7 @@ pub(crate) fn snapshot(rows: Vec<ProcessRow>) -> ProcessSnapshot {
     llm_processes.sort_by_key(|process| std::cmp::Reverse(process.rss));
     llm_processes.truncate(32);
     let top_llm = llm_processes.first().cloned();
+    let hosted_splash_cpu = splash_cpu.filter(|_| provider.as_deref() != Some("Splash"));
     ProcessSnapshot {
         llm_count,
         llm_rss,
@@ -141,6 +146,7 @@ pub(crate) fn snapshot(rows: Vec<ProcessRow>) -> ProcessSnapshot {
         provider,
         largest_consumer,
         llm_processes,
+        hosted_splash_cpu,
     }
 }
 
