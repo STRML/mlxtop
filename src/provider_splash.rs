@@ -2,6 +2,7 @@
 //! Splash: one `/status` JSON carries the running requests, the engine's token counters, Metal
 //! memory and the Mac's thermal state. No inference requests.
 use crate::domain::{LlmTelemetry, RequestUsage, TelemetrySource};
+use crate::formatting::bytes;
 use crate::json::json_value;
 use crate::providers::{counter, identifier};
 use serde_json::Value;
@@ -19,6 +20,8 @@ struct Counters {
     /// The HTTP server's instance and its engine restarts: counters reset with either.
     engine: (Option<String>, Option<u64>),
     decoded: u64,
+    /// Decode wall time; with one request decoding, its own decode time.
+    decode_ms: Option<f64>,
     prefilled: u64,
     prefill_ms: f64,
 }
@@ -32,6 +35,9 @@ impl Counters {
                 counter(status, &["transport", "restarts"]),
             ),
             decoded: counter(status, &["metrics", "decode_output_tokens"])?,
+            decode_ms: json_value(status, &["metrics", "decode_wall_ms"])
+                .and_then(Value::as_f64)
+                .filter(|ms| ms.is_finite() && *ms >= 0.0),
             prefilled: counter(status, &["metrics", "prefill_input_tokens"])?,
             prefill_ms: json_value(status, &["metrics", "prefill_wall_ms"])?
                 .as_f64()
@@ -48,6 +54,21 @@ pub(super) struct SplashHistory {
     prefill: Option<(f64, Instant)>,
     /// When the prefills under way began to be seen.
     prefilling_since: Option<Instant>,
+    /// Running requests last seen, to report each one's speed and completion.
+    tracked: Vec<Tracked>,
+    /// The engine the tracked requests ran on: request IDs restart with it.
+    tracked_engine: Option<(Option<String>, Option<u64>)>,
+}
+
+/// A running request between captures.
+struct Tracked {
+    usage: RequestUsage,
+    /// Engine decode counters when it was last seen.
+    decoded_at: Option<u64>,
+    /// Engine decode tokens and time when it was first seen decoding alone.
+    alone_from: Option<(u64, f64)>,
+    /// No other request ran at any capture since it started decoding alone.
+    alone: bool,
 }
 
 impl SplashHistory {
@@ -106,6 +127,83 @@ impl SplashHistory {
         }
     }
 
+    /// Each running request's own output speed while it decodes alone, and a completed record for
+    /// each one that has left the engine. With one request decoding, the engine's decode counters
+    /// are that request's: its speed is decode tokens over decode time, and its final output is
+    /// exact even when it finished between captures. Concurrent requests share the counters, so
+    /// they get no per-request speed, and a finished one keeps its last observed output.
+    fn track(
+        &mut self,
+        current: Vec<(RequestUsage, bool)>,
+        counters: Option<&Counters>,
+        engine: Option<(Option<String>, Option<u64>)>,
+        observed: SystemTime,
+    ) -> (Vec<RequestUsage>, Vec<RequestUsage>) {
+        if engine != self.tracked_engine {
+            // A restarted engine reuses request IDs and forgets its requests.
+            self.tracked.clear();
+            self.tracked_engine = engine;
+        }
+        let alone = current.len() == 1;
+        let speed = |from: Option<(u64, f64)>| {
+            let (tokens, millis) = from?;
+            let counters = counters?;
+            let elapsed = counters.decode_ms? - millis;
+            (elapsed > 0.0 && counters.decoded >= tokens)
+                .then(|| (counters.decoded - tokens) as f64 * 1000.0 / elapsed)
+        };
+        let mut previous = std::mem::take(&mut self.tracked);
+        let mut running = Vec::with_capacity(current.len());
+        for (mut usage, decoding) in current {
+            let seen = previous
+                .iter()
+                .position(|tracked| tracked.usage.id == usage.id)
+                .map(|index| previous.swap_remove(index));
+            let mut tracked = seen.unwrap_or(Tracked {
+                usage: usage.clone(),
+                decoded_at: None,
+                alone_from: None,
+                alone: true,
+            });
+            tracked.alone &= alone;
+            if tracked.alone && decoding && tracked.alone_from.is_none() {
+                tracked.alone_from =
+                    counters.and_then(|counters| Some((counters.decoded, counters.decode_ms?)));
+            }
+            if tracked.alone {
+                usage.output_tps = speed(tracked.alone_from);
+            }
+            tracked.decoded_at = counters.map(|counters| counters.decoded);
+            tracked.usage = usage.clone();
+            self.tracked.push(tracked);
+            running.push(usage);
+        }
+        // Whatever is no longer running has finished. Only with nothing else running do the
+        // counters since its last capture belong to it alone.
+        let quiet = running.is_empty();
+        let finished = previous
+            .into_iter()
+            .map(|tracked| {
+                let mut usage = tracked.usage;
+                if tracked.alone && quiet {
+                    if let Some((now, then)) = counters
+                        .map(|counters| counters.decoded)
+                        .zip(tracked.decoded_at)
+                    {
+                        usage.output = Some(usage.output.unwrap_or(0) + now.saturating_sub(then));
+                    }
+                    usage.output_tps = speed(tracked.alone_from).or(usage.output_tps);
+                } else if !tracked.alone {
+                    usage.output_tps = None;
+                }
+                usage.completed = true;
+                usage.observed_at = Some(observed);
+                usage
+            })
+            .collect();
+        (running, finished)
+    }
+
     pub fn observe(&mut self, status: &Value, now: Instant) -> Option<LlmTelemetry> {
         // Even an engine that has not started answers with `ready`.
         let ready = status.get("ready")?.as_bool()?;
@@ -153,7 +251,8 @@ impl SplashHistory {
             .filter(|ms| ms.is_finite() && *ms >= 0.0)
             .map_or(Duration::ZERO, |ms| Duration::from_secs_f64(ms / 1000.0));
         let captured = now.checked_sub(age).unwrap_or(now);
-        let rates = self.rates(Counters::read(status, captured), prefilling > 0, now);
+        let counters = Counters::read(status, captured);
+        let rates = self.rates(counters.clone(), prefilling > 0, now);
 
         let mut result = LlmTelemetry {
             source: TelemetrySource::Live,
@@ -187,7 +286,7 @@ impl SplashHistory {
         }
 
         let mut details = Vec::new();
-        result.requests = requests
+        let current: Vec<(RequestUsage, bool)> = requests
             .into_iter()
             .flatten()
             .filter(|r| running.contains(&phase(r)))
@@ -202,7 +301,8 @@ impl SplashHistory {
                     }
                 }
                 let age = counter(r, &["age_ms"]).map(Duration::from_millis);
-                Some(RequestUsage {
+                let decoding = phase(r) != "prefill";
+                let usage = RequestUsage {
                     provider: "Splash".into(),
                     model: model.clone().unwrap_or_default(),
                     id: identifier(r, "id")?,
@@ -216,14 +316,46 @@ impl SplashHistory {
                         age.and_then(|age| observed.checked_sub(age))
                             .unwrap_or(observed),
                     ),
-                })
+                };
+                Some((usage, decoding))
             })
             .collect();
-        if let [only] = result.requests.as_slice() {
+        let engine = counters.as_ref().map(|counters| counters.engine.clone());
+        let (running_requests, finished) = self.track(current, counters.as_ref(), engine, observed);
+        if let [only] = running_requests.as_slice() {
             result.prompt_tokens = Some(only.prompt);
             result.output_tokens = only.output;
         }
+        result.requests = running_requests.into_iter().chain(finished).collect();
 
+        // Problems lead: the details line is cut to fit its panel.
+        let mut problems = Vec::new();
+        let count = |path: &[&str]| counter(status, path).filter(|n| *n > 0);
+        let outcomes: Vec<String> = [("failed", "failed"), ("cancelled", "cancelled")]
+            .into_iter()
+            .filter_map(|(field, label)| Some(format!("{} {label}", count(&["requests", field])?)))
+            .collect();
+        if !outcomes.is_empty() {
+            let submitted = count(&["requests", "submitted"])
+                .map(|n| format!(" of {n} requests"))
+                .unwrap_or_default();
+            problems.push(format!("{}{submitted}", outcomes.join(" · ")));
+        }
+        if json_value(status, &["metal", "healthy"]).and_then(Value::as_bool) == Some(false) {
+            problems.push("Metal unhealthy".into());
+        }
+        if let Some(n) = count(&["metrics", "metal_failures"]) {
+            problems.push(format!("{n} Metal failures"));
+        }
+        if let Some(n) = count(&["metrics", "capacity_failures"]) {
+            problems.push(format!("{n} capacity failures"));
+        }
+        if let Some(n) = count(&["admission", "waiting_memory"]) {
+            problems.push(format!("{n} waiting for memory"));
+        }
+        if let Some(gate) = text(&["disk", "writes_gated"]).filter(|gate| *gate != "no") {
+            problems.push(format!("SSD cache writes gated ({})", sanitized(gate)));
+        }
         if let Some(context) = counter(status, &["maximum_context_tokens"]).filter(|n| *n > 0) {
             details.push(format!("context capacity {context} tokens"));
         }
@@ -234,22 +366,40 @@ impl SplashHistory {
         {
             details.push(format!("DFlash draft acceptance {:.0}%", rate * 100.0));
         }
-        if let Some(ttft) = json_value(status, &["metrics", "ttft_ms", "p50"])
-            .and_then(Value::as_f64)
-            .filter(|ms| ms.is_finite() && *ms > 0.0)
-        {
-            details.push(format!("server TTFT p50 {ttft:.0} ms"));
+        let percentiles = |metric: &str| {
+            let at = |p: &str| {
+                json_value(status, &["metrics", metric, p])
+                    .and_then(Value::as_f64)
+                    .filter(|ms| ms.is_finite() && *ms > 0.0)
+            };
+            at("p50").map(|p50| match at("p95") {
+                Some(p95) => format!("p50 {p50:.0} ms · p95 {p95:.0} ms"),
+                None => format!("p50 {p50:.0} ms"),
+            })
+        };
+        if let Some(ttft) = percentiles("ttft_ms") {
+            details.push(format!("server TTFT {ttft}"));
+        }
+        if let Some(itl) = percentiles("itl_ms") {
+            details.push(format!("inter-token {itl}"));
+        }
+        if let Some(peak) = count(&["memory_actual", "peak_bytes"]) {
+            let headroom = counter(status, &["memory_governor", "headroom_bytes"])
+                .map(|n| format!(" · headroom {}", bytes(n)))
+                .unwrap_or_default();
+            details.push(format!("Metal peak {}{headroom}", bytes(peak)));
         }
         if released {
             details.push("weights released while idle".into());
         }
         if let Some(thermal) = text(&["thermal_state"]).filter(|s| *s != "nominal") {
-            details.push(format!("thermal state {}", sanitized(thermal)));
+            problems.push(format!("thermal state {}", sanitized(thermal)));
         }
         if let Some(pressure) = text(&["memory_pressure"]).filter(|s| *s != "normal") {
-            details.push(format!("memory pressure {}", sanitized(pressure)));
+            problems.push(format!("memory pressure {}", sanitized(pressure)));
         }
-        result.details = (!details.is_empty()).then(|| details.join(" · "));
+        problems.append(&mut details);
+        result.details = (!problems.is_empty()).then(|| problems.join(" · "));
         Some(result)
     }
 }

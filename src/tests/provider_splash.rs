@@ -262,3 +262,159 @@ fn an_engine_that_has_not_started_still_reports_and_other_json_does_not() {
         .observe(&json!({"ready": "yes"}), Instant::now())
         .is_none());
 }
+
+/// `status` with the engine's decode time, which per-request speeds read.
+fn timed(decoded: u64, decode_ms: f64, requests: Value) -> Value {
+    let mut value = status(decoded, 6000, 3000.0, requests);
+    value["metrics"]["decode_wall_ms"] = json!(decode_ms);
+    value
+}
+
+#[test]
+fn a_request_decoding_alone_gets_its_own_speed_and_an_exact_final_count() {
+    let mut history = SplashHistory::default();
+    let now = Instant::now();
+    let at = |seconds| now + Duration::from_secs(seconds);
+    // Prefilling: no output speed yet.
+    let result = history
+        .observe(
+            &timed(500, 10_000.0, json!([request(1, "prefill", 900, 400, 0)])),
+            at(0),
+        )
+        .unwrap();
+    assert_eq!(result.requests[0].output_tps, None);
+    // First seen decoding: the engine's counters mark where its decoding began.
+    let result = history
+        .observe(
+            &timed(510, 10_200.0, json!([request(1, "decode", 900, 900, 10)])),
+            at(1),
+        )
+        .unwrap();
+    assert_eq!(result.requests[0].output_tps, None);
+    // 120 tokens in 2000 ms of decode time.
+    let result = history
+        .observe(
+            &timed(630, 12_200.0, json!([request(1, "decode", 900, 900, 130)])),
+            at(2),
+        )
+        .unwrap();
+    assert_eq!(result.requests[0].output_tps, Some(60.0));
+    assert!(!result.requests[0].completed);
+    // It finished between captures: 40 more tokens than last seen, and 160 tokens in the
+    // 2500 ms of decode time since it was first seen decoding.
+    let result = history
+        .observe(&timed(670, 12_700.0, json!([])), at(3))
+        .unwrap();
+    assert_eq!(result.requests.len(), 1);
+    let done = &result.requests[0];
+    assert!(done.completed);
+    assert_eq!(done.id, "1");
+    assert_eq!(done.output, Some(170));
+    assert_eq!(done.output_tps, Some(64.0));
+    assert_eq!(
+        result.prompt_tokens, None,
+        "a finished request is not the one running"
+    );
+    // Reported once.
+    let result = history
+        .observe(&timed(670, 12_700.0, json!([])), at(4))
+        .unwrap();
+    assert!(result.requests.is_empty());
+}
+
+#[test]
+fn concurrent_requests_share_counters_so_get_no_per_request_speed() {
+    let mut history = SplashHistory::default();
+    let now = Instant::now();
+    let at = |seconds| now + Duration::from_secs(seconds);
+    let both = |a, b| {
+        json!([
+            request(1, "decode", 900, 900, a),
+            request(2, "decode", 300, 300, b)
+        ])
+    };
+    history
+        .observe(&timed(100, 1000.0, both(10, 5)), at(0))
+        .unwrap();
+    let result = history
+        .observe(&timed(300, 3000.0, both(110, 105)), at(1))
+        .unwrap();
+    assert!(result.requests.iter().all(|r| r.output_tps.is_none()));
+    // Request 2 finishes while 1 runs on: its last observed count, no speed.
+    let result = history
+        .observe(
+            &timed(400, 4000.0, json!([request(1, "decode", 900, 900, 210)])),
+            at(2),
+        )
+        .unwrap();
+    let done: Vec<_> = result.requests.iter().filter(|r| r.completed).collect();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].id, "2");
+    assert_eq!(done[0].output, Some(105));
+    assert_eq!(done[0].output_tps, None);
+    // Request 1 shared the engine before, so its speed stays unknown.
+    let running = result.requests.iter().find(|r| !r.completed).unwrap();
+    assert_eq!(running.output_tps, None);
+}
+
+#[test]
+fn a_restarted_engine_forgets_its_requests_without_finishing_them() {
+    let mut history = SplashHistory::default();
+    let now = Instant::now();
+    history
+        .observe(
+            &timed(100, 1000.0, json!([request(1, "decode", 900, 900, 10)])),
+            now,
+        )
+        .unwrap();
+    let mut restarted = timed(0, 0.0, json!([]));
+    restarted["transport"]["restarts"] = json!(1);
+    let result = history
+        .observe(&restarted, now + Duration::from_secs(1))
+        .unwrap();
+    assert!(result.requests.is_empty());
+}
+
+#[test]
+fn details_lead_with_problems_then_latency_memory_and_capacity() {
+    let mut value = status(1000, 6000, 3000.0, json!([]));
+    value["requests"] = json!({"submitted": 412, "completed": 408, "cancelled": 1, "failed": 3});
+    value["metal"] = json!({"healthy": false});
+    value["metrics"]["metal_failures"] = json!(2);
+    value["metrics"]["capacity_failures"] = json!(0);
+    value["metrics"]["itl_ms"] = json!({"p50": 12.4, "p95": 31.0});
+    value["admission"] = json!({"waiting_memory": 1});
+    value["disk"] = json!({"writes_gated": "budget"});
+    value["thermal_state"] = json!("serious");
+    value["memory_governor"]["headroom_bytes"] = json!(4_400_000_000_u64);
+    let details = SplashHistory::default()
+        .observe(&value, Instant::now())
+        .unwrap()
+        .details
+        .unwrap();
+    let parts: Vec<&str> = details.split(" · ").collect();
+    assert_eq!(
+        &parts[..7],
+        [
+            "3 failed",
+            "1 cancelled of 412 requests",
+            "Metal unhealthy",
+            "2 Metal failures",
+            "1 waiting for memory",
+            "SSD cache writes gated (budget)",
+            "thermal state serious",
+        ],
+        "{details}"
+    );
+    for part in [
+        "server TTFT p50 282 ms · p95 900 ms",
+        "inter-token p50 12 ms · p95 31 ms",
+        "Metal peak 20.5 GiB · headroom 4.1 GiB",
+    ] {
+        assert!(details.contains(part), "{details}");
+    }
+    assert!(
+        !details.contains("capacity failures"),
+        "zero is not a problem"
+    );
+}
