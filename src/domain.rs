@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //! Shared observation and event types. Values remain independent of terminal widgets.
-use crate::config::{load_tone, Thresholds};
+use crate::config::{load_tone, Thresholds, TIGHT_FREE_PERCENT};
 use crate::{gpu, process_memory};
 use std::time::SystemTime;
 pub(crate) const MIB: u64 = 1024 * 1024;
@@ -391,6 +391,11 @@ pub(crate) struct Sample {
     pub(crate) paging_unavailable: bool,
     pub(crate) swap_in: u64,
     pub(crate) swap_out: u64,
+    /// Pages read from and written to disk outside swap, in bytes per second
+    /// (macOS `Pageins`/`Pageouts`). Model loads read through here too; with
+    /// swap off it is how a full machine pages.
+    pub(crate) page_in: u64,
+    pub(crate) page_out: u64,
     pub(crate) swap_growth: i64,
     pub(crate) compress: u64,
     pub(crate) decompress: u64,
@@ -457,6 +462,44 @@ impl Sample {
         self.swap_available && self.rate_ready && !self.paging_unavailable
     }
 
+    /// RAM is short: macOS reports pressure, or little memory is free. Only
+    /// then is file paging the system paging under load rather than a model
+    /// or an app reading its files.
+    pub(crate) fn memory_tight(&self) -> bool {
+        matches!(self.pressure.as_str(), "YELLOW" | "RED")
+            || self
+                .availability
+                .is_some_and(|free| free <= TIGHT_FREE_PERCENT)
+    }
+
+    /// Disk paging that counts against the system: swap always, file paging
+    /// while memory is tight.
+    pub(crate) fn paging_in(&self) -> u64 {
+        let file = if self.memory_tight() { self.page_in } else { 0 };
+        self.swap_in.saturating_add(file)
+    }
+
+    pub(crate) fn paging_out(&self) -> u64 {
+        let file = if self.memory_tight() {
+            self.page_out
+        } else {
+            0
+        };
+        self.swap_out.saturating_add(file)
+    }
+
+    pub(crate) fn paging_churn(&self) -> u64 {
+        self.paging_in().saturating_add(self.paging_out())
+    }
+
+    /// All disk paging, counted or not: what the paging chart plots.
+    pub(crate) fn disk_paging(&self) -> u64 {
+        self.swap_in
+            .saturating_add(self.swap_out)
+            .saturating_add(self.page_in)
+            .saturating_add(self.page_out)
+    }
+
     pub(crate) fn has_nvidia_gpus(&self) -> bool {
         cfg!(any(target_os = "linux", target_os = "windows")) && !self.gpus.is_empty()
     }
@@ -485,6 +528,8 @@ impl Default for Sample {
             paging_unavailable: false,
             swap_in: 0,
             swap_out: 0,
+            page_in: 0,
+            page_out: 0,
             swap_growth: 0,
             compress: 0,
             decompress: 0,
@@ -556,6 +601,9 @@ pub(crate) struct VmCounters {
     pub(crate) file_backed: u64,
     pub(crate) swapins: u64,
     pub(crate) swapouts: u64,
+    /// File-backed and anonymous pages read from / written to disk outside swap.
+    pub(crate) pageins: u64,
+    pub(crate) pageouts: u64,
     pub(crate) compressions: u64,
     pub(crate) decompressions: u64,
     pub(crate) reactivations: u64,

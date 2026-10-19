@@ -36,6 +36,8 @@ pub(crate) struct PreviousCounters {
     pub(crate) at: Instant,
     pub(crate) swapins: u64,
     pub(crate) swapouts: u64,
+    pub(crate) pageins: u64,
+    pub(crate) pageouts: u64,
     pub(crate) compressions: u64,
     pub(crate) decompressions: u64,
     pub(crate) reactivations: u64,
@@ -228,6 +230,16 @@ impl Collector {
                 self.page_size,
                 elapsed,
             );
+            sample.page_in = rate_bytes(
+                delta(counters.pageins, previous.pageins),
+                self.page_size,
+                elapsed,
+            );
+            sample.page_out = rate_bytes(
+                delta(counters.pageouts, previous.pageouts),
+                self.page_size,
+                elapsed,
+            );
             sample.compress = rate_bytes(
                 delta(counters.compressions, previous.compressions),
                 self.page_size,
@@ -250,6 +262,8 @@ impl Collector {
             at: now,
             swapins: counters.swapins,
             swapouts: counters.swapouts,
+            pageins: counters.pageins,
+            pageouts: counters.pageouts,
             compressions: counters.compressions,
             decompressions: counters.decompressions,
             reactivations: counters.reactivations,
@@ -506,14 +520,14 @@ impl Collector {
         );
         // Captured tones follow the assessment's states, so a chart never
         // shows a severity the headline does not report.
-        let paging = sample
-            .paging_measured()
-            .then_some(sample.swap_in.saturating_add(sample.swap_out));
+        // The chart plots all disk paging; its grade is what counted against
+        // the system (swap, and file paging while memory is tight).
+        let paging = sample.paging_measured().then_some(sample.disk_paging());
         push_history_with_tone(
             &mut self.swap_history,
             paging,
             paging
-                .map(|churn| paging_tone(churn, &sample.impact, self.thresholds))
+                .map(|_| paging_tone(sample.paging_churn(), &sample.impact, self.thresholds))
                 .unwrap_or(Tone::Muted),
             self.history_limit,
         );
@@ -720,12 +734,12 @@ impl Collector {
                 );
             }
 
-            let previous_paging = previous.swap_in.saturating_add(previous.swap_out) > 0;
-            let paging = sample.swap_in.saturating_add(sample.swap_out) > 0;
+            let previous_paging = previous.paging_churn() > 0;
+            let paging = sample.paging_churn() > 0;
             if previous_paging != paging {
                 // Same band as the paging chart: traffic below the warning
                 // rate is light paging, not a condition worth inspecting.
-                let churn = sample.swap_in.saturating_add(sample.swap_out);
+                let churn = sample.paging_churn();
                 let tone = ChartMetric::Swap.tone(churn, self.thresholds);
                 add(
                     "PAGING",
@@ -737,8 +751,8 @@ impl Collector {
                             } else {
                                 "active"
                             },
-                            rate(sample.swap_in),
-                            rate(sample.swap_out)
+                            rate(sample.paging_in()),
+                            rate(sample.paging_out())
                         )
                     } else {
                         "cleared · no current paging traffic".into()

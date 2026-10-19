@@ -249,6 +249,40 @@ fn report(sample: &Sample, platform: Platform) -> String {
 }
 
 #[test]
+fn static_report_paging_includes_file_paging_and_whether_it_counts() {
+    let mib = 1024 * 1024;
+    let mut sample = Sample {
+        swap_available: true,
+        swap_total: 0,
+        page_in: 900 * mib,
+        page_out: mib,
+        availability: Some(40),
+        pressure: "GREEN".into(),
+        ..Sample::default()
+    };
+    let paging = |sample: &Sample| {
+        report(sample, Platform::MacOs)
+            .lines()
+            .find(|line| line.starts_with("PAGING"))
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(
+        paging(&sample),
+        "PAGING       SWAP 0 B · not allocated · in 900.0 MiB/s · out 1.0 MiB/s · \
+         file in 900.0 MiB/s · out 1.0 MiB/s · memory not tight"
+    );
+    sample.availability = Some(8);
+    assert!(paging(&sample).ends_with("memory tight"));
+    sample.page_in = 0;
+    sample.page_out = 0;
+    assert_eq!(
+        paging(&sample),
+        "PAGING       SWAP 0 B · not allocated · in 0 B/s · out 0 B/s"
+    );
+}
+
+#[test]
 fn static_report_names_the_hosted_engine_instead_of_mlx_readings() {
     let sample = Sample {
         llm_provider: "oMLX".into(),
