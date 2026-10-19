@@ -57,7 +57,7 @@ pub(super) fn detail(sample: &Sample) -> String {
         .as_ref()
         .map(|reading| {
             format!(
-                "peak {} · growth {} · OS",
+                "peak {} · growth {}",
                 bytes(reading.peak),
                 sample
                     .process_memory_growth

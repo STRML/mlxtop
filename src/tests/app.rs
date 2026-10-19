@@ -498,7 +498,7 @@ fn interactive_loop_draws_dispatches_input_and_stops_on_quit() {
         .iter()
         .all(|timeout| *timeout == Duration::from_millis(100)));
     let screen = format!("{:?}", terminal.backend().buffer());
-    assert!(screen.contains("MLX Top"));
+    assert!(screen.contains("Processes"));
 }
 
 #[test]
@@ -598,7 +598,7 @@ fn process_view_keys_select_sort_and_filter() {
     press(&mut app, &[KeyCode::Char('/')]);
     assert!(app.top_filtering);
     let typing = render_app(&app, 120, 32);
-    assert!(typing.contains("typing · Enter/Esc finish"));
+    assert!(typing.contains("Enter/Esc finish"), "{typing}");
     press(
         &mut app,
         &[
@@ -665,8 +665,11 @@ fn journal_keys_scroll_newest_first_and_cycle_filters() {
     press(&mut app, &[KeyCode::Home]);
     let newest = render_app(&app, 120, 30);
     assert!(newest.contains("JOURNAL"));
-    assert!(newest.contains("30 events · f/[/] filter"));
-    assert!(newest.contains("LATEST  event 29"));
+    assert!(newest.contains("30 events · latest"));
+    assert!(
+        !newest.contains("SCOPE"),
+        "no description of the journal itself"
+    );
     assert!(newest.contains("EVENTS · ALL · 1–"));
     assert!(newest.contains("of 30"));
 
@@ -700,9 +703,12 @@ fn journal_keys_scroll_newest_first_and_cycle_filters() {
     assert_eq!(app.filtered_journal_events().len(), 15, "GPU events");
     press(&mut app, &[KeyCode::Char(']')]);
     let thermal = render_app(&app, 120, 30);
-    assert!(thermal.contains("waiting for the first recorded event"));
+    assert!(thermal.contains("No events yet."));
     assert!(thermal.contains("EVENTS · THERMAL · 0–0 of 0"));
-    assert!(thermal.contains("age —"));
+    assert!(
+        !thermal.contains("age —"),
+        "no placeholder age without an event"
+    );
     // Unhandled journal keys fall through to global navigation.
     press(&mut app, &[KeyCode::Char('1')]);
     assert_eq!(app.tab, 0);
@@ -720,7 +726,8 @@ fn global_keys_pause_resize_interval_switch_tabs_and_reset() {
     };
     press(&mut app, &[KeyCode::Char('p')]);
     assert!(app.paused);
-    assert!(render_app(&app, 120, 32).contains("PAUSED · 1s"));
+    let paused = render_app(&app, 120, 32);
+    assert!(paused.contains("PAUSED every 1s"), "{paused}");
     press(&mut app, &[KeyCode::Char(' ')]);
     assert!(!app.paused);
     press(

@@ -46,23 +46,45 @@ fn render(sample: &Sample, history: &request_history::History, width: u16, heigh
 fn dense_sysinfo_preserves_state_work_and_hardware_at_supported_sizes() {
     let sample = live_sample();
     let history = request_history::History::default();
-    for (width, height) in [(80, 3), (80, 5), (100, 5), (180, 5)] {
+    for (width, height) in [(80, 3), (180, 3), (80, 5), (100, 5), (180, 5)] {
         let screen = render(&sample, &history, width, height);
         for label in [
-            "SYSINFO",
             "Qwen3.8-27B-oQ4e-mtp",
             "GENERATING",
             "LIVE",
-            "0s old",
             "PROMPT 32.8k",
             "OUT 256",
             "Apple M4 Max",
-            "RAM 32.0 GiB",
-            "THERMAL no warning",
         ] {
             assert!(
                 screen.contains(label),
                 "missing {label} at {width}x{height}\n{screen}"
+            );
+        }
+        // No label for the card, no age on a fresh reading, no normal thermals.
+        for noise in ["SYSINFO", "0s old", "THERMAL no warning"] {
+            assert!(
+                !screen.contains(noise),
+                "{noise} at {width}x{height}\n{screen}"
+            );
+        }
+        if height == 3 {
+            // The Overview strip: what the runtime uses, GPU memory as a meter.
+            let wanted: &[&str] = if width >= 100 {
+                &["GPU mem ", "8.0 GiB / 16.0 GiB", "LLM 16.0 GiB · CPU 1%"]
+            } else {
+                // Least important fields drop first on a narrow strip.
+                &["GPU mem ", "8.0 GiB / 16.0 GiB"]
+            };
+            for label in wanted {
+                assert!(
+                    screen.contains(label),
+                    "missing {label} at {width}\n{screen}"
+                );
+            }
+            assert!(
+                !screen.contains("RAM 32.0 GiB"),
+                "RAM is in the memory panel"
             );
         }
         if height >= 5 {
@@ -132,12 +154,12 @@ fn last_prompt_stays_scoped_to_runtime_and_unknown_os_values_stay_unknown() {
     // Overview's strip leaves the latest request to the prompt load panel.
     let strip = render(&sample, &history, 80, 3);
     assert!(!strip.contains("LAST PROMPT"), "{strip}");
-    assert!(strip.contains("SYSINFO"), "{strip}");
+    assert!(strip.contains("Qwen3.8-27B-oQ4e-mtp"), "{strip}");
     sample.llm_provider = "Ollama".into();
     assert!(!render(&sample, &history, 180, 5).contains("LAST PROMPT"));
 
     let screen = render(&Sample::default(), &history, 100, 5);
-    for label in ["RAM —", "CPU —", "LLM RSS —", "SOURCE —", "age —"] {
+    for label in ["RAM —", "CPU —", "LLM RSS —"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
     assert!(!screen.contains("CPU 0.0%"));

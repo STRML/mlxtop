@@ -41,11 +41,11 @@ fn capacity_bar_keeps_units_and_occupancy_at_compact_and_wide_sizes() {
 fn unavailable_unallocated_and_unused_swap_are_distinct() {
     let mut sample = Sample::default();
     let missing = render(&sample, 40);
-    assert!(text(&missing).contains("SWAP — unavailable"));
+    assert!(text(&missing).contains("swap —"));
     assert!(!text(&missing).contains("0%"));
     sample.swap_available = true;
     let unallocated = render(&sample, 40);
-    assert!(text(&unallocated).contains("SWAP 0 B · not allocated"));
+    assert!(text(&unallocated).contains("swap off"));
     assert!(unallocated.content.iter().all(|cell| cell.bg != CYAN));
     sample.swap_total = 2 * 1024 * MIB;
     let unused = render(&sample, 40);
@@ -63,7 +63,7 @@ fn narrow_rows_keep_the_exact_label_and_tiny_values_use_bytes() {
         ..Sample::default()
     };
     let narrow = text(&render(&sample, 16));
-    assert!(narrow.starts_with("SWAP 512/1000 B"), "{narrow}");
+    assert!(narrow.starts_with("swap 512/1000 B"), "{narrow}");
     assert!(render(&sample, 16)
         .content
         .iter()

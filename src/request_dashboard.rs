@@ -41,12 +41,13 @@ fn clock_stamp(at: SystemTime, utc_offset: Option<i32>) -> String {
     format!("{hours:02}:{minutes:02}:{seconds:02}{suffix}")
 }
 
+/// The change from the request before, when there is one to compare with.
 fn compact_comparison(current: &domain::RequestUsage, previous: Option<&Entry>) -> String {
     let Some(previous) = previous else {
-        return "PREVIOUS OBSERVED — · no earlier request".into();
+        return String::new();
     };
     if current.provider != previous.usage.provider || current.model != previous.usage.model {
-        return "PREVIOUS OBSERVED — · different provider/model".into();
+        return String::new();
     }
     let sign = if current.prompt >= previous.usage.prompt {
         "+"
@@ -62,11 +63,7 @@ fn compact_comparison(current: &domain::RequestUsage, previous: Option<&Entry>) 
     } else {
         String::new()
     };
-    format!(
-        "Δ {sign}{}{percent} · PREVIOUS OBSERVED {}",
-        exact(amount),
-        exact(previous.usage.prompt)
-    )
+    format!("Δ {sign}{}{percent} vs previous", exact(amount))
 }
 
 fn history_window(history: &History, index: usize, width: u16, zoom: u16) -> (usize, usize, u16) {
@@ -105,29 +102,19 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
         .map(|entry| entry.usage.prompt)
         .collect();
     sizes.sort_unstable();
-    let mut line = Line::from(Span::styled(
-        format!(" RECENT {}", sizes.len()),
-        Style::default().fg(MUTED),
-    ));
+    // One request has no typical size; the bar labels carry each size.
     if sizes.len() == 1 {
-        append_detail(&mut line, "newest at right".into(), MUTED, width);
-        return line;
+        return Line::default();
     }
     let middle = sizes.len() / 2;
     let sum = u128::from(sizes[middle]) + u128::from(sizes[(sizes.len() - 1) / 2]);
     // Token counts are whole numbers; round an even-sized median half up.
     let median = exact(sum.div_ceil(2) as u64);
-    append_detail(&mut line, format!("MEDIAN {median} tokens"), MUTED, width);
-    append_detail(
-        &mut line,
-        format!(
-            "RANGE {}–{}",
-            exact(sizes[0]),
-            exact(sizes[sizes.len() - 1])
-        ),
-        MUTED,
-        width,
-    );
+    let mut line = Line::from(Span::styled(
+        format!(" MEDIAN {median} tokens"),
+        Style::default().fg(MUTED),
+    ));
+    append_detail(&mut line, format!("RECENT {}", sizes.len()), MUTED, width);
     if line.width() < usize::from(width) {
         line.spans.push(Span::raw(" "));
     }
@@ -152,7 +139,12 @@ fn is_live(entry: &Entry, sample: &Sample, now: SystemTime) -> bool {
 }
 
 fn append_detail(line: &mut Line<'static>, text: String, color: Color, width: u16) {
-    let span = Span::styled(format!(" · {text}"), Style::default().fg(color));
+    if text.is_empty() {
+        return;
+    }
+    // The first detail on a line needs no separator before it.
+    let separator = if line.width() == 0 { "" } else { " · " };
+    let span = Span::styled(format!("{separator}{text}"), Style::default().fg(color));
     if line.width() + span.width() <= usize::from(width) {
         line.spans.push(span);
     }
@@ -320,9 +312,9 @@ pub(super) fn draw(
         ),
         Span::styled(
             if selected.is_some() {
-                format!("· 0–{} tokens · auto", exact(ceiling))
+                format!("· 0–{} tokens", exact(ceiling))
             } else {
-                "· waiting for requests".into()
+                String::new()
             },
             Style::default().fg(MUTED),
         ),
@@ -335,11 +327,6 @@ pub(super) fn draw(
         .style(Style::default().bg(PANEL));
     if let Some(index) = selected {
         block = block.title_bottom(size_summary(history, index, area.width.saturating_sub(2)));
-    } else {
-        block = block.title_bottom(Line::from(Span::styled(
-            " tokens per request · size on every bar ",
-            Style::default().fg(MUTED),
-        )));
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -347,41 +334,24 @@ pub(super) fn draw(
         return;
     }
     let Some(index) = selected else {
-        let detail = if sample.llm_status == "untracked" {
-            "Requests sent straight to Splash report no prompt counts."
-        } else if matches!(sample.llm_provider.as_str(), "oMLX" | "KoboldCpp") {
-            "Waiting for per-request prompt counts."
-        } else {
-            "No per-request counts received."
-        };
-        let heading = if sample.llm_status == "untracked" {
-            "BUSY OUTSIDE oMLX"
+        // Nothing to chart yet: one line says why, and the Overview gives
+        // this panel no more rows than that line needs.
+        let line = if sample.llm_status == "untracked" {
+            "busy outside oMLX · requests sent straight to Splash report no prompt counts"
         } else if sample.llm_active_requests.is_some_and(|n| n > 0) {
-            "WAITING FOR PROMPT SIZE"
-        } else if sample.llm_source == TelemetrySource::Live && sample.llm_status == "idle" {
-            "READY FOR NEXT REQUEST"
+            "waiting for the prompt size"
         } else {
-            "NO REQUEST HISTORY"
+            "no requests yet"
         };
-        let lines = vec![
-            Line::from(Span::styled(
-                heading,
-                Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(detail, Style::default().fg(MUTED))),
-            Line::from(vec![
-                Span::styled("cached ", Style::default().fg(GREEN)),
-                Span::styled("/ ", Style::default().fg(MUTED)),
-                Span::styled("uncached", Style::default().fg(BLUE)),
-            ]),
-        ];
         frame.render_widget(
-            Paragraph::new(lines).alignment(Alignment::Center),
+            Paragraph::new(line)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(MUTED)),
             Rect::new(
                 inner.x,
-                inner.y + inner.height.saturating_sub(3) / 2,
+                inner.y + inner.height.saturating_sub(1) / 2,
                 inner.width,
-                inner.height.min(3),
+                1,
             ),
         );
         return;
@@ -430,16 +400,20 @@ pub(super) fn draw(
     // Cache and observation age outrank the clock on narrow primary panels.
     // Reserve cache space before adding optional metadata to the headline.
     let headline_width = inner.width.saturating_sub(cache_span.width() as u16 + 2);
-    append_detail(
-        &mut headline,
-        telemetry_age(Some(entry.last_seen)),
-        MUTED,
-        headline_width,
-    );
+    // A live request is happening now: its age and clock say nothing new.
     let timestamp = clock_stamp(entry.last_seen, sample.utc_offset);
-    let before_clock = headline.width();
-    append_detail(&mut headline, timestamp.clone(), MUTED, headline_width);
-    let clock_in_header = headline.width() > before_clock;
+    let mut clock_in_header = live;
+    if !live {
+        append_detail(
+            &mut headline,
+            telemetry_age(Some(entry.last_seen)),
+            MUTED,
+            headline_width,
+        );
+        let before_clock = headline.width();
+        append_detail(&mut headline, timestamp.clone(), MUTED, headline_width);
+        clock_in_header = headline.width() > before_clock;
+    }
     let cache_in_header = headline.width() + cache_span.width() + 2 <= usize::from(inner.width);
     if cache_in_header {
         headline.spans.push(Span::raw(
@@ -460,11 +434,6 @@ pub(super) fn draw(
     let other_runtime =
         entry.usage.provider != sample.llm_provider || entry.usage.model != sample.llm_model;
     let comparison = compact_comparison(&entry.usage, previous);
-    let comparison = if inner.width < 70 {
-        comparison.replace("PREVIOUS OBSERVED", "PREV")
-    } else {
-        comparison
-    };
     let mut details = if other_runtime {
         let cache_width = if cache_in_header {
             0
@@ -500,12 +469,15 @@ pub(super) fn draw(
             inner.width,
         );
     }
-    append_detail(
-        &mut details,
-        format!("#{} / {}", entry.number, history.next_number),
-        MUTED,
-        inner.width,
-    );
+    // Position in the history only matters while browsing older requests.
+    if index + 1 < history.len() {
+        append_detail(
+            &mut details,
+            format!("#{} / {}", entry.number, history.next_number),
+            MUTED,
+            inner.width,
+        );
+    }
     frame.render_widget(
         Paragraph::new(if inner.height >= 5 {
             details

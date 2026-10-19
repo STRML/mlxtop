@@ -227,8 +227,9 @@ fn queue_range_and_time_window_use_the_actual_graph_width_after_reserving_ticks(
         assert_eq!(visible, (28 - gutter).div_ceil(zoom) as usize);
         assert_eq!(ceiling, 2, "off-screen spike must not flatten the trace");
         let subtitle: String = (1..29).map(|x| buffer[(x, 1)].symbol()).collect();
-        assert!(subtitle.contains("0–2 req · auto"), "{subtitle}");
+        // Expanded, the queue names its window; the axis ticks give the range.
         assert!(subtitle.contains(&format!("{visible}s")), "{subtitle}");
+        assert!(!subtitle.contains("auto"), "{subtitle}");
         assert_eq!(buffer[(28, 5)].fg, CYAN);
     }
 }
@@ -263,9 +264,7 @@ fn compact_queue_keeps_exact_counts_when_there_is_no_room_for_a_scale() {
         assert!(text.contains("waiting 5678"), "height {height}: {text}");
         assert!(text.contains("queue"), "height {height}: {text}");
         assert!(!text.contains("0–"), "a compact summary has no fake axis");
-        if height >= 5 {
-            assert!(text.contains("Enter: history"));
-        }
+        assert!(!text.contains("Enter: history"), "no filler line");
     }
 }
 
@@ -347,7 +346,7 @@ fn narrow_queue_preserves_both_counts_and_complete_window_labels() {
         assert!(text.contains(&format!("active {active}")), "{text}");
         assert!(text.contains(&format!("waiting {waiting}")), "{text}");
         if active == 1 {
-            assert!(text.contains("req · window 15s"), "{text}");
+            assert!(text.contains("window 15s"), "{text}");
         }
     }
 }
@@ -430,13 +429,15 @@ fn shared_queue_window_uses_the_same_samples_at_different_widths() {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
+        // On the Overview the top bar names the shared window; the plot
+        // starts on the first row inside the border.
         let heading: String = (1..width - 1).map(|x| buffer[(x, 1)].symbol()).collect();
-        assert!(heading.contains("10s"), "{heading}");
+        assert!(!heading.contains("10s"), "{heading}");
         let graph_start = 4;
         let graph_width = width - 1 - graph_start;
         let spike_start = graph_start + graph_width.div_ceil(2);
-        assert!((2..8).any(|y| buffer[(spike_start, y)].fg == CYAN));
-        assert!((2..8).all(|y| buffer[(width - 2, y)].fg != CYAN));
+        assert!((1..8).any(|y| buffer[(spike_start, y)].fg == CYAN));
+        assert!((1..8).all(|y| buffer[(width - 2, y)].fg != CYAN));
     }
 }
 

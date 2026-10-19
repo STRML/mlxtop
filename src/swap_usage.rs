@@ -16,15 +16,27 @@ pub(super) fn draw(frame: &mut Frame, area: Rect, sample: &Sample) {
     frame.render_widget(Paragraph::default().style(Style::default().bg(PANEL)), row);
     if !sample.swap_available || sample.swap_total == 0 {
         let state = if sample.swap_available {
-            "SWAP 0 B · not allocated"
+            "swap off"
         } else {
-            "SWAP — unavailable"
+            "swap —"
         };
         frame.render_widget(Paragraph::new(state).style(Style::default().fg(MUTED)), row);
         return;
     }
 
-    capacity_bar(frame, row, "SWAP", sample.swap_used, sample.swap_total);
+    let label = format!(
+        "{} {}%",
+        capacity(sample.swap_used, sample.swap_total),
+        share(sample.swap_used, sample.swap_total)
+    );
+    capacity_bar(
+        frame,
+        row,
+        "swap",
+        label,
+        sample.swap_used,
+        sample.swap_total,
+    );
 }
 
 /// Compressor occupancy as a share of physical RAM, in the same form as SWAP.
@@ -36,36 +48,58 @@ pub(super) fn draw_compressor(frame: &mut Frame, area: Rect, sample: &Sample) {
     frame.render_widget(Paragraph::default().style(Style::default().bg(PANEL)), row);
     if !sample.vm_available || sample.total_memory == 0 {
         frame.render_widget(
-            Paragraph::new("COMP — unavailable").style(Style::default().fg(MUTED)),
+            Paragraph::new("compressor —").style(Style::default().fg(MUTED)),
             row,
         );
         return;
     }
-    capacity_bar(frame, row, "COMP", sample.compressor, sample.total_memory);
+    // The panel's first line already gives the compressor's size; this row is
+    // how much of RAM it takes.
+    let percent = share(sample.compressor, sample.total_memory);
+    capacity_bar(
+        frame,
+        row,
+        "",
+        format!("{percent}% of RAM"),
+        sample.compressor,
+        sample.total_memory,
+    );
 }
 
-fn capacity_bar(frame: &mut Frame, row: Rect, prefix: &str, used: u64, total: u64) {
-    let percent = (u128::from(used) * 100 + u128::from(total) / 2) / u128::from(total);
-    let label = format!("{} {percent}%", capacity(used, total));
+fn share(used: u64, total: u64) -> u128 {
+    (u128::from(used) * 100 + u128::from(total) / 2) / u128::from(total)
+}
+
+fn capacity_bar(frame: &mut Frame, row: Rect, prefix: &str, label: String, used: u64, total: u64) {
     // Shared units preserve both exact capacity readings and a useful bar at 30 columns.
     let label_width = u16::try_from(label.len()).unwrap_or(u16::MAX);
-    let bar_width = row.width.saturating_sub(label_width.saturating_add(6));
+    // The bar starts after the prefix and its space, and leaves one before
+    // the label.
+    let start = if prefix.is_empty() {
+        0
+    } else {
+        u16::try_from(prefix.len() + 1).unwrap_or(u16::MAX)
+    };
+    let bar_width = row
+        .width
+        .saturating_sub(label_width.saturating_add(start + 1));
     if bar_width < 3 {
         frame.render_widget(
-            Paragraph::new(format!("{prefix} {label}")).style(Style::default().fg(CYAN)),
+            Paragraph::new(format!("{prefix} {label}").trim_start().to_owned())
+                .style(Style::default().fg(CYAN)),
             row,
         );
         return;
     }
     frame.render_widget(
         Paragraph::new(prefix.to_owned()).style(Style::default().fg(MUTED)),
-        Rect::new(row.x, row.y, 4, 1),
+        Rect::new(row.x, row.y, start, 1),
     );
     let filled_eighths =
         u128::from(used.min(total)) * u128::from(bar_width) * 8 / u128::from(total);
     const PARTIAL: [&str; 8] = [" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
     for column in 0..bar_width {
-        let cell = &mut frame.buffer_mut()[(row.x + 5 + column, row.y)];
+        let cell = &mut frame.buffer_mut()[(row.x + start + column, row.y)];
         let eighths = filled_eighths.saturating_sub(u128::from(column) * 8).min(8);
         if eighths == 8 {
             cell.set_symbol(" ").set_bg(CYAN);
@@ -77,7 +111,7 @@ fn capacity_bar(frame: &mut Frame, row: Rect, prefix: &str, used: u64, total: u6
     }
     frame.render_widget(
         Paragraph::new(label).style(Style::default().fg(CYAN)),
-        Rect::new(row.x + 6 + bar_width, row.y, label_width, 1),
+        Rect::new(row.x + start + bar_width + 1, row.y, label_width, 1),
     );
 }
 

@@ -191,12 +191,14 @@ pub(crate) fn write_static(
         "EVIDENCE     {} · {}",
         finding.evidence, finding.context
     )?;
-    writeln!(
-        out,
-        "{}         {}",
-        if finding.actionable { "CHECK" } else { "NOTE " },
-        finding.next
-    )?;
+    if !finding.next.is_empty() {
+        writeln!(
+            out,
+            "{}         {}",
+            if finding.actionable { "CHECK" } else { "NOTE " },
+            finding.next
+        )?;
+    }
     Ok(())
 }
 
@@ -208,14 +210,15 @@ pub(crate) fn diagnostic_lines(sample: &Sample) -> Vec<String> {
         finding.title,
         finding.evidence,
         finding.context,
-        format!(
+    ];
+    if !finding.next.is_empty() {
+        lines.push(format!(
             "{}: {}",
             if finding.actionable { "Check" } else { "Note" },
             finding.next
-        ),
-        String::new(),
-        "CONNECTION".into(),
-    ];
+        ));
+    }
+    lines.extend([String::new(), "CONNECTION".into()]);
     lines.extend(sample.runtime.lines(sample));
     lines
 }
