@@ -49,43 +49,6 @@ or use the installers below.
   progress, decode and prefill speed, prefix-cache reuse, Metal memory and
   DFlash draft acceptance.
 
-## What's new in 2.1
-
-- **Host resources first:** memory pressure with RAM composition (wired, app,
-  compressed, cache, free) and the GPU wired limit, a new macOS compression
-  chart and paging lead Overview; prompt load follows and throughput stays
-  compact. Panels share one aligned grid.
-- **A clear verdict:** the assessment says `Healthy · no bottleneck` when
-  nothing needs action and names the next check when something does. Press
-  `d`, or run `mlxtop doctor`, for evidence and runtime setup.
-- **Threshold colors everywhere:** every chart is graded green/yellow/red by
-  its configured thresholds; generation and prefill compare with their rolling
-  baseline. Charts, assessment and Journal agree.
-
-## What's new in 2.0
-
-- **Eleven runtimes:** oMLX, Ollama, LM Studio, llama.cpp, KoboldCpp, MLX-LM,
-  LocalAI, vLLM, SGLang, Jan and GPT4All. The [runtime table](#runtime-support-and-limitations)
-  distinguishes live metrics, model inventory and client-reported usage.
-- **Remote monitoring:** configured HTTP/HTTPS endpoints and bearer authentication,
-  with verified HTTPS certificates and explicit opt-in for remote credentials.
-- **Clearer charts:** synchronized rolling windows, linked time-series zoom,
-  readable queue crossings and explicit `window 34s` labels. Resident memory
-  stays cyan; pressure severity has its own label. Process-memory readings live
-  in Top and text reports.
-- **Accurate request history:** the counters-only recorder preserves native
-  output speeds, cached tokens and explicit first-token timing. Completed
-  results remain separate from live serving metrics.
-
-### Upgrading from 1.x
-
-Run the installer again and restart any open mlxtop session. Existing
-`~/.config/mlxtop/config.json`, oMLX settings and usage JSONL files remain
-compatible. The dashboard monitors one selected server per session; use
-`MLXTOP_PROVIDER` to choose it. New runtimes need their monitoring APIs enabled,
-and some require the [client usage recorder](docs/USER_GUIDE.md#client-reported-usage-file)
-for request statistics.
-
 ## Try it
 
 You’ll need an Apple Silicon Mac, a Linux machine or a Windows PC (x86_64)
