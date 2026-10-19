@@ -9,10 +9,10 @@ units, automatic ranges, consolidation and history behavior.
 
 | Element | Convention | Examples |
 | --- | --- | --- |
-| Navigation | Title case | Overview, MLX Top, Journal |
-| Operational section heading | Uppercase | SYSINFO |
+| Navigation | Title case | Overview, Processes, Journal |
+| Operational section heading | Uppercase | RECENT JOURNAL, LLM PROCESSES |
 | Chart title | Lowercase words; preserve acronyms | prompt load, generation, prefill, GPU |
-| Status or compact metric label | Uppercase | LIVE, LAST SEEN, CACHE, HISTORY |
+| Status or compact metric label | Uppercase | LIVE, LAST SEEN, QUEUED, PREFILL, HISTORY |
 | Explanation or suggested action | Sentence case | Inspect added context or large tool results. |
 | Keyboard hint | Match the actual key and use a short action | p pause, Home latest |
 
@@ -20,6 +20,24 @@ Charts at the same level must use the same title casing, weight, spacing and
 border treatment. A chart does not become an operational section merely because
 it spans the full width. Preserve standard units and names: tok/s, GiB, GPU,
 oMLX and MLX. Use bold for the primary reading or status, not every line.
+
+## Say it once, show it if you can
+
+- Every line of text must tell the operator something the screen does not
+  already show. Delete labels that describe the interface ("Includes file
+  cache", "older → now", "auto", a SCOPE line), restate a chart, or report a
+  normal state ("THERMAL no warning", "0s old").
+- Prefer a graphic to words: an icon for a verdict (✓ ▲ ✖, → for an action),
+  a meter for a share of capacity, a mark per item for small counts (`●`/`○`),
+  a progress bar with time left for work under way, and a spinner for
+  activity. Motion means the sample clock advanced; a still spinner means
+  sampling stopped.
+- Name shared context once. The chart window and refresh interval live in the
+  top bar, not in every chart title.
+- Show notes only when they are actionable or explain a missing reading. An
+  empty panel is one line, and its rows go to panels with data.
+- Graphic elements still need a readable label or value beside them, and
+  color alone never carries severity.
 
 ## Information hierarchy and space
 
@@ -29,32 +47,36 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   which drives KV-cache memory. Throughput is the outcome and stays compact.
 - Charts show trends and comparisons. Keep their primary reading, units and
   freshness adjacent. Keep supporting explanations shorter than the chart.
-- Use one border per chart. Place a dense full-width SYSINFO strip above the
+- Use one border per chart. Place a dense full-width runtime card above the
   histories; do not wrap charts in another throughput box.
-  SYSINFO owns hardware identity, cores, RAM, CPU/RSS, thermal and GPU allocation.
-  Put a fixed borderless two-row assessment below SYSINFO: finding and fitting
-  evidence, then the complete next check or neutral observation. Lead with the
-  verdict: when nothing is actionable and OS pressure is normal, say
-  `Healthy · no bottleneck` in green; high GPU use is evidence, never the
+  The runtime card owns the provider, engine, model and status badge, and on
+  its bottom edge the hardware identity, cores, GPU memory meter and the
+  runtime's memory and CPU; thermal state appears only when it is not normal.
+  Put a fixed borderless assessment below it: an icon and the finding, with
+  evidence only when something is wrong, then a second line only for the next
+  check (→) or a missing reading worth knowing about. Lead with the verdict:
+  when nothing is actionable and OS pressure is normal, say
+  `✓ Healthy · no bottleneck` in green; high GPU use is evidence, never the
   headline. Findings use sentence case. Use `d` for full evidence and runtime
-  setup; do not add another diagnosis card. A critical alarm replaces these two
-  rows, never SYSINFO.
-  Show each fact once. SYSINFO's title repeats runtime prompt counters only when
-  they differ from the request shown in prompt load.
+  setup; do not add another diagnosis card. A critical alarm replaces the
+  assessment, never the runtime card.
+  Show each fact once. The runtime card's title repeats runtime prompt counters
+  only when they differ from the request shown in prompt load.
   Every row shares one grid of three equal columns, so panel edges line up.
   The host row takes all remaining height (at least six rows): memory,
   compression and paging on macOS; on Linux, which has no compressor counters,
   memory spans two columns beside paging. The memory reading slot shows
   PRESSURE; bytes and resident percentage follow, then a composition bar
   (wired, app, compressed, cache, free) with the GPU wired limit marked when
-  known. Compression charts compress + decompress traffic with compressor
-  occupancy; paging includes the swap capacity bar. Prompt history takes half
-  Prompt history spans two columns of the next row (about 28% of the height,
-  nine to fourteen rows); Cache and Queue stack in the third. Generation,
+  known, and a history of that composition over a pressure ribbon.
+  Compression charts compress + decompress traffic with the compressor's share
+  of RAM; paging includes the swap capacity bar. Prompt history spans two
+  columns of the next row (about 28% of the height, nine to fourteen rows; one
+  line until the first request); Cache and Queue stack in the third. Generation,
   prefill and GPU take one column each in a seven- to ten-row row (four on
   short terminals, where readings stay in the titles). Journal grows from five
   to ten rows on tall terminals; everything else goes to the host row.
-  OS footprint remains in MLX Top and the static report, without a chart.
+  OS footprint remains in Processes and the static report, without a chart.
   Show measured latency beside Journal when space permits.
 - At very short chart heights, use percentage capacity bars and exact readings
   instead of one-row traces with misleading axes. Preserve units on standalone
@@ -64,8 +86,8 @@ oMLX and MLX. Use bold for the primary reading or status, not every line.
   short macOS terminals and six with a compact NVIDIA table. Journal gets
   five rows on regular terminals (three event lines) and no compact preview; the full Journal is available with `3`. Wrap summaries to at most
   two rows, align time/state columns, and mark shortened messages.
-- Keep a one-row header for views and sampling state, and contextual controls
-  in a bottom bar. Show current readings in chart headers, moving detailed
+- Keep a one-row header for views and sampling state (heartbeat, interval,
+  shared window), and contextual controls in a bottom bar. Show current readings in chart headers, moving detailed
   window statistics into expanded views. Help and quit remain accessible.
 - Empty and populated states have the same layout. Keep dimensions stable
   through live pressure, queue spikes and idle transitions; alarms and colors
@@ -98,8 +120,10 @@ Use the existing palette; do not introduce per-widget color schemes.
 | Chart identity | Existing metric color; a title color alone is not severity |
 | Live request in prompt history | Cyan plus LIVE |
 | Historical request in prompt history | Blue plus LAST SEEN or REPORTED and age |
+| Queued request in prompt history | Hatched bar plus QUEUED |
 | Prompt size changes | Muted numeric comparison; never warning markers on bars |
-| Resident RAM | Bytes and percentage in cyan; the PRESSURE label and the occupancy trace carry OS pressure severity |
+| Resident RAM | Bytes and percentage; the PRESSURE label and the history's ribbon carry OS pressure severity |
+| RAM composition | Wired blue, app cyan, compressed and cache two greys of different lightness, free empty; softened toward the panel in the history |
 | GPU utilization | Green/yellow/red configured load bands with a numeric reading and load label (`within target`, `busy`, `saturated`) |
 | Throughput | Green at or above the rolling baseline; yellow and red for measured drops of 10% and 30% |
 | Cache reuse | Green from 50%, yellow from 20%, red below 20% (prompt CACHED share from 4,096 tokens) |
@@ -107,7 +131,10 @@ Use the existing palette; do not introduce per-widget color schemes.
 | Supporting text, unknown data, historical advice | Muted |
 
 Never require color alone to interpret severity, freshness or selection. Use
-text, symbols and values alongside it. Preserve captured severity
+text, symbols and values alongside it. Text uses text colors; a series color
+belongs on its swatch, line or bar, not on the words beside it. Large filled
+areas use the neutral fill or softened colors, keeping saturated color for
+lines, bars and marks. Preserve captured severity
 colors in time-series history instead of recoloring old samples on refresh.
 
 ## Metric truth and operator advice
@@ -142,10 +169,10 @@ colors in time-series history instead of recoloring old samples on refresh.
   Cache availability must not alter bar height. Partial cells that cannot fit
   both segment colors and empty space stay unsplit in the request color; the
   selected readout retains the precise count and reported cache reuse (`CACHED`).
-- Keep OS process memory in MLX Top and the static report, attributed to its
+- Keep OS process memory in Processes and the static report, attributed to its
   PID and source. Keep footprint, RSS and allocator counters distinct.
 - Suggestions must follow visible evidence. Prompt history emphasizes actual
-  token counts, recent median and range. GPU utilization alone establishes
+  token counts and the recent median. GPU utilization alone establishes
   neither a slowdown nor a compute bottleneck. Diagnostics should pair a
   measured throughput drop with a supporting signal, label correlation and
   confidence, and give a short testable next step. Wrap advice instead of
@@ -156,7 +183,7 @@ colors in time-series history instead of recoloring old samples on refresh.
 
 ## Interaction and review
 
-- Preserve the three views: Overview, MLX Top and Journal. Place request load
+- Preserve the three views: Overview, Processes and Journal. Place request load
   in Overview, with contextual history controls and a clear selected marker.
 - Tab/Shift-Tab switch views globally, including from an expanded chart or
   an active process filter. In Overview, arrow keys select charts. Mouse clicks select,
@@ -165,7 +192,7 @@ colors in time-series history instead of recoloring old samples on refresh.
   same observations to fit different panel widths. Prompt and latency bars
   retain independent ordinal zoom. Sampling cadence remains unchanged.
   Show selection with border shape as well as color.
-- MLX Top prioritizes the process table and selected-process details. Show
+- Processes prioritizes the process table and selected-process details. Show
   filtered aggregate CPU/RSS and full commands. OS readings must belong to
   the selected PID; label provider-wide telemetry as runtime data rather than
   assigning a model/state to every process. Do not repeat Overview charts.

@@ -16,9 +16,24 @@ responds.
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
 
-**mlxtop 3.0.0** is the current stable release for Apple Silicon macOS,
-Linux (x86_64 and ARM64) and Windows (x86_64). [Download 3.0.0](https://github.com/maximpri/mlxtop/releases/tag/v3.0.0)
+**mlxtop 3.1.0** is the current stable release for Apple Silicon macOS,
+Linux (x86_64 and ARM64) and Windows (x86_64). [Download 3.1.0](https://github.com/maximpri/mlxtop/releases/tag/v3.1.0)
 or use the installers below.
+
+## What's new in 3.1
+
+- **A redesigned Overview:** the memory chart stacks what RAM holds (wired,
+  app, compressed, cache) over a pressure ribbon; bursty rates are bars from
+  zero; paging and compression are judged against their warning rates; a
+  prompt still prefilling shows its progress and time left.
+- **Less text, more signal:** a heartbeat in the top bar, ✓ ▲ ✖ verdicts, a
+  GPU memory meter and a spinning status badge replace labels that repeated
+  what the charts show.
+- **`mlxtop update`:** update in place from GitHub releases, or `--rc` for
+  release candidates.
+- **oMLX through Splash and system paging:** mlxtop follows oMLX when it
+  serves through a Splash engine, and counts file paging on a Mac without
+  swap, so heavy paging is caught when memory runs out.
 
 ## What's new in 3.0
 
@@ -103,7 +118,7 @@ Linux downloads are static binaries with no runtime dependencies. Then run:
 
 Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
-example `curl -fsSL … | MLXTOP_VERSION=3.0.0 sh`.
+example `curl -fsSL … | MLXTOP_VERSION=3.1.0 sh`.
 
 ### Update
 
@@ -261,8 +276,8 @@ larger model or work through a longer conversation.
 
 | View | What it shows |
 | --- | --- |
-| Overview | Memory pressure and paging, with model status, token rates, prompt history, GPU, queue activity and recent events |
-| MLX Top | Running model processes and the resources they use |
+| Overview | Memory pressure and composition, compression and paging, with model status, prompt history, token rates, GPU, cache, queue activity and recent events |
+| Processes | Running model processes and the resources they use |
 | Journal | Request activity and changes in resource use during the session |
 
 Here’s the Journal during an oMLX session:
@@ -274,7 +289,7 @@ an oMLX session. These numbers illustrate the display and aren’t benchmarks.
 
 | Key | Action |
 | --- | --- |
-| `1` / `2` / `3` | Open Overview / MLX Top / Journal |
+| `1` / `2` / `3` | Open Overview / Processes / Journal |
 | `Tab` / `Shift-Tab` | Next / previous view |
 | Arrows / click | Select a chart in Overview |
 | `p` / `Space` | Pause or resume sampling |
@@ -331,14 +346,14 @@ and isn't read.
 
 | Runtime | Available information |
 | --- | --- |
-| oMLX | Models, processes, prompt and response speed, requests, cache activity, and extra memory counters when available |
+| oMLX | Models, processes, prompt and response speed, requests with prefill progress, cache activity, and extra memory counters when available. When oMLX serves through a Splash engine, the engine is named and requests oMLX does not track are flagged. |
 | llama.cpp / llama-server | Active slots and summed output counts; average rates and active/deferred queue counts when `/metrics` is enabled. Optional usage file adds full prompt history alongside native polling. |
 | KoboldCpp | Last reported input/output counts and rates through `/api/extra/perf` |
 | Ollama | Loaded models, resident VRAM and context capacity from `/api/ps`; completed counts and decode speed through the usage recorder |
 | LM Studio / llmster | Loaded instances and context capacity from native APIs, with older API fallback; completed counts, speed and first-token timing through the usage recorder |
 | vLLM, SGLang | Prometheus active/waiting queues, sampled server token rates, cache statistics, KV occupancy and cumulative mean first-token timing |
 | mlx-serve | Prometheus active/waiting queues, live generation rate (running requests included), prefill rate and progress while a prompt is being processed, prefix-token cache reuse and MLX memory; the model and each running request's prompt, cached and output counts from `/metrics.json`. Start the server with `--metrics`. |
-| Splash | Running and waiting requests with each one's prompt and output counts, prefill progress, generation rate from the engine's decode counter, prefill speed of its prefill commands, prefix-cache reuse, Metal memory against its limit, DFlash draft acceptance, server TTFT p50, released weights, thermal state and memory pressure, all from `/status` |
+| Splash | Running and waiting requests with each one's prompt and output counts, prefill progress, completed requests, generation rate from the engine's decode counter (per request while one decodes alone), prefill speed of its prefill commands, prefix-cache reuse, Metal memory against its limit, DFlash draft acceptance, server TTFT and inter-token p50/p95, released weights, thermal state and memory pressure, all from `/status` |
 | MLX-LM, LocalAI, Jan, GPT4All | Process detection and available-model catalogue; completed request counts and explicitly supplied timing through the usage recorder |
 
 Provider URLs, bearer authentication, default ports and client setup are covered
@@ -346,26 +361,30 @@ in the [provider guide](docs/USER_GUIDE.md#provider-endpoints).
 The dashboard monitors one selected server at a time. Native model catalogues
 cannot provide live generation speed; completed usage requires client integration.
 
-Overview leads with host-critical resources: memory (pressure, composition of
-wired/app/compressed/cache/free RAM and the GPU wired limit), compression
-(macOS) and paging, then prompt load, then a compact throughput row. SYSINFO
-holds model/state and hardware details; every chart has one border and an
-independent plot. SWAP usage is a horizontal capacity bar. Numeric axes
-fit visible measurements in their actual units; only percentages use 0–100.
-Every chart is graded green/yellow/red by its thresholds: memory by OS
-pressure, GPU, paging, compression and cache by configured bands, and
+Overview leads with host-critical resources: memory, compression (macOS) and
+paging, then prompt load, then a compact throughput row. A runtime card above
+them holds the model, its status and the machine; every chart has one border
+and an independent plot. Each chart draws its data in the form that suits it:
+the memory chart stacks wired, app, compressed and cache RAM over a ribbon of
+memory pressure; GPU busy is an area; generation, prefill, compression, paging
+and cache reuse are bars from zero, one per sample. Numeric axes fit visible
+measurements in their actual units, and paging and compression never shrink
+below their warning rate, which is drawn as a dotted line. Only percentages
+use 0–100. Every chart is graded green/yellow/red by its thresholds: memory by
+OS pressure, GPU, paging, compression and cache by configured bands, and
 generation and prefill against their rolling baseline. Captured colors are
-kept as history scrolls. Resident occupancy
-includes reclaimable file cache and does not establish a warning by itself.
+kept as history scrolls. Full RAM is not a warning by itself: file cache fills
+it on a healthy machine, and the pressure label stays authoritative.
 **Prompt load means prompt size in input tokens, including cached tokens.**
 The headline gives the selected request's exact size; each bar represents one
 observed request and shows its own compact size label, such as `12.0k` for
-12,000 tokens. The panel also shows the change from the previous observed
-request, freshness, and cached/uncached segments when reported. Selected prompts
-also show output counts and request-specific decode speed: `LIVE`, a completed
-request's `AVG`, or the retained `LAST` sample. Queue charts complement the system
-metrics; OS process-memory details live in Top. First-token latency appears only when
-explicitly measured client timings are supplied. See the
+12,000 tokens. Cached and uncached segments are split when reported, queued
+requests are hatched, and a prompt still prefilling shows its progress and
+time left. Selected prompts also show output counts and request-specific
+decode speed: `LIVE`, a completed request's `AVG`, or the retained `LAST`
+sample. Queue charts complement the system metrics; OS process-memory details
+live in Processes. First-token latency appears only when explicitly measured
+client timings are supplied. See the
 [operator charts](docs/USER_GUIDE.md#operator-charts) for scales and data sources.
 Prompt counts also appear in the static report. Journal records each
 observed request with its prompt count and request-specific cached count when

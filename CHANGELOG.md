@@ -1,6 +1,88 @@
 # Changelog
 
-## Unreleased
+## 3.1.0 — 2026-10-19
+
+A redesigned Overview: every panel draws its data in the form that suits it,
+text that said nothing new is gone, and icons, meters and motion carry state
+instead. mlxtop also updates itself, follows oMLX serving through Splash, and
+catches heavy paging on a Mac without swap.
+
+### Dashboards
+
+- **Memory history shows what RAM holds.** The memory chart was a line near
+  92% almost all the time, because file cache fills RAM. Each column now
+  stacks the sample's wired, app, compressed and cache memory at eighth-cell
+  precision, with free memory empty at the top. A model load reads as wired
+  memory jumping while cache is squeezed out. A ribbon along the bottom keeps
+  each sample's pressure colour. Linux stacks app and cache, Windows memory in
+  use; without composition counters the chart stays an area.
+- **Chart forms by data.** Levels (GPU busy, memory without composition) are
+  areas: a graded line over one neutral fill. Bursty per-second rates
+  (generation, prefill, compression, paging) and the cache interval are bars
+  from zero, one per sample as measured; a measured zero is a coloured
+  baseline tick, unlike a missing sample. The queue's compact view marks
+  requests (`● ● ○`), first-token bars have eighth-block tops, and the process
+  table's MEM% has a meter. Full cells are drawn as background fills, so bars
+  no longer stripe between rows.
+- **Paging and compression against their warning rates.** Their axes never
+  shrink below the warning rate, drawn as a dotted yellow line, so a trickle is
+  a short bar instead of a panel-high slab. The swap row reads `swap off` when
+  there is none, and the compressor row is its share of RAM.
+- **Prefill progress.** A request still prefilling shows
+  `PREFILL ▕████░░░▏ 52% · 34,078 / 65,536 · 4m 12s left` in prompt load, the
+  time left from the live prefill rate, and the status badge reads
+  `PREFILLING 52%`. It comes from oMLX's prefilling rows and Splash's
+  `prompt_processed`.
+- **Queued prompts are not live.** Requests waiting in oMLX's queue draw as
+  hatched bars and read `QUEUED`, so a benchmark batch no longer shows six
+  identical live bars while one runs.
+- Rate panels too short for axes, and the row under compact gauges, draw a
+  sparkline instead of "Enter: history".
+
+### Less text, more signal
+
+- The top bar has a heartbeat spinner that turns with every sample, the
+  refresh interval, and the one window all Overview charts share, instead of
+  `window` in seven chart titles.
+- The runtime card replaces SYSINFO: model and engine, a status badge that
+  spins while work is under way, the source's age only once it is 3 s old,
+  a GPU memory meter graded at 90% and 97%, and thermal state only when it is
+  not normal.
+- The assessment leads with ✓, ▲ or ✖; evidence appears only when something
+  is wrong, and a second line only for an action (→) or a missing reading
+  worth knowing about.
+- Prompt load without requests is one line, and the host charts get the rows.
+  A live request drops its age and clock; the comparison reads
+  `Δ +12,768 (+63.8%) vs previous` and appears only when there is one.
+- Chart footers name their numbers (`tok/s`, `compressing / decompressing`,
+  `page-in / page-out`, cache `since start / prefix`); "auto", "Includes file
+  cache" and "older → now" are gone.
+- Tab 2 is **Processes**, since it lists any runtime. Its totals sit in the
+  table title. The Journal's header is one line.
+- Up and Down in Overview move to the adjacent row by edge distance, so a
+  short panel is no longer skipped for a taller one.
+
+### Runtimes and host
+
+- **oMLX through Splash.** oMLX 0.7.1 can serve a model through a Splash
+  engine. mlxtop keeps oMLX as the provider even when the engine sorts first
+  in the process list, names the engine (`oMLX · Splash`), and drops oMLX's
+  own MLX memory readings, which no longer hold the model. oMLX's admin
+  benchmark talks to Splash directly, so a busy GPU with nothing tracked reads
+  **untracked** with "GPU busy outside oMLX's request tracking", not idle.
+- **Splash on its own** feeds the standard dashboards: a request decoding
+  alone gets its own output speed, finished requests become completed records
+  for prompt load and the Journal, and the details line leads with problems
+  (failures, Metal health, requests waiting for memory, thermal, pressure).
+- **System paging on macOS.** The paging panel counted only swap traffic, so
+  a Mac without swap always read `0 B/s` while it paged model weights from
+  disk. It now counts file page-ins and page-outs too. File paging counts
+  against the system only while memory is tight (warning pressure, or 10% free
+  or less); page-ins at twice the critical rate are **Heavy paging**. A model
+  loading on a roomy machine shows in green as "Disk reads · memory not
+  tight".
+
+### Install and update
 
 - Add `mlxtop update`, which replaces the running binary with the latest
   release, and `mlxtop update --rc`, which also considers release candidates.
@@ -10,6 +92,8 @@
   to `brew upgrade mlxtop`; a root-owned install (the macOS package) needs sudo.
 - Release candidates tagged `vX.Y.Z-rc.N` are built on GitHub's runners and
   published as prereleases, which installers and plain `mlxtop update` skip.
+- The macOS installer mounts the disk image with `diskutil image` where it
+  exists, so macOS 27 no longer prints `hdiutil` deprecation warnings.
 
 ## 3.0.0 — 2026-10-17
 
