@@ -1404,15 +1404,16 @@ impl App {
     }
 
     pub(crate) fn draw_signal_log(&self, frame: &mut Frame, area: Rect) {
-        let block = panel("RECENT JOURNAL", Tone::Muted)
-            .title(
-                Line::from(Span::styled(" 3 full journal ", Style::default().fg(CYAN)))
-                    .alignment(Alignment::Right),
-            )
-            .title_bottom(Line::from(Span::styled(
+        let mut block = panel("RECENT JOURNAL", Tone::Muted).title(
+            Line::from(Span::styled(" 3 full journal ", Style::default().fg(CYAN)))
+                .alignment(Alignment::Right),
+        );
+        if !self.collector.signals.is_empty() {
+            block = block.title_bottom(Line::from(Span::styled(
                 format!(" {} events ", self.collector.signals.len()),
                 Style::default().fg(MUTED),
             )));
+        }
         let inner = block.inner(area);
         frame.render_widget(block, area);
         if inner.is_empty() {
