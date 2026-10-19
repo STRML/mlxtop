@@ -181,6 +181,9 @@ fn assess_observation(sample: &Sample) -> Finding {
         )
     {
         finding.next = "No generation slowdown measured.";
+    } else if sample.llm_status == "untracked" {
+        finding.next =
+            "GPU busy outside oMLX's request tracking (oMLX benchmark on Splash?) · no live rates.";
     } else if !live
         && (matches!(sample.llm_status.as_str(), "idle" | "ready")
             // oMLX reports `healthy` once no model has requests left.

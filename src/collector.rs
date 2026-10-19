@@ -4,8 +4,8 @@ use crate::analysis::{classify, signal_summary, CorrelationEngine};
 use crate::completion_log::read_llm_stats;
 use crate::config::{Config, Thresholds, GPU_BUSY_ENTER_LOAD};
 use crate::domain::{
-    ChartMetric, ChartPoint, EventKind, LlmLogStats, LlmTelemetry, MetalTelemetry, Sample,
-    SignalEvent, TelemetrySource, Tone, VmCounters, MIB,
+    ChartMetric, ChartPoint, EventKind, LlmLogStats, LlmTelemetry, MetalTelemetry, MlxTelemetry,
+    Sample, SignalEvent, TelemetrySource, Tone, VmCounters, MIB,
 };
 use crate::formatting::{
     bytes, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label,
@@ -441,6 +441,9 @@ impl Collector {
         sample.llm_model_memory_max = llm_stats.and_then(|stats| stats.model_memory_max);
         sample.llm_model_offloaded = llm_stats.and_then(|stats| stats.model_offloaded);
         sample.llm_model_size = llm_stats.and_then(|stats| stats.model_size);
+        if process_snapshot.hosted_splash_cpu.is_some() {
+            apply_hosted_splash(&mut sample);
+        }
         (sample.updated, sample.utc_offset) = now_clock(self.host.as_ref(), self.platform);
         let previous = if self.current.updated == "waiting" {
             None
@@ -822,6 +825,35 @@ impl Collector {
         self.gpu_history.clear();
         self.signals.clear();
         self.current = Sample::default();
+    }
+}
+
+/// oMLX serving through Splash: oMLX's own MLX runtime does not hold the model,
+/// so only the device facts MLX reports are kept. Requests oMLX's benchmark
+/// sends straight to Splash never reach oMLX's request counts, so a busy GPU
+/// with nothing tracked is "untracked", not idle.
+pub(crate) fn apply_hosted_splash(sample: &mut Sample) {
+    if sample.llm_provider != "oMLX" {
+        return;
+    }
+    sample.llm_engine = Some("Splash".into());
+    sample.mlx = MlxTelemetry {
+        device_name: sample.mlx.device_name.take(),
+        architecture: sample.mlx.architecture.take(),
+        memory_size: sample.mlx.memory_size,
+        recommended_working_set: sample.mlx.recommended_working_set,
+        max_buffer_size: sample.mlx.max_buffer_size,
+        resource_limit: sample.mlx.resource_limit,
+        ..MlxTelemetry::default()
+    };
+    if matches!(sample.llm_status.as_str(), "idle" | "healthy" | "ready")
+        && sample.llm_active_requests.unwrap_or(0) == 0
+        && sample.llm_waiting_requests.unwrap_or(0) == 0
+        && sample
+            .gpu_util
+            .is_some_and(|load| u64::from(load) >= GPU_BUSY_ENTER_LOAD)
+    {
+        sample.llm_status = "untracked".into();
     }
 }
 

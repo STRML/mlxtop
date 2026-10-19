@@ -8,6 +8,14 @@ pub(crate) fn llm_model_label(sample: &Sample, max_chars: usize) -> String {
     compact_label(&sample.llm_model, max_chars)
 }
 
+/// The runtime, with the engine it serves through when that is not its own.
+pub(crate) fn llm_runtime_label(sample: &Sample) -> String {
+    match &sample.llm_engine {
+        Some(engine) => format!("{} · {engine}", sample.llm_provider),
+        None => sample.llm_provider.clone(),
+    }
+}
+
 pub(crate) fn compact_label(value: &str, max_chars: usize) -> String {
     let count = value.chars().count();
     if count <= max_chars {

@@ -155,6 +155,9 @@ pub(crate) struct ProcessSnapshot {
     pub(crate) provider: Option<String>,
     pub(crate) largest_consumer: Option<String>,
     pub(crate) llm_processes: Vec<LlmProcess>,
+    /// CPU % of a Splash engine running beside another runtime: oMLX serves
+    /// models through Splash as an external engine.
+    pub(crate) hosted_splash_cpu: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -431,6 +434,8 @@ pub(crate) struct Sample {
     /// Most severe NVIDIA or placement problem, set by `classify`.
     pub(crate) gpu_issue: Option<crate::gpu_findings::GpuIssue>,
     pub(crate) llm_details: Option<String>,
+    /// The engine a runtime serves through, when not its own: oMLX's Splash.
+    pub(crate) llm_engine: Option<String>,
     pub(crate) llm_remote: bool,
     pub(crate) correlation: CorrelationInsight,
     pub(crate) llm_top: String,
@@ -522,6 +527,7 @@ impl Default for Sample {
             llm_model_size: None,
             gpu_issue: None,
             llm_details: None,
+            llm_engine: None,
             llm_remote: false,
             correlation: CorrelationInsight::default(),
             llm_top: "none".into(),

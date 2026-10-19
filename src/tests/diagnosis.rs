@@ -52,6 +52,13 @@ fn high_gpu_usage_is_evidence_not_a_slowdown_or_alarm() {
     sample.llm_active_requests = Some(0);
     sample.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(60));
     assert_eq!(assess(&sample).next, "Live generation rate unavailable.");
+    // oMLX's Splash engine busy with requests oMLX does not track.
+    sample.llm_observed_at = Some(SystemTime::now());
+    sample.llm_status = "untracked".into();
+    assert_eq!(
+        assess(&sample).next,
+        "GPU busy outside oMLX's request tracking (oMLX benchmark on Splash?) · no live rates."
+    );
 }
 
 #[test]

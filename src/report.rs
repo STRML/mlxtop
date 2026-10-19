@@ -3,8 +3,8 @@
 use crate::config::Thresholds;
 use crate::domain::Sample;
 use crate::formatting::{
-    bytes, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label, optional_bytes,
-    optional_tokens, percent, percent_u8, pressure_state_label, rate, signed_rate,
+    bytes, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label, llm_runtime_label,
+    optional_bytes, optional_tokens, percent, percent_u8, pressure_state_label, rate, signed_rate,
     telemetry_source,
 };
 use crate::host::Platform;
@@ -94,7 +94,7 @@ pub(crate) fn write_static(
     writeln!(
         out,
         "LLM          {} · {} · {} · {}",
-        sample.llm_provider,
+        llm_runtime_label(sample),
         sample.llm_status,
         telemetry_source(sample),
         llm_model_label(sample, 40)
@@ -136,14 +136,23 @@ pub(crate) fn write_static(
                 .unwrap_or_else(|| "—".into())
         )?;
     }
-    writeln!(
-        out,
-        "MLX          version {} · active {} · cache {} · peak {}",
-        sample.mlx.version.as_deref().unwrap_or("—"),
-        optional_bytes(sample.mlx.active_memory),
-        optional_bytes(sample.mlx.cache_memory),
-        optional_bytes(sample.mlx.peak_memory)
-    )?;
+    if let Some(engine) = &sample.llm_engine {
+        // The model runs in the engine's process; oMLX's MLX runtime does not hold it.
+        writeln!(
+            out,
+            "ENGINE       {engine} under {} · engine status is private to {}",
+            sample.llm_provider, sample.llm_provider
+        )?;
+    } else {
+        writeln!(
+            out,
+            "MLX          version {} · active {} · cache {} · peak {}",
+            sample.mlx.version.as_deref().unwrap_or("—"),
+            optional_bytes(sample.mlx.active_memory),
+            optional_bytes(sample.mlx.cache_memory),
+            optional_bytes(sample.mlx.peak_memory)
+        )?;
+    }
     if !sample.correlation.summary.is_empty() {
         writeln!(out, "CORRELATION   {}", sample.correlation.summary)?;
         writeln!(

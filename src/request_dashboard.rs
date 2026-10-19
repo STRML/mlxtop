@@ -338,12 +338,16 @@ pub(super) fn draw(
         return;
     }
     let Some(index) = selected else {
-        let detail = if matches!(sample.llm_provider.as_str(), "oMLX" | "KoboldCpp") {
+        let detail = if sample.llm_status == "untracked" {
+            "Requests sent straight to Splash report no prompt counts."
+        } else if matches!(sample.llm_provider.as_str(), "oMLX" | "KoboldCpp") {
             "Waiting for per-request prompt counts."
         } else {
             "No per-request counts received."
         };
-        let heading = if sample.llm_active_requests.is_some_and(|n| n > 0) {
+        let heading = if sample.llm_status == "untracked" {
+            "BUSY OUTSIDE oMLX"
+        } else if sample.llm_active_requests.is_some_and(|n| n > 0) {
             "WAITING FOR PROMPT SIZE"
         } else if sample.llm_source == TelemetrySource::Live && sample.llm_status == "idle" {
             "READY FOR NEXT REQUEST"

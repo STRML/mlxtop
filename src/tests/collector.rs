@@ -922,3 +922,67 @@ fn completion_logs_pick_the_newest_parsable_result() {
     assert_eq!(older.prompt_tokens, None);
     assert!(read_latest_completion(&home.0.join("missing.log")).is_none());
 }
+
+#[test]
+fn omlx_serving_through_splash_hides_mlx_readings_and_flags_untracked_work() {
+    use crate::collector::apply_hosted_splash;
+    let omlx = |status: &str, active: Option<u64>, gpu: Option<u8>| {
+        let mut sample = Sample {
+            llm_provider: "oMLX".into(),
+            llm_status: status.into(),
+            llm_active_requests: active,
+            llm_waiting_requests: Some(0),
+            gpu_util: gpu,
+            ..Sample::default()
+        };
+        sample.mlx.version = Some("0.31.4".into());
+        sample.mlx.active_memory = Some(1 << 30);
+        sample.mlx.peak_memory = Some(2 << 30);
+        sample.mlx.process_footprint = Some(3 << 30);
+        sample.mlx.resource_limit = Some(32 << 30);
+        sample.mlx.device_name = Some("Apple M4 Max".into());
+        sample
+    };
+
+    // The model lives in Splash: oMLX's MLX runtime readings go, device facts stay.
+    let mut sample = omlx("idle", Some(0), Some(5));
+    apply_hosted_splash(&mut sample);
+    assert_eq!(sample.llm_engine.as_deref(), Some("Splash"));
+    assert_eq!(sample.mlx.version, None);
+    assert_eq!(sample.mlx.active_memory, None);
+    assert_eq!(sample.mlx.peak_memory, None);
+    assert_eq!(sample.mlx.process_footprint, None);
+    assert_eq!(sample.mlx.resource_limit, Some(32 << 30));
+    assert_eq!(sample.mlx.device_name.as_deref(), Some("Apple M4 Max"));
+    assert_eq!(sample.llm_status, "idle");
+
+    // A saturated GPU with nothing tracked is work oMLX cannot see (its
+    // benchmark talks to Splash directly), not an idle server.
+    for status in ["idle", "healthy", "ready"] {
+        let mut sample = omlx(status, Some(0), Some(97));
+        apply_hosted_splash(&mut sample);
+        assert_eq!(sample.llm_status, "untracked", "{status}");
+    }
+    // Tracked work, a quiet GPU or a missing reading keep oMLX's own status.
+    for (status, active, gpu) in [
+        ("generating", Some(1), Some(97)),
+        ("healthy", Some(1), Some(97)),
+        ("idle", Some(0), Some(79)),
+        ("idle", Some(0), None),
+    ] {
+        let mut sample = omlx(status, active, gpu);
+        apply_hosted_splash(&mut sample);
+        assert_eq!(sample.llm_status, status, "{status} {active:?} {gpu:?}");
+    }
+    let mut queued = omlx("idle", Some(0), Some(97));
+    queued.llm_waiting_requests = Some(2);
+    apply_hosted_splash(&mut queued);
+    assert_eq!(queued.llm_status, "idle");
+
+    // Only oMLX hosts Splash this way.
+    let mut other = omlx("idle", Some(0), Some(97));
+    other.llm_provider = "Ollama".into();
+    apply_hosted_splash(&mut other);
+    assert_eq!(other.llm_engine, None);
+    assert_eq!(other.mlx.version.as_deref(), Some("0.31.4"));
+}
