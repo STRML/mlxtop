@@ -76,6 +76,8 @@ pub(super) struct OmlxRequest {
     pub cached: Option<u64>,
     pub output: Option<u64>,
     pub rate: Option<f64>,
+    /// Prompt tokens processed so far, while prefilling.
+    pub processed: Option<u64>,
     /// Age of rank zero's telemetry marker; scheduler rows are current.
     pub age: Option<Duration>,
 }
@@ -163,6 +165,9 @@ pub(super) fn omlx_model_requests(model: &Value) -> Vec<OmlxRequest> {
                 } else {
                     request_rate(request, rate_keys)
                 },
+                processed: (phase == OmlxPhase::Prefilling)
+                    .then(|| counter(request, &["processed"]))
+                    .flatten(),
                 age,
             });
         }
@@ -194,6 +199,9 @@ pub(super) fn omlx_model_requests(model: &Value) -> Vec<OmlxRequest> {
             } else {
                 request_rate(request, &["decode_tps"])
             },
+            processed: prefilling
+                .then(|| progress.and_then(|progress| counter(progress, &["processed"])))
+                .flatten(),
             age,
         });
     }
@@ -231,6 +239,7 @@ pub(super) fn omlx_requests(stats: &Value) -> Vec<RequestUsage> {
                     .flatten(),
                 completed: false,
                 queued: request.phase == OmlxPhase::Waiting,
+                prefilled: request.processed.map(|done| done.min(prompt)),
                 ttft_ms: None,
                 observed_at: Some(
                     request
@@ -647,6 +656,7 @@ fn parse_kobold(perf: &Value) -> Option<LlmTelemetry> {
             output_tps: request_rate(perf, &["last_eval_speed"]),
             completed: true,
             queued: false,
+            prefilled: None,
             ttft_ms: None,
             observed_at: None,
         })
@@ -743,6 +753,7 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
             cached,
             completed: true,
             queued: false,
+            prefilled: None,
             ttft_ms: counter(record, &["timings", "time_to_first_token_ms"]).or_else(|| {
                 (provider == "LM Studio")
                     .then(|| {

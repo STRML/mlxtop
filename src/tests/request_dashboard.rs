@@ -14,6 +14,7 @@ fn usage(id: &str, prompt: u64) -> domain::RequestUsage {
         output: None,
         completed: false,
         queued: false,
+        prefilled: None,
         ttft_ms: None,
         output_tps: None,
         observed_at: None,
@@ -620,6 +621,7 @@ fn queued_requests_are_hatched_and_labelled_until_they_run() {
     };
     let queued = domain::RequestUsage {
         queued: true,
+        prefilled: None,
         observed_at: Some(now),
         ..usage("wait", 1024)
     };
@@ -647,4 +649,62 @@ fn queued_requests_are_hatched_and_labelled_until_they_run() {
     assert!(running.contains("1,024 tokens · LIVE"), "{running}");
     // Selecting the running one shows the history up to it: solid, no hatch.
     assert!(!running.contains('░'), "{running}");
+}
+
+#[test]
+fn a_prefilling_request_shows_its_progress_and_the_time_left() {
+    assert_eq!(crate::formatting::duration_label(38.4), "38s");
+    assert_eq!(crate::formatting::duration_label(252.0), "4m 12s");
+    assert_eq!(crate::formatting::duration_label(3_900.0), "1h 5m");
+    assert_eq!(crate::formatting::duration_label(f64::NAN), "0s");
+
+    let now = SystemTime::now();
+    let prefilling = domain::RequestUsage {
+        prefilled: Some(34_078),
+        observed_at: Some(now),
+        ..usage("long", 65_536)
+    };
+    let mut history = History::default();
+    history.observe(std::slice::from_ref(&prefilling));
+    let mut sample = Sample {
+        llm_provider: "oMLX".into(),
+        llm_model: "model".into(),
+        llm_source: TelemetrySource::Live,
+        llm_status: "prefilling".into(),
+        llm_observed_at: Some(now),
+        llm_requests: vec![prefilling.clone()],
+        llm_prefill_tps: Some(125.0),
+        llm_prefill_tps_live: true,
+        ..Sample::default()
+    };
+    assert_eq!(
+        crate::formatting::prefill_progress(&sample),
+        Some((34_078, 65_536))
+    );
+    let render = |sample: &Sample, width| {
+        crate::tests::render_view(width, 10, |frame| {
+            draw(frame, frame.area(), &history, sample, 0, 1)
+        })
+    };
+    // (65,536 − 34,078) tokens at 125 tok/s ≈ 4m 12s.
+    let wide = render(&sample, 100);
+    assert!(wide.contains("PREFILL "), "{wide}");
+    assert!(
+        wide.contains("52% · 34,078 / 65,536 · 4m 12s left"),
+        "{wide}"
+    );
+    assert!(wide.contains('█'), "a progress bar\n{wide}");
+    assert!(!wide.contains("SPEED —"), "{wide}");
+    // Narrow: counts drop before the percentage and time left.
+    let narrow = render(&sample, 40);
+    assert!(narrow.contains("52% · 4m 12s left"), "{narrow}");
+    // Without a live rate there is no time left to promise.
+    sample.llm_prefill_tps_live = false;
+    assert!(!render(&sample, 100).contains("left"));
+    // A second prefill at once has no single progress for the badge.
+    sample.llm_requests.push(domain::RequestUsage {
+        id: "other".into(),
+        ..prefilling
+    });
+    assert_eq!(crate::formatting::prefill_progress(&sample), None);
 }

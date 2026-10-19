@@ -61,6 +61,9 @@ fn reads_model_requests_memory_and_cache_from_status() {
     assert_eq!(result.requests[0].id, "7");
     assert_eq!(result.requests[0].prompt, 1200);
     assert_eq!(result.requests[0].output, Some(40));
+    // Decoding has no prefill progress; the prefilling request has 2000 of 8000.
+    assert_eq!(result.requests[0].prefilled, None);
+    assert_eq!(result.requests[1].prefilled, Some(2000));
     assert_eq!(
         result.prompt_tokens, None,
         "two requests have no single count"

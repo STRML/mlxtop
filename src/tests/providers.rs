@@ -253,6 +253,18 @@ fn output_speeds_belong_to_individual_generating_requests() {
             .collect::<Vec<_>>(),
         [Some(24.5), Some(38.0), None, None, None, Some(12.0)]
     );
+    // A prefilling row carries how far its prompt has got.
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.prefilled)
+            .collect::<Vec<_>>(),
+        [None, None, None, None, None, None]
+    );
+    let prefilling = omlx_requests(&json!({"active_models":{"models":[
+        {"id":"a","prefilling":[{"request_id":"9","prompt_tokens":65536,"processed":8192,"total":65535}]}
+    ]}}));
+    assert_eq!(prefilling[0].prefilled, Some(8192));
     // Only the waiting row is queued; running ones are not.
     assert_eq!(
         requests
@@ -604,6 +616,7 @@ fn request_summaries_label_sampled_and_final_output_speeds() {
         output_tps: Some(41.25),
         completed: false,
         queued: false,
+        prefilled: None,
         ttft_ms: None,
         observed_at: None,
     };

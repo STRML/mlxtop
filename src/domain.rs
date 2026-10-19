@@ -623,6 +623,8 @@ pub(crate) struct RequestUsage {
     pub completed: bool,
     /// Waiting in the server's queue, not yet running.
     pub queued: bool,
+    /// Prompt tokens prefilled so far while the prompt is being processed.
+    pub prefilled: Option<u64>,
     pub ttft_ms: Option<u64>,
     pub observed_at: Option<SystemTime>,
 }

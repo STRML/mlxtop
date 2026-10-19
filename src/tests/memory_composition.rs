@@ -94,7 +94,7 @@ fn history_columns_stack_kinds_in_eighths_and_leave_free_empty() {
         .draw(|frame| paint_column(frame, 0, 0, 2, sizes))
         .unwrap();
     let buffer = terminal.backend().buffer();
-    let fills = kind_colors();
+    let fills = history_colors();
     // Bottom cell: half wired (a ▄ in wired) over app.
     assert_eq!(buffer[(0, 1)].symbol(), "▄");
     assert_eq!(buffer[(0, 1)].fg, fills[0]);
@@ -103,6 +103,8 @@ fn history_columns_stack_kinds_in_eighths_and_leave_free_empty() {
     assert_eq!(buffer[(0, 0)].symbol(), "▄");
     assert_eq!(buffer[(0, 0)].fg, fills[2]);
     assert_eq!(buffer[(0, 0)].bg, PANEL);
+    // Same hues as the bar, quieter.
+    assert_ne!(fills[0], kind_colors()[0]);
     // A column that is all one kind fills whole cells.
     terminal
         .draw(|frame| paint_column(frame, 0, 0, 2, [32 * GIB, 0, 0, 0, 0]))

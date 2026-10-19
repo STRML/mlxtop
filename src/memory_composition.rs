@@ -46,6 +46,19 @@ pub(crate) fn kind_colors() -> [Color; 5] {
     kinds().map(|kind| kind.color)
 }
 
+/// The history's fills: the same hues as the bar, softened toward the panel.
+/// The one-row bar is a small mark and keeps full colour; a chart-sized
+/// stack of saturated blue would outshout every other panel.
+pub(crate) fn history_colors() -> [Color; 5] {
+    kind_colors().map(|color| match (color, PANEL) {
+        (Color::Rgb(r, g, b), Color::Rgb(pr, pg, pb)) => {
+            let mix = |c: u8, p: u8| ((u16::from(c) * 60 + u16::from(p) * 40) / 100) as u8;
+            Color::Rgb(mix(r, pr), mix(g, pg), mix(b, pb))
+        }
+        (color, _) => color,
+    })
+}
+
 /// The GPU wired-memory cap: an explicit `iogpu.wired_limit_mb`, else the
 /// runtime's reported Metal recommended working set.
 pub(crate) fn gpu_limit(sample: &Sample) -> Option<u64> {
@@ -142,7 +155,7 @@ pub(crate) fn paint_column(frame: &mut Frame, x: u16, top: u16, rows: u16, sizes
         *end = (cumulative * eighths + total / 2) / total;
     }
     let kind_at = |eighth: u128| ends.iter().position(|end| eighth < *end).unwrap_or(4);
-    let colors = kind_colors();
+    let colors = history_colors();
     for row in 0..rows {
         let base = u128::from(row) * 8;
         let lower = kind_at(base);

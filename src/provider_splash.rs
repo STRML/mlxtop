@@ -312,6 +312,10 @@ impl SplashHistory {
                     output_tps: None,
                     completed: false,
                     queued: false,
+                    prefilled: (!decoding)
+                        .then(|| counter(r, &["prompt_processed"]))
+                        .flatten()
+                        .map(|done| done.min(prompt)),
                     ttft_ms: None,
                     observed_at: Some(
                         age.and_then(|age| observed.checked_sub(age))

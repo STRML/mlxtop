@@ -4,9 +4,10 @@ use crate::domain::{ChartMetric, Sample, TelemetrySource};
 
 /// Prompts smaller than this keep a neutral CACHED color.
 const CACHE_GRADED_PROMPT: u64 = 4096;
-use crate::formatting::{compact_label, compact_tokens, telemetry_age};
+use crate::chart_render::meter_cells;
+use crate::formatting::{compact_label, compact_tokens, duration_label, telemetry_age};
 use crate::request_history::{same_request, Entry, History};
-use crate::theme::{BLUE, CYAN, DIM, GREEN, MUTED, PANEL};
+use crate::theme::{BLUE, CYAN, DIM, EDGE, GREEN, MUTED, PANEL};
 use crate::{chart_scale, domain};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -158,6 +159,55 @@ fn repeats_generation_rate(entry: &Entry, sample: &Sample) -> bool {
             .output_speed
             .zip(sample.llm_generation_tps)
             .is_some_and(|(speed, rate)| (speed.tps - rate).abs() < 0.05)
+}
+
+/// A live request still prefilling: how far its prompt has got as a bar,
+/// with the time left at the current prefill rate. Other requests show their
+/// output instead.
+fn progress_or_output(entry: &Entry, live: bool, sample: &Sample, width: u16) -> Line<'static> {
+    let usage = &entry.usage;
+    let Some(done) = usage
+        .prefilled
+        .filter(|done| live && !usage.queued && *done < usage.prompt)
+    else {
+        return output_summary(entry, live, sample, width);
+    };
+    let prompt = usage.prompt.max(1);
+    let percent = done as f64 * 100.0 / prompt as f64;
+    let left = sample
+        .llm_prefill_tps_live
+        .then_some(sample.llm_prefill_tps)
+        .flatten()
+        .filter(|rate| *rate > 0.0)
+        .map(|rate| duration_label((prompt - done) as f64 / rate));
+    let left = left
+        .map(|left| format!(" · {left} left"))
+        .unwrap_or_default();
+    let label = "PREFILL ";
+    // Whole details fit or drop: the percentage and time left outrank counts.
+    let width = usize::from(width);
+    let counts = format!(" · {} / {}", exact(done), exact(prompt));
+    let tail = [
+        format!(" {percent:.0}%{counts}{left}"),
+        format!(" {percent:.0}%{left}"),
+        format!(" {percent:.0}%"),
+    ]
+    .into_iter()
+    .find(|tail| label.len() + 6 + Line::from(tail.as_str()).width() <= width)
+    .unwrap_or_else(|| format!(" {percent:.0}%"));
+    let bar = width
+        .saturating_sub(label.len() + Line::from(tail.as_str()).width())
+        .min(30);
+    let mut line = Line::from(Span::styled(label, Style::default().fg(CYAN)));
+    if bar >= 6 {
+        line.spans.push(Span::styled(
+            meter_cells(percent, bar),
+            Style::default().fg(CYAN).bg(EDGE),
+        ));
+    }
+    line.spans
+        .push(Span::styled(tail, Style::default().fg(CYAN)));
+    line
 }
 
 fn output_summary(entry: &Entry, live: bool, sample: &Sample, width: u16) -> Line<'static> {
@@ -482,7 +532,7 @@ pub(super) fn draw(
         Paragraph::new(if inner.height >= 5 {
             details
         } else {
-            let mut output = output_summary(entry, live, sample, inner.width);
+            let mut output = progress_or_output(entry, live, sample, inner.width);
             if other_runtime {
                 append_detail(
                     &mut output,
@@ -496,7 +546,7 @@ pub(super) fn draw(
         Rect::new(inner.x, inner.y + 1, inner.width, 1),
     );
     let metadata_height = if inner.height >= 5 {
-        let mut output = output_summary(entry, live, sample, inner.width);
+        let mut output = progress_or_output(entry, live, sample, inner.width);
         if !clock_in_header {
             append_detail(&mut output, timestamp, MUTED, inner.width);
             append_detail(

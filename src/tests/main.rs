@@ -306,6 +306,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
             output: Some(1200),
             completed: index < 5,
             queued: false,
+            prefilled: None,
             ttft_ms: None,
             output_tps: Some(35.5 + (5 - index) as f64),
             observed_at: Some(now - Duration::from_secs((5 - index) as u64 * 10)),
@@ -353,6 +354,7 @@ pub(super) fn populate_single_idle_fixture(app: &mut App) {
             output: Some(346),
             completed: false,
             queued: false,
+            prefilled: None,
             ttft_ms: None,
             output_tps: Some(40.0),
             observed_at: Some(now - Duration::from_secs(25)),
@@ -1831,6 +1833,7 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
             completed: false,
             observed_at: Some(SystemTime::now()),
             queued: false,
+            prefilled: None,
             ttft_ms: None,
             output_tps: None,
         }];
@@ -1917,6 +1920,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
                 output: Some(40),
                 completed: true,
                 queued: false,
+                prefilled: None,
                 ttft_ms: None,
                 output_tps: None,
                 observed_at: Some(SystemTime::now()),
@@ -4774,7 +4778,7 @@ fn memory_history_stacks_what_ram_holds_over_a_pressure_ribbon() {
         })
         .unwrap();
     let buffer = terminal.backend().buffer();
-    let fills = crate::memory_composition::kind_colors();
+    let fills = crate::memory_composition::history_colors();
     let wired_rows = |x: u16| (0..20).filter(|y| buffer[(x, *y)].bg == fills[0]).count();
     // Before the load little is wired; after it, much more.
     assert!(
