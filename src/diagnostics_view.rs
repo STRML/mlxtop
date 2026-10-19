@@ -2,19 +2,26 @@
 //! Compact assessment and scrollable read-only diagnostics over existing samples.
 use crate::app::App;
 use crate::diagnosis;
-use crate::domain::Sample;
+use crate::domain::{Sample, Tone};
 use crate::report::diagnostic_lines;
 use crate::theme::{CYAN, MUTED, PANEL};
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 pub(crate) fn summary(frame: &mut Frame, area: Rect, sample: &Sample, paused: bool) {
     let finding = diagnosis::assess(sample);
+    // An icon carries the verdict's severity before any words do.
+    let icon = match finding.tone {
+        Tone::Green => '✓',
+        Tone::Yellow => '▲',
+        Tone::Red => '✖',
+        _ => '●',
+    };
     let title = format!(
-        " {}{}",
+        " {icon} {}{}",
         if paused { "PAUSED · " } else { "" },
         finding.title
     );
@@ -24,24 +31,31 @@ pub(crate) fn summary(frame: &mut Frame, area: Rect, sample: &Sample, paused: bo
             .fg(finding.tone.color())
             .add_modifier(Modifier::BOLD),
     ));
+    // A healthy verdict needs no supporting numbers; the panels show them.
     let evidence = format!(" · {}", finding.evidence);
-    if headline.width() + Line::from(evidence.as_str()).width() <= usize::from(area.width) {
+    if finding.tone != Tone::Green
+        && !finding.evidence.is_empty()
+        && headline.width() + Line::from(evidence.as_str()).width() <= usize::from(area.width)
+    {
         headline
             .spans
             .push(Span::styled(evidence, Style::default().fg(MUTED)));
     }
-    let next = format!(
-        " {} {}",
-        if finding.actionable { "CHECK" } else { "NOTE" },
-        finding.next
-    );
-    frame.render_widget(
-        Paragraph::new(vec![
-            headline,
-            Line::from(Span::styled(next, Style::default().fg(MUTED))),
-        ]),
-        area,
-    );
+    let mut lines = vec![headline];
+    if !finding.next.is_empty() {
+        lines.push(if finding.actionable {
+            Line::from(Span::styled(
+                format!(" → {}", finding.next),
+                Style::default().fg(Color::White),
+            ))
+        } else {
+            Line::from(Span::styled(
+                format!("   {}", finding.next),
+                Style::default().fg(MUTED),
+            ))
+        });
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Wrap once so rendering and scroll bounds use identical terminal-cell widths.

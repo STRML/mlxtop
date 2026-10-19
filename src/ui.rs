@@ -12,8 +12,8 @@ use crate::cli::VERSION;
 use crate::config::PAGING_ACTIVE_ENTER_RATE;
 use crate::domain::{ChartMetric, ChartPoint, Tone};
 use crate::formatting::{
-    bytes, compact_label, gpu_load_label, llm_generation_rate_label, llm_prefill_rate_label,
-    percent, pressure_state_label, rate, telemetry_age, telemetry_source,
+    activity_frame, bytes, compact_label, gpu_load_label, llm_generation_rate_label,
+    llm_prefill_rate_label, percent, pressure_state_label, rate, telemetry_age, telemetry_source,
 };
 use crate::host::Platform;
 use crate::processes::process_provider;
@@ -74,13 +74,14 @@ impl App {
                 Constraint::Length(1),
             ])
             .split(area);
-        self.draw_header(frame, outer[0]);
         self.draw_controls(frame, outer[2]);
         match self.tab {
             0 => self.draw_overview(frame, outer[1]),
             1 => self.draw_llm_top(frame, outer[1]),
             _ => self.draw_journal(frame, outer[1]),
         }
+        // After the content: the header names the window the Overview chose.
+        self.draw_header(frame, outer[0]);
         if self.tab == 0 {
             if self.charts.expanded {
                 frame.render_widget(Clear, outer[1]);
@@ -213,7 +214,7 @@ impl App {
         } else {
             vec![
                 Line::from("1 Overview"),
-                Line::from("2 MLX Top"),
+                Line::from("2 Processes"),
                 Line::from("3 Journal"),
             ]
         };
@@ -250,14 +251,36 @@ impl App {
             .style(Style::default().fg(MUTED))
             .divider(Span::styled(" · ", Style::default().fg(DIM)));
         frame.render_widget(tabs, chunks[1]);
+        // A heartbeat that turns with every sample, the refresh interval, and
+        // the one time window every Overview chart shares.
+        let mut status = if self.paused {
+            vec![Span::styled(
+                "PAUSED",
+                Style::default().fg(YELLOW).add_modifier(Modifier::BOLD),
+            )]
+        } else {
+            vec![Span::styled(
+                activity_frame(&self.collector.current).to_string(),
+                Style::default().fg(CYAN),
+            )]
+        };
+        status.push(Span::styled(
+            format!(" every {}s", self.interval.as_secs()),
+            Style::default().fg(MUTED),
+        ));
+        if let (0, false, Some(samples)) = (
+            self.tab,
+            self.charts.expanded,
+            self.charts.overview_samples.get(),
+        ) {
+            status.push(Span::styled(
+                format!(" · {}", chart_window_label(samples, self.interval)),
+                Style::default().fg(MUTED),
+            ));
+        }
+        status.push(Span::raw(" "));
         frame.render_widget(
-            Paragraph::new(format!(
-                "{} · {}s ",
-                if self.paused { "PAUSED" } else { "SAMPLING" },
-                self.interval.as_secs()
-            ))
-            .alignment(Alignment::Right)
-            .style(Style::default().fg(if self.paused { YELLOW } else { MUTED })),
+            Paragraph::new(Line::from(status)).alignment(Alignment::Right),
             chunks[2],
         );
     }
@@ -585,7 +608,7 @@ impl App {
                 if area.width < 28 {
                     value
                 } else {
-                    format!("interval {value}")
+                    format!("hit {value}")
                 }
             }
             ChartMetric::Gpu => current
@@ -633,15 +656,7 @@ impl App {
             .all(|point| point.value.is_none());
         let scale = chart_scale(history, metric, visible_count);
         let top_axis = chart_axis_label(metric, scale.1);
-        let mut axis_label = if rate_chart || metric.is_byte_rate() {
-            format!("{}–{} auto", chart_axis_label(metric, scale.0), top_axis)
-        } else {
-            "0–100%".into()
-        };
         let (average, peak) = chart_stats_for_width(history, metric, visible_count);
-        if metric.is_byte_rate() && peak == Some(0) {
-            axis_label = "zero traffic".into();
-        }
         let window = format!(
             "{} · {zoom}×",
             chart_window_label(history.len().min(visible_count), self.interval)
@@ -671,23 +686,12 @@ impl App {
         let mut details = vec![window.clone()];
         if average.is_some() {
             details.extend([
-                format!("window avg {}", chart_stat_label(metric, average)),
+                format!("avg {}", chart_stat_label(metric, average)),
                 format!("peak {}", chart_stat_label(metric, peak)),
-                axis_label,
-                "older → now".into(),
             ]);
         }
-        if !self.charts.expanded {
-            let span = Span::styled(
-                format!("· {} ", chart_window_label(visible_count, self.interval)),
-                Style::default().fg(MUTED),
-            );
-            if title.width() + span.width() + reading.width() + 2
-                <= usize::from(area.width.saturating_sub(2))
-            {
-                title.spans.push(span);
-            }
-        }
+        // The Overview shares one window, shown once in the top bar; only an
+        // expanded chart, which zooms on its own, names its window here.
         if self.charts.expanded && area.width >= 38 {
             for detail in details {
                 let span = Span::styled(format!(" · {detail}"), Style::default().fg(MUTED));
@@ -720,8 +724,8 @@ impl App {
             {
                 Some(llm_prefill_rate_label(sample))
             }
-            ChartMetric::Generation | ChartMetric::Prefill => Some("tok/s · auto".into()),
-            ChartMetric::Memory => Some("Includes file cache".into()),
+            ChartMetric::Generation | ChartMetric::Prefill => Some("tok/s".into()),
+            ChartMetric::Memory => None,
             ChartMetric::Gpu => Some(if current == Some(0) {
                 "idle".into()
             } else {
@@ -738,19 +742,29 @@ impl App {
                     .rsplit_once(' ')
                     .zip(decompress.rsplit_once(' '))
                     .filter(|((_, a), (_, b))| a == b)
-                    .map(|((c, unit), (d, _))| format!("COMP {c} · DECOMP {d} {unit}"));
+                    .map(|((c, unit), (d, _))| {
+                        format!("compressing {c} · decompressing {d} {unit}")
+                    });
                 let fits = |text: &String| {
                     Line::from(text.as_str()).width() + 2
                         <= usize::from(area.width.saturating_sub(2))
                 };
                 [
-                    Some(format!("COMP {compress} · DECOMP {decompress}")),
+                    Some(format!(
+                        "compressing {compress} · decompressing {decompress}"
+                    )),
                     shared_unit,
+                    compress
+                        .rsplit_once(' ')
+                        .zip(decompress.rsplit_once(' '))
+                        .filter(|((_, a), (_, b))| a == b)
+                        .map(|((c, unit), (d, _))| format!("comp {c} · decomp {d} {unit}")),
+                    Some(format!("comp {compress} · decomp {decompress}")),
                 ]
                 .into_iter()
                 .flatten()
                 .find(fits)
-                .or_else(|| Some(format!("COMP {compress}")))
+                .or_else(|| Some(format!("comp {compress}")))
             }
             ChartMetric::Swap => {
                 // All disk paging, as plotted: swap plus file page-ins/outs.
@@ -762,22 +776,24 @@ impl App {
                 } else {
                     ("—".into(), "—".into())
                 };
-                let spaced = format!("IN {swap_in} · OUT {swap_out}");
+                let spaced = format!("page-in {swap_in} · page-out {swap_out}");
                 Some(
                     if Line::from(spaced.as_str()).width() + 2
                         <= usize::from(area.width.saturating_sub(2))
                     {
                         spaced
                     } else {
-                        format!("IN {swap_in} OUT {swap_out}")
+                        format!("in {swap_in} · out {swap_out}")
                     },
                 )
             }
+            // The title has the latest interval's hit rate; these are the
+            // session-wide figures it is measured against.
             ChartMetric::Cache => Some(if area.width < 38 {
-                format!("TOTAL {}", percent(sample.llm_cache_efficiency))
+                format!("since start {}", percent(sample.llm_cache_efficiency))
             } else {
                 format!(
-                    "SERVER TOTAL {} · PREFIX HIT {}",
+                    "since start {} · prefix {}",
                     percent(sample.llm_cache_efficiency),
                     percent(sample.llm_prefix_hit_rate)
                 )
@@ -1826,7 +1842,7 @@ impl App {
                     self.charts.zoom(self.charts.focused)
                 )
             } else if self.tab == 1 {
-                " MLX Top ".into()
+                " Processes ".into()
             } else {
                 " Journal ".into()
             },
@@ -1914,7 +1930,7 @@ impl App {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("1 / 2 / 3       Overview / MLX Top / Journal"),
+            Line::from("1 / 2 / 3       Overview / Processes / Journal"),
             Line::from("d               diagnostics and runtime setup"),
             Line::from("Tab / Shift-Tab next / previous view"),
             Line::from("p / Space       pause or resume"),

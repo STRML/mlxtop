@@ -414,9 +414,12 @@ fn flat_panels_keep_units_and_explain_a_zoomed_gap() {
     populate_dashboard_fixture(&mut app);
     for (width, height) in [(80, 24), (100, 40), (180, 50)] {
         let screen = render_app(&app, width, height);
-        assert!(screen.contains("SYSINFO"));
+        assert!(screen.contains("Qwen3.8-27B-oQ4e-mtp"));
         assert!(screen.contains("Apple M4 Max"));
-        assert!(screen.contains("THERMAL no warning"));
+        assert!(
+            !screen.contains("THERMAL no warning"),
+            "normal thermals are not news"
+        );
         assert!(
             !screen.contains("┌ throughput"),
             "no extra throughput panel"
@@ -516,7 +519,7 @@ fn memory_chart_colors_follow_pressure_even_with_high_cache_occupancy() {
             CYAN,
             "resident percentage is occupancy; pressure has a separate severity label"
         );
-        assert!(footer.contains("Includes file cache"));
+        assert!(!footer.contains("Includes file cache"), "no filler footer");
         let sample_cells: Vec<_> = buffer
             .content
             .iter()
@@ -668,7 +671,7 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
             ChartMetric::Cache,
         )
     });
-    assert!(screen.contains("TOTAL 61.9%"));
+    assert!(screen.contains("since start 61.9%"));
     assert!(screen.contains("No cache samples yet"));
     // Narrow panels keep the whole message rather than clipping "yet".
     let narrow = render_view(20, 8, |frame| {
@@ -703,24 +706,24 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
             ChartMetric::Generation,
             "generation",
             Some(400),
-            vec!["LAST SAMPLE 40.0 tok/s · 25s old", "tok/s · auto"],
+            vec!["LAST SAMPLE 40.0 tok/s · 25s old", "tok/s"],
         ),
         (
             ChartMetric::Cache,
             "cache",
             Some(0),
             vec![
-                "interval —",
+                "hit —",
                 "LAST INTERVAL 0% · 25s old",
-                "TOTAL 62.8%",
-                "PREFIX HIT 39.7%",
+                "since start 62.8%",
+                "prefix 39.7%",
             ],
         ),
         (
             ChartMetric::Prefill,
             "prefill",
             None,
-            vec!["Idle · no rate samples yet", "tok/s · auto"],
+            vec!["Idle · no rate samples yet", "tok/s"],
         ),
     ] {
         let mut point = ChartPoint::new(last, Tone::Cyan);
@@ -755,7 +758,7 @@ fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
     for (width, height) in [(80, 24), (100, 40), (180, 50)] {
         let screen = render_app(&app, width, height);
         for label in [
-            "SYSINFO",
+            "Qwen3.8-27B-oQ4e-mtp",
             "prompt load",
             "memory",
             "GPU",
@@ -1252,9 +1255,7 @@ fn chart_stats_use_normalized_values_and_keep_the_window_label_honest() {
 fn overview_renders_the_first_glance_cards_at_reference_size() {
     let rendered = render_app(&test_app(0), 180, 50);
     for label in [
-        "SYSINFO",
         "queue",
-        "PROMPT",
         "memory",
         "paging / I/O",
         "GPU",
@@ -2139,16 +2140,7 @@ fn recent_journal_keeps_two_event_rows_after_header_compaction() {
 #[test]
 fn overview_uses_a_compact_operational_strip_on_medium_terminals() {
     let rendered = render_app(&test_app(0), 100, 40);
-    for label in [
-        "SYSINFO",
-        "queue",
-        "PROMPT",
-        "OUT",
-        "generation",
-        "GPU",
-        "memory",
-        "paging",
-    ] {
+    for label in ["queue", "generation", "GPU", "memory", "paging"] {
         assert!(rendered.contains(label), "missing compact label: {label}");
     }
     assert!(!rendered.contains("Terminal too small"));
@@ -2157,7 +2149,7 @@ fn overview_uses_a_compact_operational_strip_on_medium_terminals() {
 #[test]
 fn overview_remains_useful_at_a_classic_eighty_column_size() {
     let rendered = render_app(&test_app(0), 80, 24);
-    for label in ["SYSINFO", "generation", "GPU", "memory", "paging"] {
+    for label in ["generation", "GPU", "memory", "paging"] {
         assert!(rendered.contains(label), "missing 80-column label: {label}");
     }
     assert!(!rendered.contains("This dashboard needs"));
@@ -4105,16 +4097,12 @@ fn cache_never_replaces_missing_interval_samples_with_cumulative_gauge() {
         let text = render_view(45, 10, |frame| {
             app.render_indicator_chart(frame, frame.area(), "cache", &history, ChartMetric::Cache)
         });
-        assert!(text.contains("TOTAL 62.7% · PREFIX HIT 40.5%"), "{text}");
+        assert!(text.contains("since start 62.7% · prefix 40.5%"), "{text}");
         assert!(
             !text.contains('█'),
             "aggregate must never become a gauge: {text}"
         );
-        assert!(text.contains(if missing == 0 {
-            "interval 0%"
-        } else {
-            "interval —"
-        }));
+        assert!(text.contains(if missing == 0 { "hit 0%" } else { "hit —" }));
         if missing == 80 {
             assert!(text.contains("No samples in this window"));
         }
@@ -4320,7 +4308,7 @@ fn overview_review_fixes_keep_one_reading_per_fact_and_identity_during_alarms() 
     });
     let alarm = render_app(&app, 120, 40);
     for label in [
-        "SYSINFO",
+        "Qwen3.8-27B-oQ4e-mtp",
         "Qwen3.8-27B-oQ4e-mtp",
         "LIVE · ",
         "⚠ MEMORY BOTTLENECK",
@@ -4361,7 +4349,7 @@ fn host_row_leads_with_memory_compression_and_paging_on_macos_only() {
         "PRESSURE normal",
         "wired 3.2 GiB",
         "4.6 GiB stored in 1.6 GiB · 2.9× ratio",
-        "COMP 3.0 MiB/s · DECOMP 1.5 MiB/s",
+        "comp 3.0 · decomp 1.5 MiB/s",
         "1.6/36.0 GiB 4%",
     ] {
         assert!(screen.contains(label), "missing {label}\n{screen}");

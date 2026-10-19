@@ -118,14 +118,45 @@ pub(crate) fn gpu_load_label(value: Option<u8>, thresholds: Thresholds) -> &'sta
     }
 }
 
+/// Where the runtime reading came from, with its age once it is no longer
+/// fresh: a live reading a second old needs no "0s old".
 pub(crate) fn telemetry_source(sample: &Sample) -> String {
     let label = match sample.llm_source {
         TelemetrySource::Live => "LIVE",
         TelemetrySource::Log => "LOG",
         TelemetrySource::Report => "REPORTED",
-        TelemetrySource::None => "SOURCE —",
+        TelemetrySource::None => return String::new(),
     };
-    format!("{label} · {}", telemetry_age(sample.llm_observed_at))
+    let fresh = sample.llm_source == TelemetrySource::Live
+        && sample.llm_observed_at.is_some_and(|at| {
+            SystemTime::now()
+                .duration_since(at)
+                .is_ok_and(|age| age.as_secs() < 3)
+        });
+    if fresh {
+        label.into()
+    } else {
+        format!("{label} · {}", telemetry_age(sample.llm_observed_at))
+    }
+}
+
+/// A spinner frame that advances with every sample, from the sample's clock.
+pub(crate) fn activity_frame(sample: &Sample) -> char {
+    const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    sample
+        .updated
+        .chars()
+        .last()
+        .and_then(|digit| digit.to_digit(10))
+        .map_or('●', |digit| FRAMES[digit as usize])
+}
+
+/// Runtime states with work under way, which earn the spinner.
+pub(crate) fn llm_is_working(status: &str) -> bool {
+    matches!(
+        status,
+        "generating" | "prefilling" | "loading" | "restarting" | "untracked"
+    )
 }
 
 pub(crate) fn telemetry_age(observed_at: Option<SystemTime>) -> String {

@@ -71,8 +71,9 @@ fn summary_shows_evidence_without_turning_gpu_load_into_a_bottleneck() {
     app.collector.current.correlation = Default::default();
     for (w, h) in [(80, 24), (120, 40), (180, 50)] {
         let screen = render_app(&app, w, h);
-        assert!(screen.contains("Healthy · no bottleneck"), "{screen}");
-        assert!(screen.contains("GPU 99%"), "{screen}");
+        assert!(screen.contains("✓ Healthy · no bottleneck"), "{screen}");
+        // A healthy verdict leaves the numbers to the panels below it.
+        assert!(!screen.contains("no bottleneck · GPU 99%"), "{screen}");
         assert!(!screen.contains("GPU busy"));
         assert!(screen.contains("d diagnostics"));
         assert!(screen.contains("prompt load") && screen.contains("paging"));

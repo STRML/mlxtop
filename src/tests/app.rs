@@ -498,7 +498,7 @@ fn interactive_loop_draws_dispatches_input_and_stops_on_quit() {
         .iter()
         .all(|timeout| *timeout == Duration::from_millis(100)));
     let screen = format!("{:?}", terminal.backend().buffer());
-    assert!(screen.contains("MLX Top"));
+    assert!(screen.contains("Processes"));
 }
 
 #[test]
@@ -720,7 +720,8 @@ fn global_keys_pause_resize_interval_switch_tabs_and_reset() {
     };
     press(&mut app, &[KeyCode::Char('p')]);
     assert!(app.paused);
-    assert!(render_app(&app, 120, 32).contains("PAUSED · 1s"));
+    let paused = render_app(&app, 120, 32);
+    assert!(paused.contains("PAUSED every 1s"), "{paused}");
     press(&mut app, &[KeyCode::Char(' ')]);
     assert!(!app.paused);
     press(

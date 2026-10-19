@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 //! A dense system strip: runtime identity, workload and host facts share one border.
+use crate::chart_render::meter_cells;
 use crate::domain::Sample;
 use crate::formatting::{
-    bytes, compact_label, compact_tokens, compressed_memory_label, llm_context_label,
-    llm_runtime_label, optional_tokens, process_count_label, signed_rate, telemetry_age,
-    telemetry_source,
+    activity_frame, bytes, compact_label, compact_tokens, compressed_memory_label,
+    llm_context_label, llm_is_working, llm_runtime_label, optional_tokens, process_count_label,
+    signed_rate, telemetry_age, telemetry_source,
 };
-use crate::theme::{card_block, llm_status_tone, tone_badge, BLUE, MUTED};
+use crate::theme::{
+    card_block, llm_status_tone, tone_badge, BLUE, CYAN, DIM, EDGE, MUTED, RED, YELLOW,
+};
 use crate::{gpu, request_history};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -124,8 +127,17 @@ fn rss(sample: &Sample) -> String {
     )
 }
 
+/// Thermal state only when it is news: normal is the default.
+fn thermal_note(sample: &Sample) -> Option<String> {
+    (!matches!(
+        sample.thermal.as_str(),
+        "no warning" | "nominal" | "unavailable"
+    ))
+    .then(|| format!("THERMAL {}", sample.thermal))
+}
+
 fn thermal_parts(sample: &Sample) -> Vec<String> {
-    let mut parts = vec![format!("THERMAL {}", sample.thermal)];
+    let mut parts: Vec<String> = thermal_note(sample).into_iter().collect();
     if let Some(renderer) = sample.metal.renderer_util {
         parts.push(format!("R {renderer}%"));
     }
@@ -152,16 +164,90 @@ fn identity(sample: &Sample, width: usize) -> Line<'static> {
 }
 
 fn state(sample: &Sample) -> Line<'static> {
-    Line::from(vec![
-        tone_badge(
-            llm_status_tone(&sample.llm_status),
-            &sample.llm_status.to_ascii_uppercase(),
-        ),
+    let status = sample.llm_status.to_ascii_uppercase();
+    let badge = if llm_is_working(&sample.llm_status) {
+        format!("{} {status}", activity_frame(sample))
+    } else {
+        status
+    };
+    let mut line = Line::from(tone_badge(llm_status_tone(&sample.llm_status), &badge));
+    let source = telemetry_source(sample);
+    if !source.is_empty() {
+        line.spans.push(Span::styled(
+            format!("  {source}"),
+            Style::default().fg(MUTED),
+        ));
+    }
+    line
+}
+
+/// GPU memory against its limit as a small meter, graded as it nears full:
+/// the Metal working set filling up is what slows generation.
+fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
+    let (used, total) = if sample.has_nvidia_gpus() {
+        gpu::memory_totals(&sample.gpus)?
+    } else {
+        (sample.gpu_in_use?, sample.gpu_alloc?)
+    };
+    if total == 0 {
+        return None;
+    }
+    let percent = used as f64 * 100.0 / total as f64;
+    let color = if percent >= 97.0 {
+        RED
+    } else if percent >= 90.0 {
+        YELLOW
+    } else {
+        CYAN
+    };
+    Some(vec![
         Span::styled(
-            format!("  {}", telemetry_source(sample)),
+            if sample.has_nvidia_gpus() {
+                "VRAM "
+            } else {
+                "GPU mem "
+            },
             Style::default().fg(MUTED),
         ),
+        Span::styled(meter_cells(percent, 5), Style::default().fg(color).bg(EDGE)),
+        Span::styled(
+            format!(" {} / {}", bytes(used), bytes(total)),
+            Style::default().fg(color),
+        ),
     ])
+}
+
+/// The card's bottom edge: the machine, then what the runtime uses of it.
+/// Whole fields fit or drop, least important last; thermal only when it is
+/// not normal.
+fn host_footer(sample: &Sample, width: usize) -> Line<'static> {
+    let muted = |text: String| vec![Span::styled(text, Style::default().fg(MUTED))];
+    let mut fields: Vec<Vec<Span<'static>>> = vec![muted(hardware_parts(sample).join(" · "))];
+    if let Some(thermal) = thermal_note(sample) {
+        fields.push(vec![Span::styled(thermal, Style::default().fg(YELLOW))]);
+    }
+    fields.extend(gpu_memory_meter(sample));
+    if sample.llm_count > 0 {
+        fields.push(muted(format!(
+            "LLM {} · CPU {:.0}%",
+            bytes(sample.llm_rss),
+            sample.llm_cpu
+        )));
+    }
+    let mut line = Line::default();
+    for field in fields {
+        let separator = usize::from(!line.spans.is_empty()) * 3;
+        let field_width: usize = field.iter().map(Span::width).sum();
+        if line.width() + separator + field_width > width {
+            continue;
+        }
+        if separator > 0 {
+            line.spans
+                .push(Span::styled(" · ", Style::default().fg(DIM)));
+        }
+        line.spans.extend(field);
+    }
+    line
 }
 
 pub(super) fn draw(
@@ -174,29 +260,20 @@ pub(super) fn draw(
     let compact = area.height < 5;
     let wide = width >= 130;
     let tone = llm_status_tone(&sample.llm_status);
+    // Work counters only when they have values the prompt panel lacks.
     let title = fitted_parts(
-        std::iter::once("SYSINFO".into()).chain(
-            if compact && !prompt_panel_covers(sample, history) {
-                work_parts(sample, history)
-            } else {
-                Vec::new()
-            },
-        ),
+        if compact && !prompt_panel_covers(sample, history) {
+            work_parts(sample, history)
+                .into_iter()
+                .filter(|part| !part.ends_with('—'))
+                .collect()
+        } else {
+            Vec::new()
+        },
         width.saturating_sub(2),
     );
     let footer = if compact {
-        fitted_parts(
-            hardware_parts(sample)
-                .into_iter()
-                .chain([
-                    ram(sample),
-                    format!("THERMAL {}", sample.thermal),
-                    cpu(sample),
-                    rss(sample),
-                ])
-                .chain(gpu_memory(sample)),
-            width.saturating_sub(2),
-        )
+        String::new()
     } else if wide {
         let mut parts = Vec::new();
         if let Some(memory) = &sample.process_memory {
@@ -222,15 +299,26 @@ pub(super) fn draw(
         )
     };
     let mut block = card_block(
-        Line::from(Span::styled(
-            format!(" {title} "),
-            Style::default()
-                .fg(tone.color())
-                .add_modifier(Modifier::BOLD),
-        )),
+        if title.is_empty() {
+            Line::default()
+        } else {
+            Line::from(Span::styled(
+                format!(" {title} "),
+                Style::default()
+                    .fg(tone.color())
+                    .add_modifier(Modifier::BOLD),
+            ))
+        },
         tone,
     );
-    if !footer.is_empty() {
+    if compact {
+        let mut host = host_footer(sample, width.saturating_sub(2));
+        if !host.spans.is_empty() {
+            host.spans.insert(0, Span::raw(" "));
+            host.spans.push(Span::raw(" "));
+            block = block.title_bottom(host);
+        }
+    } else if !footer.is_empty() {
         block = block.title_bottom(plain(format!(" {footer} "), MUTED));
     }
     let inner = block.inner(area);
@@ -317,7 +405,7 @@ pub(super) fn draw(
             ),
             plain(
                 fitted_parts(
-                    [format!("THERMAL {}", sample.thermal), cpu(sample)],
+                    thermal_note(sample).into_iter().chain([cpu(sample)]),
                     hardware_width,
                 ),
                 MUTED,

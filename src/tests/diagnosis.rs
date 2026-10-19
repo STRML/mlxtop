@@ -28,7 +28,7 @@ fn high_gpu_usage_is_evidence_not_a_slowdown_or_alarm() {
     assert_eq!(finding.title, "Healthy · no bottleneck");
     assert_eq!(finding.tone, Tone::Green);
     assert!(finding.evidence.contains("99%"));
-    assert_eq!(finding.next, "No generation slowdown measured.");
+    assert_eq!(finding.next, "", "nothing to say beyond Healthy");
     // The chart grades saturation red; the finding still reports no bottleneck.
     assert_eq!(ChartMetric::Gpu.tone(100, Thresholds::default()), Tone::Red);
     // Without normal OS pressure the verdict stays neutral.
@@ -40,13 +40,13 @@ fn high_gpu_usage_is_evidence_not_a_slowdown_or_alarm() {
     sample.pressure = "GREEN".into();
     sample.llm_generation_tps_live = false;
     sample.llm_status = "idle".into();
-    assert_eq!(assess(&sample).next, "Idle · waiting for the next request.");
+    assert_eq!(assess(&sample).next, "");
     // oMLX says `healthy` after its last request; with nothing active or
     // queued that is idle too, but only while the reading is fresh.
     sample.llm_status = "healthy".into();
     sample.llm_active_requests = Some(0);
     sample.llm_waiting_requests = Some(0);
-    assert_eq!(assess(&sample).next, "Idle · waiting for the next request.");
+    assert_eq!(assess(&sample).next, "");
     sample.llm_active_requests = Some(1);
     assert_eq!(assess(&sample).next, "Live generation rate unavailable.");
     sample.llm_active_requests = Some(0);

@@ -180,7 +180,8 @@ fn assess_observation(sample: &Sample) -> Finding {
             ThroughputDirection::Flat | ThroughputDirection::Up
         )
     {
-        finding.next = "No generation slowdown measured.";
+        // Nothing to say: an empty note keeps the strip quiet.
+        finding.next = "";
     } else if sample.llm_status == "untracked" {
         finding.next =
             "GPU busy outside oMLX's request tracking (oMLX benchmark on Splash?) · no live rates.";
@@ -192,7 +193,14 @@ fn assess_observation(sample: &Sample) -> Finding {
                 && sample.llm_active_requests == Some(0)
                 && sample.llm_waiting_requests.unwrap_or(0) == 0))
     {
-        finding.next = "Idle · waiting for the next request.";
+        // The status badge already says idle.
+        finding.next = "";
+    } else if matches!(
+        sample.llm_status.as_str(),
+        "prefilling" | "loading" | "waiting" | "restarting" | "paused"
+    ) {
+        // No generation rate is expected before the first token.
+        finding.next = "";
     } else if !live {
         finding.next = "Live generation rate unavailable.";
     }
