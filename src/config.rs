@@ -15,6 +15,9 @@ pub(crate) const COMPRESSION_WARN_RATE: u64 = 64 * MIB;
 pub(crate) const SWAP_WARN_EXIT: u64 = 2 * MIB;
 /** Churn rate that turns "paging active" on; `swap_warn_exit` turns it off. */
 pub(crate) const PAGING_ACTIVE_ENTER_RATE: u64 = 4 * MIB;
+/// Free memory at or below this percentage counts as tight even while macOS
+/// still reports normal pressure.
+pub(crate) const TIGHT_FREE_PERCENT: u8 = 10;
 /** GPU load that turns "GPU busy" on; `gpu_warn_exit` turns it off. */
 pub(crate) const GPU_BUSY_ENTER_LOAD: u64 = 80;
 pub(crate) const COMPRESSION_WARN_EXIT: u64 = 32 * MIB;

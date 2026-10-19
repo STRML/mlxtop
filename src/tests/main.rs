@@ -592,6 +592,25 @@ fn memory_history_preserves_pressure_changes_and_missing_samples() {
 }
 
 #[test]
+fn paging_connectors_never_outrank_the_points_they_join() {
+    let heavy = 900 * 1024 * 1024;
+    let tone = |previous, current| {
+        chart_transition_tone(ChartMetric::Swap, heavy, previous, current, defaults())
+    };
+    // A model load on a roomy machine: two green points, so no red edge.
+    assert_eq!(tone(Tone::Green, Tone::Green), Tone::Green);
+    // Real heavy paging keeps its red, whichever side it is on.
+    assert_eq!(tone(Tone::Green, Tone::Red), Tone::Red);
+    assert_eq!(tone(Tone::Red, Tone::Green), Tone::Red);
+    assert_eq!(tone(Tone::Yellow, Tone::Green), Tone::Yellow);
+    // Below the warning rate the value still grades a connector down.
+    assert_eq!(
+        chart_transition_tone(ChartMetric::Swap, 0, Tone::Red, Tone::Red, defaults()),
+        Tone::Green
+    );
+}
+
+#[test]
 fn compact_resource_panels_use_capacity_bars_without_false_axes() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
@@ -986,9 +1005,11 @@ fn parses_macos_swapusage_with_spaced_equals() {
 fn parses_vm_stat_punctuation_and_rates() {
     let counters = parse_vm_stat(
         "Pages wired down: 10.\nPages occupied by compressor: 2.\n\
-         Pages stored in compressor: 4.\nSwapins: 7.\nSwapouts: 3.",
+         Pages stored in compressor: 4.\nPageins: 900.\nPageouts: 12.\nSwapins: 7.\nSwapouts: 3.",
         16_384,
     );
+    assert_eq!(counters.pageins, 900);
+    assert_eq!(counters.pageouts, 12);
     assert_eq!(counters.wired, 10 * 16_384);
     assert_eq!(counters.compressor, 2 * 16_384);
     assert_eq!(counters.compressed_logical, 4 * 16_384);
@@ -2735,6 +2756,81 @@ fn classification_reports_unknown_data_and_actionable_compression() {
     classify(&mut sample, None, defaults());
     assert_eq!(sample.impact, "COMPRESSION ACTIVE");
     assert_eq!(sample.guidance_badge, "WATCH");
+}
+
+#[test]
+fn file_paging_counts_against_the_system_only_while_memory_is_tight() {
+    let mib = 1024 * 1024;
+    let roomy = Sample {
+        rate_ready: true,
+        total_memory: 36 * 1024 * mib,
+        availability: Some(40),
+        pressure: "GREEN".into(),
+        vm_available: true,
+        swap_available: true,
+        thermal: "no warning".into(),
+        llm_count: 1,
+        // A model loading from SSD with swap off: page-ins, no swap.
+        page_in: 900 * mib,
+        page_out: mib,
+        ..Sample::default()
+    };
+    assert!(!roomy.memory_tight());
+    assert_eq!(roomy.paging_churn(), 0);
+    assert_eq!(roomy.disk_paging(), 901 * mib);
+    let mut sample = roomy.clone();
+    classify(&mut sample, None, defaults());
+    assert_eq!(
+        sample.impact, "LLM READY",
+        "a model load is not degradation"
+    );
+
+    // Little memory free while macOS still says normal pressure: the same
+    // page-ins are pages evicted and read straight back.
+    let mut full = Sample {
+        availability: Some(TIGHT_FREE_PERCENT),
+        ..roomy.clone()
+    };
+    assert!(full.memory_tight());
+    assert_eq!(full.paging_in(), 900 * mib);
+    assert_eq!(full.paging_churn(), 901 * mib);
+    classify(&mut full, None, defaults());
+    assert_eq!(full.impact, "HEAVY PAGING");
+    assert_eq!(full.impact_tone, Tone::Red);
+    assert_eq!(full.guidance_badge, "ACT NOW");
+    assert_eq!(
+        full.guidance_cause,
+        "RAM full — reading evicted pages back from disk at 900.0 MiB/s."
+    );
+    assert!(signal_summary(&full).starts_with("page-in 900.0 MiB/s"));
+
+    // Lighter file paging under pressure is active paging, not yet heavy.
+    let mut pressured = Sample {
+        pressure: "YELLOW".into(),
+        page_in: 8 * mib,
+        page_out: 0,
+        ..roomy.clone()
+    };
+    classify(&mut pressured, None, defaults());
+    assert_eq!(pressured.impact, "MEMORY STRESS");
+    pressured.pressure = "GREEN".into();
+    pressured.availability = Some(5);
+    classify(&mut pressured, None, defaults());
+    assert_eq!(pressured.impact, "PAGING ACTIVE");
+    assert_eq!(
+        pressured.guidance_cause,
+        "Paging active — in 8.0 MiB/s + out 0 B/s."
+    );
+
+    // Swap counts whatever the memory state, as before.
+    let mut swapping = Sample {
+        swap_in: 8 * mib,
+        page_in: 0,
+        page_out: 0,
+        ..roomy
+    };
+    classify(&mut swapping, None, defaults());
+    assert_eq!(swapping.impact, "PAGING ACTIVE");
 }
 
 #[test]

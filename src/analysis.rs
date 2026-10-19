@@ -52,7 +52,8 @@ pub(crate) fn threshold_with_hysteresis(
 }
 
 pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, thresholds: Thresholds) {
-    let swap_churn = sample.swap_in.saturating_add(sample.swap_out);
+    // Swap always counts; file paging counts while memory is tight.
+    let swap_churn = sample.paging_churn();
     let comp_churn = sample.compress.saturating_add(sample.decompress);
     let llm = llm_is_observed(sample);
     let previous_impact = previous.map(|sample| sample.impact.as_str());
@@ -78,8 +79,12 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
     let watch_paging = swap_churn >= thresholds.swap_warn_rate;
     let swap_thrashing =
         sample.swap_in >= swap_critical_rate && sample.swap_out >= swap_critical_rate;
+    // With swap off, a full Mac drops file-backed pages (model weights too)
+    // and reads them straight back: that is its heavy paging.
+    let file_thrashing = sample.memory_tight() && sample.page_in >= 2 * swap_critical_rate;
     let heavy_paging = sample.swap_out >= 2 * swap_critical_rate
-        || sample.swap_growth >= (2 * swap_critical_rate) as i64;
+        || sample.swap_growth >= (2 * swap_critical_rate) as i64
+        || file_thrashing;
     let page_in_recovery = sample.swap_in >= 2 * swap_critical_rate && sample.swap_growth <= 0;
     let gpu_busy = threshold_with_hysteresis(
         sample.gpu_util.unwrap_or_default() as u64,
@@ -234,6 +239,17 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
         } else {
             format!("Pause or quit {largest}; wait for swap-out to approach zero.")
         };
+    } else if file_thrashing {
+        sample.guidance_badge = "ACT NOW".into();
+        sample.guidance_cause = format!(
+            "RAM full — reading evicted pages back from disk at {}.",
+            rate(sample.page_in)
+        );
+        sample.guidance_action = if llm {
+            "Stop unused models or reduce model/context/cache.".into()
+        } else {
+            format!("Pause or quit {largest}; wait for page-ins to approach zero.")
+        };
     } else if let Some(issue) = &sample.gpu_issue {
         let (badge, cause, action) = issue.guidance();
         sample.guidance_badge = badge.into();
@@ -243,8 +259,8 @@ pub(crate) fn classify(sample: &mut Sample, previous: Option<&Sample>, threshold
         sample.guidance_badge = "WATCH".into();
         sample.guidance_cause = format!(
             "Paging active — in {} + out {}.",
-            rate(sample.swap_in),
-            rate(sample.swap_out)
+            rate(sample.paging_in()),
+            rate(sample.paging_out())
         );
         sample.guidance_action =
             "Reduce model/context/cache if paging persists during inference.".into();
@@ -297,6 +313,12 @@ pub(crate) fn signal_summary(sample: &Sample) -> String {
             rate(sample.swap_in),
             rate(sample.swap_out)
         ),
+        "HEAVY PAGING" if sample.memory_tight() && sample.page_in > 0 => format!(
+            "page-in {} · swap {} / growth {}",
+            rate(sample.page_in),
+            rate(sample.swap_in + sample.swap_out),
+            signed_rate(sample.swap_growth)
+        ),
         "HEAVY PAGING" => format!(
             "swap {} / growth {}",
             rate(sample.swap_in + sample.swap_out),
@@ -344,11 +366,8 @@ pub(crate) fn llm_is_observed(sample: &Sample) -> bool {
 
 pub(crate) fn correlation_evidence_label(sample: &Sample) -> String {
     match sample.correlation.cause {
-        CorrelationCause::Paging if sample.swap_in.saturating_add(sample.swap_out) > 0 => {
-            format!(
-                "I/O {}",
-                rate(sample.swap_in.saturating_add(sample.swap_out))
-            )
+        CorrelationCause::Paging if sample.paging_churn() > 0 => {
+            format!("I/O {}", rate(sample.paging_churn()))
         }
         CorrelationCause::Compression if sample.compress.saturating_add(sample.decompress) > 0 => {
             format!(
@@ -457,7 +476,7 @@ impl CorrelationObservation {
             gpu_util: sample.gpu_util,
             renderer_util: sample.metal.renderer_util,
             tiler_util: sample.metal.tiler_util,
-            paging_rate: sample.swap_in.saturating_add(sample.swap_out),
+            paging_rate: sample.paging_churn(),
             compression_rate: sample.compress.saturating_add(sample.decompress),
             pressure: pressure_rank(&sample.pressure),
             thermal_limited: sample.thermal.starts_with("limited")

@@ -752,8 +752,12 @@ impl App {
                 .or_else(|| Some(format!("COMP {compress}")))
             }
             ChartMetric::Swap => {
+                // All disk paging, as plotted: swap plus file page-ins/outs.
                 let (swap_in, swap_out) = if sample.rate_ready && !sample.paging_unavailable {
-                    (rate(sample.swap_in), rate(sample.swap_out))
+                    (
+                        rate(sample.swap_in.saturating_add(sample.page_in)),
+                        rate(sample.swap_out.saturating_add(sample.page_out)),
+                    )
                 } else {
                     ("—".into(), "—".into())
                 };
@@ -928,14 +932,23 @@ impl App {
                 return;
             }
             if inner.height < 3 {
+                // Graded on what counts against the system, as the assessment
+                // is: file paging only while memory is tight.
+                let uncounted = if sample.memory_tight() {
+                    0
+                } else {
+                    sample.page_in.saturating_add(sample.page_out)
+                };
+                let counted = current.map(|rate| rate.saturating_sub(uncounted));
                 frame.render_widget(
                     // Match the assessment: "active" starts at the warning rate.
-                    Paragraph::new(match current {
-                        Some(0) => "No paging traffic",
-                        Some(rate) if rate >= PAGING_ACTIVE_ENTER_RATE => "Paging active",
-                        Some(rate) if rate >= self.thresholds.swap_warn_rate => "Watch paging",
-                        Some(_) => "Light paging · below warning",
-                        None => "Paging unavailable",
+                    Paragraph::new(match (current, counted) {
+                        (Some(0), _) => "No paging traffic",
+                        (_, Some(rate)) if rate >= PAGING_ACTIVE_ENTER_RATE => "Paging active",
+                        (_, Some(rate)) if rate >= self.thresholds.swap_warn_rate => "Watch paging",
+                        (_, Some(0)) => "Disk reads · memory not tight",
+                        (Some(_), _) => "Light paging · below warning",
+                        (None, _) => "Paging unavailable",
                     })
                     .style(Style::default().fg(current_tone.color())),
                     inner,

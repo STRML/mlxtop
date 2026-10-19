@@ -32,7 +32,7 @@ pub(super) fn assess(sample: &Sample) -> Finding {
 
 fn assess_observation(sample: &Sample) -> Finding {
     let paging = if sample.paging_measured() && sample.vm_available {
-        rate(sample.swap_in.saturating_add(sample.swap_out))
+        rate(sample.paging_churn())
     } else {
         "—".into()
     };

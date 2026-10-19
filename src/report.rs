@@ -33,10 +33,32 @@ pub(crate) fn write_static(
         bytes(sample.total_memory)
     )?;
     // Windows has no paging counters: unknown, not zero.
+    // All disk paging: swap plus file page-ins/outs, then the file share and
+    // whether it counts (only while memory is tight).
     let (paging_in, paging_out) = if sample.paging_unavailable {
         ("—".to_string(), "—".to_string())
     } else {
-        (rate(sample.swap_in), rate(sample.swap_out))
+        let file = if sample.page_in.saturating_add(sample.page_out) == 0 {
+            String::new()
+        } else {
+            format!(
+                " · file in {} · out {} · memory {}",
+                rate(sample.page_in),
+                rate(sample.page_out),
+                if sample.memory_tight() {
+                    "tight"
+                } else {
+                    "not tight"
+                }
+            )
+        };
+        (
+            rate(sample.swap_in.saturating_add(sample.page_in)),
+            format!(
+                "{}{file}",
+                rate(sample.swap_out.saturating_add(sample.page_out))
+            ),
+        )
     };
     if sample.swap_available && sample.swap_total == 0 {
         writeln!(

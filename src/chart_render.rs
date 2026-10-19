@@ -362,7 +362,27 @@ pub(crate) fn chart_transition_tone(
         // crossing an occupancy percentage between two normal observations.
         ChartMetric::Cache | ChartMetric::Memory => tone,
         ChartMetric::Gpu => metric.tone(display_value, thresholds),
-        ChartMetric::Swap | ChartMetric::Compression => metric.tone(display_value, thresholds),
+        ChartMetric::Compression => metric.tone(display_value, thresholds),
+        // The chart plots all disk paging but grades what counted against the
+        // system, so a connector never outranks both of its captured points.
+        ChartMetric::Swap => {
+            let rank = |tone: Tone| match tone {
+                Tone::Red => 2,
+                Tone::Yellow => 1,
+                _ => 0,
+            };
+            let ceiling = if rank(previous_tone) >= rank(tone) {
+                previous_tone
+            } else {
+                tone
+            };
+            let by_value = metric.tone(display_value, thresholds);
+            if rank(by_value) > rank(ceiling) {
+                ceiling
+            } else {
+                by_value
+            }
+        }
     }
 }
 

@@ -415,6 +415,10 @@ pub(crate) fn parse_vm_stat(text: &str, page_size: u64) -> VmCounters {
             c.anonymous = bytes;
         } else if line.starts_with("File-backed pages") {
             c.file_backed = bytes;
+        } else if line.starts_with("Pageins") {
+            c.pageins = value;
+        } else if line.starts_with("Pageouts") {
+            c.pageouts = value;
         } else if line.starts_with("Swapins") || line.contains("\"Swapins\"") {
             c.swapins = value;
         } else if line.starts_with("Swapouts") || line.contains("\"Swapouts\"") {
