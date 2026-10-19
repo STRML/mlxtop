@@ -11,7 +11,7 @@ by heat or power. With oMLX, vLLM, SGLang, mlx-serve or
 Splash, you can also follow generation speed and request activity as your model
 responds.
 
-![mlxtop Overview on Apple Silicon: memory pressure with RAM composition, compression and paging first, then prompt load and a compact throughput row, colored by threshold](docs/screenshots/overview.png)
+![mlxtop Overview on a Mac Studio running oMLX through Splash: the runtime card with a prefilling badge and GPU memory meter, memory stacked by wired, app, compressed and cache over a pressure ribbon, compression and paging bars against dotted warning lines, prompt load bars per request, generation and prefill bars, GPU busy area and the recent Journal](docs/screenshots/overview.png)
 
 [Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
 [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
@@ -284,8 +284,9 @@ Here’s the Journal during an oMLX session:
 
 ![mlxtop Journal showing timestamped model requests, queue changes, and GPU events](docs/screenshots/journal.jpg)
 
-The Overview screenshot uses an illustrative oMLX fixture; the Journal shows
-an oMLX session. These numbers illustrate the display and aren’t benchmarks.
+Both screenshots show live oMLX sessions; the Overview is oMLX serving a model
+through Splash on a Mac Studio. These numbers illustrate the display and aren’t
+benchmarks.
 
 | Key | Action |
 | --- | --- |
