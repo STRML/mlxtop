@@ -10,7 +10,7 @@ main() {
             target=aarch64-apple-darwin
             extension=dmg
             platform='Apple Silicon'
-            tools='hdiutil pkgutil'
+            tools='diskutil pkgutil'
             ;;
         Linux/x86_64 | Linux/amd64)
             target=x86_64-unknown-linux-musl
@@ -36,6 +36,20 @@ main() {
             exit 1
         }
     done
+    if [ "$extension" = dmg ]; then
+        # macOS 27 deprecates hdiutil attach/detach in favor of diskutil image;
+        # older releases only have hdiutil.
+        if diskutil image --help >/dev/null 2>&1; then
+            attach_dmg() { diskutil image attach --readOnly --nobrowse --mountPoint "$2" "$1" >/dev/null; }
+            detach_dmg() { diskutil eject "$1" >/dev/null; }
+        elif command -v hdiutil >/dev/null 2>&1; then
+            attach_dmg() { hdiutil attach "$1" -readonly -nobrowse -mountpoint "$2" >/dev/null; }
+            detach_dmg() { hdiutil detach "$1" >/dev/null; }
+        else
+            printf '%s\n' 'Required command not found: hdiutil' >&2
+            exit 1
+        fi
+    fi
     if command -v sha256sum >/dev/null 2>&1; then
         checksum='sha256sum'
     elif command -v shasum >/dev/null 2>&1; then
@@ -75,7 +89,7 @@ main() {
     mount_dir="$work_dir/mount"
     cleanup() {
         if [ "$mounted" = 1 ]; then
-            hdiutil detach "$mount_dir" >/dev/null || return
+            detach_dmg "$mount_dir" || return
         fi
         rm -rf "$work_dir"
         if [ -n "$staged_binary" ]; then rm -f "$staged_binary"; fi
@@ -99,10 +113,10 @@ main() {
 
     if [ "$extension" = dmg ]; then
         mkdir "$mount_dir"
-        hdiutil attach "$work_dir/$archive" -readonly -nobrowse -mountpoint "$mount_dir" >/dev/null
+        attach_dmg "$work_dir/$archive" "$mount_dir"
         mounted=1
         pkgutil --expand-full "$mount_dir/Install mlxtop.pkg" "$work_dir/expanded"
-        hdiutil detach "$mount_dir" >/dev/null
+        detach_dmg "$mount_dir"
         mounted=0
         package="$work_dir/expanded/mlxtop-component.pkg/Payload/usr/local"
         binary="$package/bin/mlxtop"
