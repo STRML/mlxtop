@@ -47,17 +47,10 @@ pub(crate) fn card_block<'a>(title: Line<'a>, tone: Tone) -> Block<'a> {
         .style(Style::default().bg(PANEL_RAISED).fg(tone.color()))
 }
 
-/// A colour mixed mostly into the panel: the body of an area under its line,
-/// so a full level reads as filled without becoming a solid saturated block.
-pub(crate) fn faint(color: Color) -> Color {
-    match (color, PANEL) {
-        (Color::Rgb(r, g, b), Color::Rgb(pr, pg, pb)) => {
-            let mix = |c: u8, p: u8| ((u16::from(c) * 28 + u16::from(p) * 72) / 100) as u8;
-            Color::Rgb(mix(r, pr), mix(g, pg), mix(b, pb))
-        }
-        (color, _) => color,
-    }
-}
+/// The body of an area beneath its line: one quiet slate for every chart.
+/// The line carries the level and its grade; a graded fill would only repeat
+/// it, and stripe wherever the grade changes from one sample to the next.
+pub(crate) const AREA_FILL: Color = Color::Rgb(33, 42, 56);
 
 pub(crate) fn llm_status_tone(status: &str) -> Tone {
     match status.to_ascii_lowercase().as_str() {

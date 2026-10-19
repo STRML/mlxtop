@@ -11,8 +11,8 @@ pub(crate) const CHART_VISUAL_DEADBAND_FRACTION: f64 = 0.25;
 pub(crate) struct TraceCell {
     pub(crate) glyph: char,
     pub(crate) tone: Tone,
-    /// An area's body beneath its line, drawn as a faint background.
-    pub(crate) fill: Option<Tone>,
+    /// An area's body beneath its line, drawn as a quiet background.
+    pub(crate) fill: bool,
 }
 
 /// How a chart draws its samples, by what the data is.
@@ -366,7 +366,7 @@ pub(crate) fn trace_connector(
         row_cells[column] = TraceCell {
             glyph: '┃',
             tone: chart_transition_tone(metric, display_value, previous_tone, tone, thresholds),
-            fill: None,
+            fill: false,
         };
     }
     cells[upper][column] = TraceCell {
@@ -376,7 +376,7 @@ pub(crate) fn trace_connector(
         } else {
             tone
         },
-        fill: None,
+        fill: false,
     };
     cells[lower][column] = TraceCell {
         glyph: if row > previous_row { '┗' } else { '┛' },
@@ -385,7 +385,7 @@ pub(crate) fn trace_connector(
         } else {
             tone
         },
-        fill: None,
+        fill: false,
     };
 }
 

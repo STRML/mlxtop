@@ -18,7 +18,7 @@ use crate::formatting::{
 use crate::host::Platform;
 use crate::processes::process_provider;
 use crate::theme::{
-    centered_rect, faint, panel, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED, YELLOW,
+    centered_rect, panel, AREA_FILL, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED, YELLOW,
 };
 use crate::{
     gpu_dashboard, memory_composition, model_dashboard, operator_charts, process_memory,
@@ -1115,7 +1115,7 @@ impl App {
                 TraceCell {
                     glyph: ' ',
                     tone: Tone::Muted,
-                    fill: None,
+                    fill: false,
                 };
                 plot_width
             ];
@@ -1133,7 +1133,7 @@ impl App {
                 row_cells.fill(TraceCell {
                     glyph,
                     tone: Tone::Muted,
-                    fill: None,
+                    fill: false,
                 });
             }
         }
@@ -1164,7 +1164,7 @@ impl App {
                     cells[plot_height - 1 - height][column] = TraceCell {
                         glyph,
                         tone: point.tone,
-                        fill: None,
+                        fill: false,
                     };
                 }
             }
@@ -1187,7 +1187,7 @@ impl App {
             }
             point_rows[column] = Some((row, point.tone));
             cells[row][column] = TraceCell {
-                fill: None,
+                fill: false,
                 glyph: if previous_point.is_none()
                     && visible_points
                         .get(column + 1)
@@ -1227,14 +1227,14 @@ impl App {
         }
 
         if form == ChartForm::Area {
-            // The level's body beneath its line, faint so a full chart is not
+            // The level's body beneath its line, quiet so a full chart is not
             // a solid block; guides stay visible through it.
             // The line's own cell is filled too, so the line is the area's top
             // edge rather than floating above it.
             for (column, point) in point_rows.iter().enumerate() {
-                if let Some((row, tone)) = point {
+                if let Some((row, _)) = point {
                     for below in cells.iter_mut().skip(*row) {
-                        below[column].fill = Some(*tone);
+                        below[column].fill = true;
                     }
                 }
             }
@@ -1265,12 +1265,12 @@ impl App {
             let mut run_tone = None;
             // A full block is drawn as a filled cell: terminals leave a gap
             // between rows of glyphs, but not of backgrounds.
-            let style = |(tone, filled, fill): (Tone, bool, Option<Tone>)| {
+            let style = |(tone, filled, fill): (Tone, bool, bool)| {
                 let style = Style::default().fg(tone.color());
                 match (filled, fill) {
                     (true, _) => style.bg(tone.color()),
-                    (false, Some(fill)) => style.bg(faint(fill.color())),
-                    (false, None) => style,
+                    (false, true) => style.bg(AREA_FILL),
+                    (false, false) => style,
                 }
             };
             for cell in row_cells.iter().take(plot_width).copied() {

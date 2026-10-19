@@ -2539,7 +2539,7 @@ fn stepped_chart_connectors_follow_the_level_being_crossed() {
             TraceCell {
                 glyph: ' ',
                 tone: Tone::Muted,
-                fill: None,
+                fill: false,
             };
             3
         ];
@@ -4539,15 +4539,6 @@ fn levels_are_areas_and_bursty_rates_are_bars() {
     ] {
         assert_eq!(chart_form(metric), ChartForm::Bars);
     }
-    // The area body mixes the grade into the panel: same hue, far darker.
-    let Color::Rgb(r, g, b) = crate::theme::faint(GREEN) else {
-        panic!("faint keeps RGB");
-    };
-    let Color::Rgb(gr, gg, gb) = GREEN else {
-        panic!("GREEN is RGB");
-    };
-    assert!(r < gr && g < gg && b < gb);
-    assert!(g > r && g > b, "still reads as green");
 }
 
 fn render_chart(
@@ -4629,25 +4620,46 @@ fn bars_keep_a_gap_between_samples_when_there_is_room_and_show_raw_heights() {
 }
 
 #[test]
-fn areas_fill_beneath_their_line_faintly_in_its_grade() {
+fn areas_fill_beneath_their_graded_line_in_one_quiet_colour() {
+    let body = crate::theme::AREA_FILL;
+    // Busy samples flipping between the warning and critical grades: the line
+    // keeps each grade, the body stays one colour instead of striping.
+    let history: VecDeque<_> = (0..40)
+        .map(|i| {
+            if i % 2 == 0 {
+                ChartPoint::new(Some(100), Tone::Red)
+            } else {
+                ChartPoint::new(Some(88), Tone::Yellow)
+            }
+        })
+        .collect();
+    let buffer = render_chart(ChartMetric::Gpu, &history, 50);
+    let bottom = (0..12)
+        .rev()
+        .find(|y| buffer[(47, *y)].bg == body)
+        .expect("area body drawn");
+    assert!(
+        (20..48).all(|x| buffer[(x, bottom)].bg == body),
+        "one body colour"
+    );
+
     let history = VecDeque::from(vec![ChartPoint::new(Some(60), Tone::Yellow); 40]);
     let buffer = render_chart(ChartMetric::Gpu, &history, 50);
     let column = 47;
     let line = (0..12)
         .find(|y| buffer[(column, *y)].symbol() == "━")
         .expect("line drawn");
-    assert_eq!(buffer[(column, line)].fg, YELLOW);
-    let body = crate::theme::faint(YELLOW);
-    let below: Vec<_> = (line + 1..12)
-        .map(|y| buffer[(column, y)].bg)
-        .take_while(|bg| *bg == body)
-        .collect();
-    assert!(!below.is_empty(), "faint body beneath the line");
+    assert_eq!(
+        buffer[(column, line)].fg,
+        YELLOW,
+        "the line carries the grade"
+    );
     assert_eq!(
         buffer[(column, line)].bg,
         body,
         "the line is the area's top edge"
     );
+    assert!((line + 1..11).all(|y| buffer[(column, y)].bg == body));
     assert!(
         (0..line).all(|y| buffer[(column, y)].bg != body),
         "nothing above it"
