@@ -13,6 +13,7 @@ use crate::logging::{
 };
 use crate::report::{write_doctor, write_static};
 use crate::terminal::{next_terminal_event, run_app, TerminalGuard};
+use crate::update::update;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -56,11 +57,16 @@ pub(crate) enum CliAction {
         history: usize,
         once: bool,
     },
+    /// Replace this binary with the newest release (`rc`: or release candidate).
+    Update {
+        rc: bool,
+    },
 }
 
 pub(crate) fn help_text(platform: Platform) -> String {
     format!(
-        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop doctor [--interval N]\n\n\
+        "Usage: mlxtop [refresh-seconds] [options]\n       mlxtop doctor [--interval N]\n       mlxtop update [--rc]\n\n\
+         update installs the latest release in place; --rc includes release candidates\n\
          Options: -i, --interval N  refresh interval (default 1)\n\
          -n, --history N    chart/journal history (20–3600)\n\
          -1, --once         static report\n\
@@ -82,6 +88,19 @@ pub(crate) fn parse_args(
     args: &[String],
     config: &Config,
 ) -> Result<CliAction, Box<dyn std::error::Error>> {
+    if let Some(("update", options)) = args
+        .split_first()
+        .map(|(first, rest)| (first.as_str(), rest))
+    {
+        return match options {
+            [] => Ok(CliAction::Update { rc: false }),
+            [flag] if flag == "--rc" => Ok(CliAction::Update { rc: true }),
+            [flag] if flag == "-h" || flag == "--help" => {
+                Ok(CliAction::Print(help_text(Platform::current())))
+            }
+            [option, ..] => Err(format!("unknown option for update: {option}").into()),
+        };
+    }
     let (mut interval, interval_rejected) = config_interval(config);
     let (mut history, history_rejected) = config_history(config);
     if interval_rejected {
@@ -188,6 +207,7 @@ pub(crate) fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             return Ok(());
         }
+        CliAction::Update { rc } => return update(rc),
         CliAction::Run {
             interval,
             history,

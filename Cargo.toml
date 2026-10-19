@@ -25,6 +25,8 @@ include = [
 [dependencies]
 crossterm = "0.28"
 ratatui = "0.29"
+# SHA-256 for self-update downloads; already in the tree through rustls.
+ring = { version = "0.17.14", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }

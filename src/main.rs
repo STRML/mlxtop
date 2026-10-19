@@ -41,6 +41,7 @@ mod terminal;
 mod theme;
 mod transport;
 mod ui;
+mod update;
 
 fn main() {
     cli::entry();

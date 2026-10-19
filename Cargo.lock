@@ -490,6 +490,7 @@ dependencies = [
  "crossterm",
  "libproc",
  "ratatui",
+ "ring",
  "serde",
  "serde_json",
  "sysinfo",

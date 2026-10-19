@@ -1361,6 +1361,33 @@ fn small_formatters_cover_every_unit() {
 }
 
 #[test]
+fn update_takes_only_rc_or_help() {
+    let parse = |input: &[&str]| parse_args(&args(input), &Config::default());
+    assert_eq!(parse(&["update"]).unwrap(), CliAction::Update { rc: false });
+    assert_eq!(
+        parse(&["update", "--rc"]).unwrap(),
+        CliAction::Update { rc: true }
+    );
+    let CliAction::Print(help) = parse(&["update", "--help"]).unwrap() else {
+        panic!("update --help prints");
+    };
+    assert!(help.contains("mlxtop update [--rc]"));
+    for input in [
+        &["update", "--once"][..],
+        &["update", "--rc", "--rc"],
+        &["update", "-i", "2"],
+    ] {
+        assert_eq!(
+            parse(input).unwrap_err().to_string(),
+            format!("unknown option for update: {}", input[1])
+        );
+    }
+    // Only the first argument names a command.
+    assert!(parse(&["--rc"]).is_err());
+    assert!(parse(&["-1", "update"]).is_err());
+}
+
+#[test]
 fn doctor_arguments_configuration_and_exit_conditions_are_explicit() {
     use crate::config::load_doctor_config;
     use crate::report::{diagnostic_lines, write_doctor};

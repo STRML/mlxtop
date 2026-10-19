@@ -105,6 +105,20 @@ Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
 The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
 example `curl -fsSL … | MLXTOP_VERSION=3.0.0 sh`.
 
+### Update
+
+From mlxtop 3.1, update an installed binary in place:
+
+```sh
+mlxtop update        # latest release
+mlxtop update --rc   # latest release candidate, or a newer release
+```
+
+It downloads the release for your system from GitHub, verifies its SHA-256
+checksum and replaces the running binary; restart any open session afterwards.
+Homebrew installs update with `brew upgrade mlxtop` instead, and the macOS
+package in `/usr/local/bin` needs `sudo mlxtop update`.
+
 ### Install on Windows
 
 Windows builds start with mlxtop 3.0. In PowerShell, without administrator
