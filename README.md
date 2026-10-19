@@ -1,424 +1,190 @@
+<div align="center">
+
 # mlxtop
 
-**A `top` for your local LLM on Mac, Linux and Windows.**
+**`top` for local LLMs.** See whether memory, paging or the GPU is what's slowing your model down.
 
-See which models are running, how much memory they use, and how busy your
-GPUs are. NVIDIA systems on Linux and Windows show each card's utilization, VRAM,
-temperature and clock limits in Overview, with `[` / `]` navigation for larger
-GPU sets. The assessment names the NVIDIA problems that slow local models: a
-model partly running on the CPU, a card whose VRAM is full, and clocks held down
-by heat or power. With oMLX, vLLM, SGLang, mlx-serve or
-Splash, you can also follow generation speed and request activity as your model
-responds.
+[![Release](https://img.shields.io/github/v/release/maximpri/mlxtop?color=blue)](https://github.com/maximpri/mlxtop/releases/latest)
+[![CI](https://github.com/maximpri/mlxtop/actions/workflows/ci.yml/badge.svg)](https://github.com/maximpri/mlxtop/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
-![mlxtop Overview on a Mac Studio running oMLX through Splash: the runtime card with a prefilling badge and GPU memory meter, memory stacked by wired, app, compressed and cache over a pressure ribbon, compression and paging bars against dotted warning lines, prompt load bars per request, generation and prefill bars, GPU busy area and the recent Journal](docs/screenshots/overview-3.1.png)
+![mlxtop Overview on a Mac Studio running oMLX through Splash](docs/screenshots/overview-3.1.png)
 
-[Try it](#try-it) · [Runtime support](#runtime-support-and-limitations) ·
-[User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md) · [Report a bug](https://github.com/maximpri/mlxtop/issues)
+[Install](#install) · [Quick start](#quick-start) · [Runtimes](#supported-runtimes) · [User guide](docs/USER_GUIDE.md) · [Changelog](CHANGELOG.md)
 
-**mlxtop 3.1.0** is the current stable release for Apple Silicon macOS,
-Linux (x86_64 and ARM64) and Windows (x86_64). [Download 3.1.0](https://github.com/maximpri/mlxtop/releases/tag/v3.1.0)
-or use the installers below.
+</div>
 
-## What's new in 3.1
+When a local model slows down, the cause is usually the machine: memory
+pressure, swapping, a full GPU or a throttled card. mlxtop shows those
+readings next to your runtime's own numbers, such as tokens per second,
+prefill progress, queued requests and cache reuse, so you can see which one
+changed when the model slowed.
 
-- **A redesigned Overview:** the memory chart stacks what RAM holds (wired,
-  app, compressed, cache) over a pressure ribbon; bursty rates are bars from
-  zero; paging and compression are judged against their warning rates; a
-  prompt still prefilling shows its progress and time left.
-- **Less text, more signal:** a heartbeat in the top bar, ✓ ▲ ✖ verdicts, a
-  GPU memory meter and a spinning status badge replace labels that repeated
-  what the charts show.
-- **`mlxtop update`:** update in place from GitHub releases, or `--rc` for
-  release candidates.
-- **oMLX through Splash and system paging:** mlxtop follows oMLX when it
-  serves through a Splash engine, and counts file paging on a Mac without
-  swap, so heavy paging is caught when memory runs out.
+- **Memory first:** what RAM holds (wired, app, compressed, cache), OS
+  pressure, compression and paging, each judged against its warning rate.
+- **Live inference:** generation and prefill speed, prompt sizes, cached
+  tokens, queues and prefill progress from the runtime itself, never
+  estimated from CPU or GPU use.
+- **A plain verdict:** a single line reads `✓ Healthy`, or names the problem,
+  such as heavy paging, a model partly on the CPU, a full card or heat
+  throttling.
+- **13 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp, Ollama,
+  LM Studio, KoboldCpp and more, detected automatically.
+- **Local and read-only:** no sudo, no account, no analytics. It never sends
+  prompts or changes your settings.
 
-## What's new in 3.0
+**What's new in 3.1:** a redesigned Overview, `mlxtop update`, oMLX through
+Splash, and paging detection on Macs without swap.
+[Release notes →](CHANGELOG.md)
 
-- **Windows:** memory, commit charge, processes and runtime detection on
-  Windows x86_64, with NVIDIA GPUs through `nvidia-smi` and a PowerShell
-  installer. Windows offers no paging counters, so paging shows as unavailable.
-- **NVIDIA verdicts:** the assessment names a model partly or fully on the CPU
-  (Ollama placement), a card whose VRAM is full, and clocks held down by heat,
-  power or the hardware.
-- **Two new runtimes:** [mlx-serve](https://github.com/ddalcu/mlx-serve) with live
-  generation and prefill rates and running requests, and
-  [Splash](https://github.com/incoai/splash) with running requests and prefill
-  progress, decode and prefill speed, prefix-cache reuse, Metal memory and
-  DFlash draft acceptance.
+## Install
 
-## Try it
+**Homebrew** (macOS and Linux):
 
-You’ll need an Apple Silicon Mac, a Linux machine or a Windows PC (x86_64)
-and a terminal with Unicode and color support.
-The macOS binary targets macOS 11 or later. The
-[latest release notes](https://github.com/maximpri/mlxtop/releases/latest)
-list the versions each release was tested on.
+```sh
+brew install maximpri/tap/mlxtop
+```
 
-[**Download the macOS disk image (.dmg)**](https://github.com/maximpri/mlxtop/releases/latest)
-from the latest release. Open it, double-click **Install mlxtop.pkg**, and follow the installer. Then
-open Terminal and run `mlxtop`. This installs in `/usr/local/bin` and requires
-an administrator account. The package is unsigned and not Apple notarized.
-
-### Install from Terminal
-
-To install in your home directory without sudo, on macOS (Apple Silicon) or
-Linux (x86_64 or aarch64):
+**Install script** (macOS on Apple Silicon, Linux x86_64 and ARM64), installs
+to `~/.local/bin` without sudo:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/maximpri/mlxtop/main/scripts/install.sh | sh
 ```
 
-The installer picks the download for your system, checks its SHA-256 checksum
-and places `mlxtop` in `~/.local/bin`. No Rust toolchain or sudo is needed.
-Linux downloads are static binaries with no runtime dependencies. Then run:
-
-```sh
-~/.local/bin/mlxtop
-```
-
-Add `~/.local/bin` to your `PATH` to run it as `mlxtop` from any terminal.
-The installer uses the latest release; to pin one, set `MLXTOP_VERSION`, for
-example `curl -fsSL … | MLXTOP_VERSION=3.1.0 sh`.
-
-### Update
-
-From mlxtop 3.1, update an installed binary in place:
-
-```sh
-mlxtop update        # latest release
-mlxtop update --rc   # latest release candidate, or a newer release
-```
-
-It downloads the release for your system from GitHub, verifies its SHA-256
-checksum and replaces the running binary; restart any open session afterwards.
-Homebrew installs update with `brew upgrade mlxtop` instead, and the macOS
-package in `/usr/local/bin` needs `sudo mlxtop update`.
-
-### Install on Windows
-
-Windows builds start with mlxtop 3.0. In PowerShell, without administrator
-rights:
+**Windows** (x86_64, PowerShell, no administrator rights needed):
 
 ```powershell
 irm https://raw.githubusercontent.com/maximpri/mlxtop/main/scripts/install.ps1 | iex
 ```
 
-The installer checks the download's SHA-256 checksum, places `mlxtop.exe` in
-`%LOCALAPPDATA%\Programs\mlxtop` and adds that folder to your user `PATH`
-(set `MLXTOP_NO_MODIFY_PATH=1` to skip). Open a new terminal and run `mlxtop`.
-Windows Terminal gives the best rendering.
+Both scripts verify the download's SHA-256 checksum. Linux builds are static
+binaries with no runtime dependencies. You can also download a macOS
+installer (`.dmg`, unsigned) or an archive from the
+[latest release](https://github.com/maximpri/mlxtop/releases/latest).
 
-## Diagnose a connection or missing reading
-
-Press **`d`** in the dashboard to inspect the current assessment, the selected
-runtime and endpoint, authentication status, supported measurements, and setup
-instructions. The panel is read-only and uses the current samples. Overview also
-shows a compact assessment and a suggested check above the charts.
-
-For the same diagnostic information without a terminal UI:
-
-```sh
-mlxtop doctor
-MLXTOP_PROVIDER=ollama mlxtop doctor
-```
-
-`doctor` takes two samples using the configured interval. It returns exit code
-1 for invalid configuration, incomplete host counters, or a failed primary runtime
-connection. No detected runtime, missing optional metrics, and resource pressure
-are informational. The [diagnostics guide](docs/USER_GUIDE.md#diagnostics-and-runtime-setup)
-explains partial connections and client recording.
-
-## Configuration
-
-Create `~/.config/mlxtop/config.json` to customize mlxtop. All fields are optional,
-and anything you leave out keeps its built-in default.
-
-```json
-{
-  "interval": 2,
-  "history": 500,
-  "omx": {
-    "host": "127.0.0.1",
-    "port": 8080
-  },
-  "memory_warn_load": 70,
-  "memory_critical_load": 85,
-  "gpu_warn_load": 75,
-  "gpu_critical_load": 90,
-  "gpu_warn_exit": 70,
-  "swap_warn_rate": 1048576,
-  "swap_critical_rate": 16777216,
-  "swap_warn_exit": 2097152,
-  "compression_warn_rate": 67108864,
-  "compression_warn_exit": 33554432
-}
-```
-
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `interval` | integer | 1 | Refresh interval in seconds (1–60) |
-| `history` | integer | 300 | Chart/journal history size (20–3600) |
-| `omx.host` | string | "127.0.0.1" | oMLX server host |
-| `omx.port` | integer | 8080 | oMLX server port |
-| `memory_warn_load` | integer | 70 | Unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
-| `memory_critical_load` | integer | 85 | Critical unavailable-memory threshold (%) for derived Linux pressure; macOS uses native pressure |
-| `gpu_warn_load` | integer | 75 | GPU load (%) reported as "busy" and shown in yellow |
-| `gpu_critical_load` | integer | 90 | GPU load (%) reported as "saturated" and shown in red; considered in slowdown correlation; never an alarm by itself |
-| `gpu_warn_exit` | integer | 70 | GPU load (%) below which "GPU BUSY" clears |
-| `swap_warn_rate` | integer | 1 MiB/s | Swap churn that counts as light paging |
-| `swap_critical_rate` | integer | 16 MiB/s | Swap rate that counts as thrashing (in and out); critical paging findings turn the paging chart red |
-| `swap_warn_exit` | integer | 2 MiB/s | Swap churn below which "PAGING ACTIVE" clears |
-| `compression_warn_rate` | integer | 64 MiB/s | Compression churn that raises "COMPRESSION ACTIVE" |
-| `compression_warn_exit` | integer | 32 MiB/s | Compression churn below which it clears |
-
-Rates are bytes per second; loads are percentages.
-
-### Precedence
-
-- **CLI arguments override config file values.** `--interval` and `--history` win
-  over `interval` and `history`.
-- **Explicit endpoint settings override discovery.** mlxtop reads
-  `~/.config/omlx-coding/server.env` to find a running oMLX server, but a host or
-  port you set under `omx` always wins. Each field resolves on its own, so setting
-  only `omx.port` keeps the discovered host.
-- **Out-of-range `interval` or `history` in the file falls back to the default**
-  and is recorded in the diagnostics log, so a typo in `config.json` cannot stop
-  mlxtop from starting. The same value passed on the command line is still a hard
-  error, because you can see the message straight away.
-- **Nonsensical thresholds are clamped, not rejected.** Percentages are held to
-  0–100, a critical level is never allowed below its warning level, and a
-  hysteresis exit is never allowed above the level that turns the state on, so a
-  stray value cannot silently remove a severity band. A config file that fails to
-  parse is logged to the diagnostics log and ignored in full.
-
-## Usage
-
-You should see live memory and GPU readings as soon as the dashboard opens.
-It works without a model running, so you can look around before starting one.
-Once mlxtop detects a supported runtime, it adds the available model information.
-oMLX provides the most detail, including response speed and request activity.
-
-### Watch it during a conversation
-
-1. Leave mlxtop open and send a message to your local model. Any short prompt
-   will do, such as “Explain how a rainbow forms in three sentences.”
-2. Watch Overview while the model responds. You’ll see memory and GPU activity.
-   With live oMLX data, you’ll also see how fast it processes your prompt and
-   writes the answer.
-3. Press `2` to inspect model processes or `3` to open the event journal.
-   Press `q` when you’re done.
-
-The numbers will depend on your Mac, model, and prompt. A dash in the dashboard
-means a measurement isn’t available. Response speed requires a runtime that
-reports it.
-
-For a text report you can use in a terminal or over SSH:
-
-```sh
-~/.local/bin/mlxtop --once
-```
-
-This prints memory, paging, GPU, and available model information, then exits.
-If you used the macOS installer or Cargo, use `mlxtop --once` instead.
-
-You don’t need an account or a cloud API key. Use whatever local model you
-already have running. mlxtop doesn’t download models or send prompts for you.
-Installation needs internet access to download the release, or the source and
-Rust dependencies if you build it yourself.
-If your oMLX server requires a key, follow the
-[runtime setup guide](docs/USER_GUIDE.md#omlx-telemetry).
-
-### Views and controls
-
-Use mlxtop to see whether a slow reply coincides with a busy GPU or your Mac
-moving memory to disk. It’s also useful for watching memory use as you try a
-larger model or work through a longer conversation.
-
-| View | What it shows |
-| --- | --- |
-| Overview | Memory pressure and composition, compression and paging, with model status, prompt history, token rates, GPU, cache, queue activity and recent events |
-| Processes | Running model processes and the resources they use |
-| Journal | Request activity and changes in resource use during the session |
-
-Here’s the Journal during an oMLX session:
-
-![mlxtop Journal showing timestamped model requests, queue changes, and GPU events](docs/screenshots/journal.jpg)
-
-Both screenshots show live oMLX sessions; the Overview is oMLX serving a model
-through Splash on a Mac Studio. These numbers illustrate the display and aren’t
-benchmarks.
-
-| Key | Action |
-| --- | --- |
-| `1` / `2` / `3` | Open Overview / Processes / Journal |
-| `Tab` / `Shift-Tab` | Next / previous view |
-| Arrows / click | Select a chart in Overview |
-| `p` / `Space` | Pause or resume sampling |
-| `+` / `-` / mouse wheel | Zoom the selected chart’s history |
-| `Enter` / `Esc` | Enlarge / restore a chart |
-| `{` / `}` | Change refresh interval |
-| `a` | Acknowledge a critical system alarm |
-| `[` / `]` | Select an NVIDIA GPU in Overview and reveal additional cards |
-| `d` | Open diagnostics and runtime setup guidance |
-| `?` | Show help |
-| `q` | Quit |
-
-The [user guide](docs/USER_GUIDE.md#controls) covers process filtering, sorting,
-and journal navigation.
+To update, run `mlxtop update` (`--rc` for release candidates), or
+`brew upgrade mlxtop` if you installed with Homebrew.
 
 <details>
 <summary>Build from source</summary>
 
-If you prefer to build it yourself, you’ll need Rust 1.88 or newer with Cargo
-and Git:
+You'll need Rust 1.88 or newer:
 
 ```sh
 git clone https://github.com/maximpri/mlxtop.git
 cd mlxtop
 cargo install --path . --locked
-mlxtop
 ```
-
-If your shell can’t find `mlxtop`, run `~/.cargo/bin/mlxtop` or add
-`~/.cargo/bin` to your `PATH`.
 
 </details>
 
-## Runtime support and limitations
+## Quick start
 
-mlxtop is built for macOS on Apple Silicon, Linux (x86_64 and aarch64) and
-Windows (x86_64). Intel Macs aren’t a supported target.
+```sh
+mlxtop            # open the dashboard
+mlxtop --once     # print a text report and exit (works over SSH)
+mlxtop doctor     # check the runtime connection and which readings are available
+```
 
-On Linux, memory and swap come from `/proc/meminfo`, paging rates from
-`/proc/vmstat`, pressure level from the `MemAvailable` ratio blended with
-`/proc/pressure/memory` stalls, GPU readings from `nvidia-smi` when present,
-and thermals from `/sys/class/thermal`. Counters without a source are shown
-as unavailable. Install the prebuilt static binary with the
-[terminal installer](#install-from-terminal), download it from the
-[latest release](https://github.com/maximpri/mlxtop/releases/latest), or
-build from source with `cargo install --path . --locked`.
+Memory and GPU readings appear straight away, even with no model loaded. Start
+your runtime, send it a prompt, and watch Overview while it answers.
 
-On Windows, memory, commit charge and processes come from the Windows APIs and
-GPU readings from `nvidia-smi`, which ships with the NVIDIA driver. Windows
-offers no page-in or page-out counters through those APIs, so paging rates
-show as unavailable, never as zero, and memory has no compression panel.
-Temperatures are the GPUs' own; CPU temperature needs administrator access
-and isn't read.
-
-| Runtime | Available information |
+| View | What it shows |
 | --- | --- |
-| oMLX | Models, processes, prompt and response speed, requests with prefill progress, cache activity, and extra memory counters when available. When oMLX serves through a Splash engine, the engine is named and requests oMLX does not track are flagged. |
-| llama.cpp / llama-server | Active slots and summed output counts; average rates and active/deferred queue counts when `/metrics` is enabled. Optional usage file adds full prompt history alongside native polling. |
-| KoboldCpp | Last reported input/output counts and rates through `/api/extra/perf` |
-| Ollama | Loaded models, resident VRAM and context capacity from `/api/ps`; completed counts and decode speed through the usage recorder |
-| LM Studio / llmster | Loaded instances and context capacity from native APIs, with older API fallback; completed counts, speed and first-token timing through the usage recorder |
-| vLLM, SGLang | Prometheus active/waiting queues, sampled server token rates, cache statistics, KV occupancy and cumulative mean first-token timing |
-| mlx-serve | Prometheus active/waiting queues, live generation rate (running requests included), prefill rate and progress while a prompt is being processed, prefix-token cache reuse and MLX memory; the model and each running request's prompt, cached and output counts from `/metrics.json`. Start the server with `--metrics`. |
-| Splash | Running and waiting requests with each one's prompt and output counts, prefill progress, completed requests, generation rate from the engine's decode counter (per request while one decodes alone), prefill speed of its prefill commands, prefix-cache reuse, Metal memory against its limit, DFlash draft acceptance, server TTFT and inter-token p50/p95, released weights, thermal state and memory pressure, all from `/status` |
-| MLX-LM, LocalAI, Jan, GPT4All | Process detection and available-model catalogue; completed request counts and explicitly supplied timing through the usage recorder |
+| **1 · Overview** | The verdict, memory, compression, paging, prompt load, generation, prefill, GPU, cache, queue and recent events |
+| **2 · Processes** | Model processes and the CPU, memory and page-ins each one uses |
+| **3 · Journal** | Requests and resource changes during the session |
 
-Provider URLs, bearer authentication, default ports and client setup are covered
-in the [provider guide](docs/USER_GUIDE.md#provider-endpoints).
-The dashboard monitors one selected server at a time. Native model catalogues
-cannot provide live generation speed; completed usage requires client integration.
+| Key | Action |
+| --- | --- |
+| `1` `2` `3` / `Tab` | Switch view |
+| Arrows / click, `Enter` | Select a chart, enlarge it |
+| `+` `-` / wheel | Zoom chart history |
+| `p` / `Space` | Pause sampling |
+| `[` `]` | Select an NVIDIA GPU |
+| `d` | Diagnostics and setup help for the current runtime |
+| `?` / `q` | Help / quit |
 
-Overview leads with host-critical resources: memory, compression (macOS) and
-paging, then prompt load, then a compact throughput row. A runtime card above
-them holds the model, its status and the machine; every chart has one border
-and an independent plot. Each chart draws its data in the form that suits it:
-the memory chart stacks wired, app, compressed and cache RAM over a ribbon of
-memory pressure; GPU busy is an area; generation, prefill, compression, paging
-and cache reuse are bars from zero, one per sample. Numeric axes fit visible
-measurements in their actual units, and paging and compression never shrink
-below their warning rate, which is drawn as a dotted line. Only percentages
-use 0–100. Every chart is graded green/yellow/red by its thresholds: memory by
-OS pressure, GPU, paging, compression and cache by configured bands, and
-generation and prefill against their rolling baseline. Captured colors are
-kept as history scrolls. Full RAM is not a warning by itself: file cache fills
-it on a healthy machine, and the pressure label stays authoritative.
-**Prompt load means prompt size in input tokens, including cached tokens.**
-The headline gives the selected request's exact size; each bar represents one
-observed request and shows its own compact size label, such as `12.0k` for
-12,000 tokens. Cached and uncached segments are split when reported, queued
-requests are hatched, and a prompt still prefilling shows its progress and
-time left. Selected prompts also show output counts and request-specific
-decode speed: `LIVE`, a completed request's `AVG`, or the retained `LAST`
-sample. Queue charts complement the system metrics; OS process-memory details
-live in Processes. First-token latency appears only when explicitly measured
-client timings are supplied. See the
-[operator charts](docs/USER_GUIDE.md#operator-charts) for scales and data sources.
-Prompt counts also appear in the static report. Journal records each
-observed request with its prompt count and request-specific cached count when
-available. Polling is sampled: requests that finish between polls can be missed.
-See [request telemetry setup](docs/USER_GUIDE.md#request-token-telemetry) for
-provider selection, custom ports and response-only integrations. The optional
-[Python client helper](scripts/record_usage.py) extracts counters from completed
-responses and appends them to the usage file without storing response content.
+The [user guide](docs/USER_GUIDE.md) explains every chart, its thresholds and
+where each reading comes from.
 
-To test unpublished RCs between this checkout and an oMLX server, use
-`python3 scripts/rc.py push SSH_HOST`, then `python3 scripts/rc.py run SSH_HOST`.
-Use `fetch SSH_HOST` to download the staged RC back to a compatible Mac.
-See [private RC testing](docs/USER_GUIDE.md#private-rc-testing-over-ssh).
+## Supported runtimes
 
-The oMLX connection defaults to `127.0.0.1:8080` and reads settings from
-`~/.config/omlx-coding/server.env`. If you’re missing live readings, check the
-[setup guide](docs/USER_GUIDE.md#omlx-telemetry).
+| Runtime | Live speed | What you get |
+| --- | :---: | --- |
+| [oMLX](docs/USER_GUIDE.md#omlx-telemetry) | ✓ | Models, prompt and generation speed, requests with prefill progress, cache activity; follows oMLX serving through Splash |
+| [Splash](https://github.com/incoai/splash) | ✓ | Running and waiting requests, prefill progress, decode and prefill speed, prefix-cache reuse, Metal memory, DFlash acceptance, TTFT |
+| [mlx-serve](https://github.com/ddalcu/mlx-serve) | ✓ | Generation and prefill rates, running requests, prefix-cache reuse, MLX memory (start it with `--metrics`) |
+| vLLM, SGLang | ✓ | Active and waiting queues, server token rates, KV-cache occupancy, mean first-token time |
+| llama.cpp | with `/metrics` | Active slots and output counts; average rates and queues when `/metrics` is enabled |
+| KoboldCpp | last request | Input and output counts and rates |
+| Ollama | after completion | Loaded models, VRAM, context size, CPU/GPU placement |
+| LM Studio | after completion | Loaded instances and context size |
+| MLX-LM, LocalAI, Jan, GPT4All | after completion | Process detection and model catalogue |
 
-The available readings depend on your runtime. Missing measurements are shown
-as unavailable. GPU activity reflects the whole system, not individual models.
-mlxtop never estimates response speed from CPU or GPU use. When live oMLX data
-is unavailable, it may use recent completion logs and show how old those readings
-are.
+"After completion" means the speed of each finished request, recorded by the
+[usage recorder](docs/USER_GUIDE.md#request-token-telemetry) or the included
+[Python helper](scripts/record_usage.py). mlxtop monitors one server at a time;
+see [provider endpoints](docs/USER_GUIDE.md#provider-endpoints) for ports,
+custom URLs and authentication.
 
-The dashboard can help you spot a slowdown and the conditions around it, but
-it can’t prove what caused it. Charts, prompt history and the Journal cover
-the current session; restarting mlxtop begins a new history.
+### Platforms
 
-## Privacy and local access
+| | macOS (Apple Silicon) | Linux (x86_64, ARM64) | Windows (x86_64) |
+| --- | --- | --- | --- |
+| Memory pressure | Native | `MemAvailable` and PSI | Commit charge |
+| Compression | ✓ | — | — |
+| Paging | ✓ | ✓ | Not available from Windows |
+| GPU | Apple GPU | NVIDIA via `nvidia-smi` | NVIDIA via `nvidia-smi` |
 
-mlxtop runs without sudo and has no analytics. It reads system counters,
-process information, and supported provider APIs and logs. Your project files
-and model settings stay untouched, and it doesn’t send inference requests.
+macOS 11 or later is required. Intel Macs aren't supported.
 
-Diagnostic logs are saved locally at `~/Library/Logs/mlxtop/mlxtop.log` on
-macOS, `~/.local/state/mlxtop/mlxtop.log` on Linux (following
-`XDG_STATE_HOME` when set) and `%LOCALAPPDATA%\mlxtop\mlxtop.log` on Windows. They
-include counters and model or provider names, but exclude prompts, model output,
-request bodies, and API keys. These logs aren’t uploaded. By default, provider
-credentials are sent only to endpoints on your own machine.
+## Configuration
 
-See the [data sources](docs/USER_GUIDE.md#data-sources-and-privacy),
-[crash diagnostics](docs/USER_GUIDE.md#crash-diagnostics), and
-[security policy](SECURITY.md) for details.
+mlxtop works without configuration. To change the refresh rate, history length,
+oMLX endpoint or warning thresholds, create `~/.config/mlxtop/config.json`:
 
-## Help and contributions
+```json
+{
+  "interval": 2,
+  "omx": { "host": "127.0.0.1", "port": 8080 }
+}
+```
 
-The [user guide](docs/USER_GUIDE.md) covers setup, controls, troubleshooting,
-and the readings in each view. The [roadmap](https://github.com/maximpri/mlxtop/blob/main/OPEN_SOURCE_ROADMAP.md) describes
-planned work.
+Every field and default is listed in the
+[configuration reference](docs/USER_GUIDE.md#configuration).
 
-If something breaks, [open an issue](https://github.com/maximpri/mlxtop/issues)
-with your mlxtop version (`mlxtop --version`), macOS version, Mac model, runtime,
-and steps to reproduce it. Remove private data from screenshots and logs.
-Use [SECURITY.md](SECURITY.md) to report a vulnerability.
+## Limits
 
-Documentation fixes, bug reports, and provider adapters are welcome. If a setup
-step tripped you up, improving it is a useful place to start. Read
-[CONTRIBUTING.md](CONTRIBUTING.md) for development checks and design guidelines.
-CI enforces at least 90% production Rust line coverage on macOS and Linux.
-See the [coverage workflow](CONTRIBUTING.md#coverage-gate) to reproduce the
-reports locally.
-For larger changes, open an issue first so we can discuss the approach.
+- GPU activity covers the whole system, not a single model.
+- Polling is sampled, so a request that starts and finishes between two
+  samples can be missed.
+- mlxtop shows what changed when a model slowed down; it can't prove the
+  cause.
+- History is kept for the current session only.
 
-## Acknowledgments
+## Privacy
 
-mlxtop was developed with Duet coding agent.
+mlxtop reads system counters, process information and your runtime's local
+APIs. It has no analytics, doesn't upload anything, and by default sends
+provider credentials only to endpoints on your own machine. Its local
+diagnostic log never contains prompts, model output or API keys. See
+[data sources and privacy](docs/USER_GUIDE.md#data-sources-and-privacy) and the
+[security policy](SECURITY.md).
+
+## Contributing
+
+Bug reports, documentation fixes and new runtime adapters are welcome. Please
+read [CONTRIBUTING.md](CONTRIBUTING.md) first, and open an issue before starting
+a large change. When you [report a bug](https://github.com/maximpri/mlxtop/issues),
+include the output of `mlxtop --version` and `mlxtop doctor`, plus your OS and
+runtime.
+
+mlxtop was developed with the Duet coding agent.
 
 ## License
 
 [MIT](LICENSE). Dependencies keep their [own licenses](THIRD_PARTY_NOTICES.md).
-Contributions use the same MIT terms. mlxtop is an independent project and
-isn’t an Apple product.
+mlxtop is an independent project and isn't affiliated with Apple.
