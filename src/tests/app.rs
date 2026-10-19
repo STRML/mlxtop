@@ -330,6 +330,7 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
             output: Some(30),
             output_tps: Some(20.0),
             completed: true,
+            queued: false,
             ttft_ms: Some(150),
             observed_at: None,
         }],

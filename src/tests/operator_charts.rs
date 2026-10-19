@@ -46,6 +46,7 @@ fn latency_requires_explicit_measurement_and_deduplicates_requests() {
         output: None,
         completed: true,
         observed_at: Some(SystemTime::now()),
+        queued: false,
         ttft_ms: None,
         output_tps: None,
     });

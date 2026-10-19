@@ -311,6 +311,7 @@ impl SplashHistory {
                     output: counter(r, &["generated_tokens"]),
                     output_tps: None,
                     completed: false,
+                    queued: false,
                     ttft_ms: None,
                     observed_at: Some(
                         age.and_then(|age| observed.checked_sub(age))

@@ -253,6 +253,14 @@ fn output_speeds_belong_to_individual_generating_requests() {
             .collect::<Vec<_>>(),
         [Some(24.5), Some(38.0), None, None, None, Some(12.0)]
     );
+    // Only the waiting row is queued; running ones are not.
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.queued)
+            .collect::<Vec<_>>(),
+        [false, false, false, false, true, false]
+    );
     let distributed = omlx_requests(&json!({"active_models":{"models":[
         omlx_cluster_model(json!([
             cluster_request("a", 100, 30, false),
@@ -595,6 +603,7 @@ fn request_summaries_label_sampled_and_final_output_speeds() {
         output: Some(64),
         output_tps: Some(41.25),
         completed: false,
+        queued: false,
         ttft_ms: None,
         observed_at: None,
     };

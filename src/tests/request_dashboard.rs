@@ -13,6 +13,7 @@ fn usage(id: &str, prompt: u64) -> domain::RequestUsage {
         cached: None,
         output: None,
         completed: false,
+        queued: false,
         ttft_ms: None,
         output_tps: None,
         observed_at: None,
@@ -601,4 +602,42 @@ fn cached_share_uses_the_cache_chart_bands_for_large_prompts() {
     assert_eq!(color_of(40_000, 2_000), RED);
     // Reuse barely matters for small prompts: neutral, never a warning.
     assert_eq!(color_of(2_000, 0), CYAN);
+}
+
+#[test]
+fn queued_requests_are_hatched_and_labelled_until_they_run() {
+    let now = SystemTime::now();
+    let running = domain::RequestUsage {
+        observed_at: Some(now),
+        ..usage("run", 1024)
+    };
+    let queued = domain::RequestUsage {
+        queued: true,
+        observed_at: Some(now),
+        ..usage("wait", 1024)
+    };
+    let mut history = History::default();
+    history.observe(&[running.clone(), queued.clone()]);
+    let sample = Sample {
+        llm_provider: "oMLX".into(),
+        llm_model: "model".into(),
+        llm_source: TelemetrySource::Live,
+        llm_status: "prefilling".into(),
+        llm_observed_at: Some(now),
+        llm_requests: vec![running, queued],
+        ..Sample::default()
+    };
+    let render = |scroll| {
+        crate::tests::render_view(60, 10, |frame| {
+            draw(frame, frame.area(), &history, &sample, scroll, 1)
+        })
+    };
+    // Newest (the queued one) is selected first.
+    let screen = render(0);
+    assert!(screen.contains("1,024 tokens · QUEUED"), "{screen}");
+    assert!(screen.contains('░'), "a queued bar is hatched\n{screen}");
+    let running = render(1);
+    assert!(running.contains("1,024 tokens · LIVE"), "{running}");
+    // Selecting the running one shows the history up to it: solid, no hatch.
+    assert!(!running.contains('░'), "{running}");
 }

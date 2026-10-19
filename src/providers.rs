@@ -230,6 +230,7 @@ pub(super) fn omlx_requests(stats: &Value) -> Vec<RequestUsage> {
                     .then_some(request.rate)
                     .flatten(),
                 completed: false,
+                queued: request.phase == OmlxPhase::Waiting,
                 ttft_ms: None,
                 observed_at: Some(
                     request
@@ -645,6 +646,7 @@ fn parse_kobold(perf: &Value) -> Option<LlmTelemetry> {
             output,
             output_tps: request_rate(perf, &["last_eval_speed"]),
             completed: true,
+            queued: false,
             ttft_ms: None,
             observed_at: None,
         })
@@ -740,6 +742,7 @@ fn parse_usage(record: &Value) -> Option<LlmTelemetry> {
             output_tps,
             cached,
             completed: true,
+            queued: false,
             ttft_ms: counter(record, &["timings", "time_to_first_token_ms"]).or_else(|| {
                 (provider == "LM Studio")
                     .then(|| {
