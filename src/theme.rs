@@ -47,6 +47,11 @@ pub(crate) fn card_block<'a>(title: Line<'a>, tone: Tone) -> Block<'a> {
         .style(Style::default().bg(PANEL_RAISED).fg(tone.color()))
 }
 
+/// The body of an area beneath its line: one quiet slate for every chart.
+/// The line carries the level and its grade; a graded fill would only repeat
+/// it, and stripe wherever the grade changes from one sample to the next.
+pub(crate) const AREA_FILL: Color = Color::Rgb(33, 42, 56);
+
 pub(crate) fn llm_status_tone(status: &str) -> Tone {
     match status.to_ascii_lowercase().as_str() {
         "ready" | "idle" => Tone::Green,

@@ -11,6 +11,30 @@ pub(crate) const CHART_VISUAL_DEADBAND_FRACTION: f64 = 0.25;
 pub(crate) struct TraceCell {
     pub(crate) glyph: char,
     pub(crate) tone: Tone,
+    /// An area's body beneath its line, drawn as a quiet background.
+    pub(crate) fill: bool,
+}
+
+/// How a chart draws its samples, by what the data is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChartForm {
+    /// A level that persists between samples (RAM occupied, GPU busy): a line
+    /// with the area beneath it filled, so it reads as how full.
+    Area,
+    /// A per-interval rate or ratio that comes and goes in bursts: one bar per
+    /// sample standing on zero, with idle samples left empty.
+    Bars,
+}
+
+pub(crate) fn chart_form(metric: ChartMetric) -> ChartForm {
+    match metric {
+        ChartMetric::Memory | ChartMetric::Gpu => ChartForm::Area,
+        ChartMetric::Compression
+        | ChartMetric::Swap
+        | ChartMetric::Generation
+        | ChartMetric::Prefill
+        | ChartMetric::Cache => ChartForm::Bars,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -89,7 +113,7 @@ pub(crate) fn chart_scale(
     metric: ChartMetric,
     width: usize,
 ) -> (u64, u64) {
-    if metric == ChartMetric::Generation {
+    if matches!(metric, ChartMetric::Generation | ChartMetric::Prefill) {
         // Bars stand on zero, so their height is the rate itself.
         (
             0,
@@ -102,14 +126,6 @@ pub(crate) fn chart_scale(
                     .unwrap_or(0),
                 10,
             ),
-        )
-    } else if metric == ChartMetric::Prefill {
-        crate::chart_scale::range(
-            history
-                .iter()
-                .skip(history.len().saturating_sub(width))
-                .filter_map(|point| point.value),
-            10,
         )
     } else if metric.is_byte_rate() {
         (
@@ -277,6 +293,19 @@ pub(crate) fn bar_cells(value: u64, height: usize) -> Vec<char> {
         .collect()
 }
 
+/// A small horizontal meter for a 0–100 share, `cells` wide, filled in
+/// eighths from the left; the unfilled rest is spaces for a track to show.
+pub(crate) fn meter_cells(percent: f64, cells: usize) -> String {
+    const PARTS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+    let eighths = (percent.clamp(0.0, 100.0) / 100.0 * (cells * 8) as f64).round() as usize;
+    (0..cells)
+        .map(|cell| match eighths.saturating_sub(cell * 8).min(8) {
+            0 => ' ',
+            part => PARTS[part - 1],
+        })
+        .collect()
+}
+
 pub(crate) fn trace_point(value: u64, height: usize) -> Option<(usize, char)> {
     if height == 0 {
         return None;
@@ -337,6 +366,7 @@ pub(crate) fn trace_connector(
         row_cells[column] = TraceCell {
             glyph: '┃',
             tone: chart_transition_tone(metric, display_value, previous_tone, tone, thresholds),
+            fill: false,
         };
     }
     cells[upper][column] = TraceCell {
@@ -346,6 +376,7 @@ pub(crate) fn trace_connector(
         } else {
             tone
         },
+        fill: false,
     };
     cells[lower][column] = TraceCell {
         glyph: if row > previous_row { '┗' } else { '┛' },
@@ -354,6 +385,7 @@ pub(crate) fn trace_connector(
         } else {
             tone
         },
+        fill: false,
     };
 }
 

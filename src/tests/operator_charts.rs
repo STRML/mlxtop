@@ -490,3 +490,96 @@ fn swapping_active_and_waiting_draws_clean_connectors_without_ladder_ticks() {
             .all(|xy| !matches!(buffer[xy].symbol(), "┼" | "═")));
     }
 }
+
+#[test]
+fn compact_queue_marks_each_request_running_or_waiting() {
+    assert_eq!(request_icons(Some(3), '●', 10), "●●●");
+    assert_eq!(request_icons(Some(0), '○', 10), "");
+    assert_eq!(request_icons(None, '○', 10), "");
+    assert_eq!(
+        request_icons(Some(40), '○', 5),
+        "○○○○+",
+        "a long queue ends in +"
+    );
+    assert_eq!(request_icons(Some(5), '○', 0), "+");
+
+    let mut history = History::default();
+    let mut sample = live();
+    sample.llm_active_requests = Some(1);
+    sample.llm_waiting_requests = Some(5);
+    history.observe(&sample, 80);
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(40, 4)).unwrap();
+    terminal
+        .draw(|frame| {
+            queue(
+                frame,
+                frame.area(),
+                &history,
+                Duration::from_secs(1),
+                1,
+                None,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let line = |y: u16| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+    assert!(line(1).contains("active 1  ●"), "{}", line(1));
+    assert!(line(2).contains("waiting 5 ○○○○○"), "{}", line(2));
+    // Icons sit in one column for both rows, coloured by their state.
+    let x = line(2).chars().position(|c| c == '○').unwrap() as u16;
+    assert_eq!(buffer[(x, 1)].symbol(), "●");
+    assert_eq!(buffer[(x, 1)].fg, CYAN);
+    assert_eq!(buffer[(x, 2)].fg, YELLOW);
+
+    // Three rows: the waiting count and its marks move into the border.
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(40, 3)).unwrap();
+    terminal
+        .draw(|frame| {
+            queue(
+                frame,
+                frame.area(),
+                &history,
+                Duration::from_secs(1),
+                1,
+                None,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let bottom = (0..40).map(|x| buffer[(x, 2)].symbol()).collect::<String>();
+    assert!(bottom.contains(" waiting 5 ○○○○○ "), "{bottom}");
+}
+
+#[test]
+fn first_token_bars_are_solid_with_eighth_block_tops() {
+    let mut history = History::default();
+    for (id, ttft) in [("a", 400), ("b", 300)] {
+        let mut sample = live();
+        sample.llm_requests.push(domain::RequestUsage {
+            provider: "oMLX".into(),
+            model: "test".into(),
+            id: id.into(),
+            prompt: 100,
+            cached: None,
+            output: None,
+            completed: true,
+            observed_at: Some(SystemTime::now()),
+            queued: false,
+            ttft_ms: Some(ttft),
+            output_tps: None,
+        });
+        history.observe(&sample, 10);
+    }
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(20, 10)).unwrap();
+    terminal
+        .draw(|frame| latency(frame, frame.area(), &history, 1))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    // Newest at the right: 300 ms, then 400 ms; full cells are filled backgrounds.
+    let height = |x: u16| (0..10).filter(|y| buffer[(x, *y)].bg == BLUE).count();
+    assert!(height(17) > height(18), "{} vs {}", height(17), height(18));
+    assert!(
+        (0..10).all(|y| buffer[(18, y)].symbol() != "▇"),
+        "no striped glyph cells"
+    );
+}

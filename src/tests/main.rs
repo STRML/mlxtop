@@ -737,6 +737,8 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
             // A bar of filled cells (blank in text) cutting the guides, not a point.
             assert!(screen.contains("┄ ┄") && screen.contains("─ ─"), "{screen}");
             assert!(!screen.contains('●'), "{screen}");
+        } else if chart_form(metric) == ChartForm::Bars {
+            assert!(!screen.contains('●'), "bars, not points\n{screen}");
         } else {
             assert_eq!(screen.contains('●'), last.is_some(), "{screen}");
         }
@@ -1076,7 +1078,27 @@ fn paging_distinguishes_zero_traffic_from_missing_and_past_activity() {
     assert!(idle.contains("No paging traffic in this window"));
     assert!(!idle.contains("1 B/s"));
     assert!(idle.contains("0 B/s"));
-    assert!(idle.contains('●'), "retain measured zero");
+    // A measured zero marks the baseline in its grade; the empty guide is muted.
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(90, 12)).unwrap();
+    terminal
+        .draw(|frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "paging / I/O",
+                &history,
+                ChartMetric::Swap,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!(
+        buffer
+            .content()
+            .iter()
+            .any(|cell| cell.symbol() == "─" && cell.fg == GREEN),
+        "retain measured zero"
+    );
     history.push_front(ChartPoint::new(Some(4096), Tone::Green));
     let past_activity = draw(&history);
     assert!(!past_activity.contains("No paging traffic"));
@@ -2436,24 +2458,18 @@ fn throughput_axes_follow_visible_workload_and_zoom() {
         ChartPoint::new(Some(355), Tone::Yellow),
         ChartPoint::new(Some(360), Tone::Red),
     ]);
-    let wide = chart_scale(&history, ChartMetric::Prefill, 4);
-    let zoomed = chart_scale(&history, ChartMetric::Prefill, 3);
-    assert!(wide.1 >= 20_000);
-    assert!(zoomed.0 >= 250 && zoomed.1 <= 450);
-    // Generation bars stand on zero; the ceiling still follows the visible peak.
-    assert_eq!(chart_scale(&history, ChartMetric::Generation, 3).0, 0);
-    let generation = chart_scale(&history, ChartMetric::Generation, 3);
-    assert!(generation.1 >= 360 && generation.1 <= 450, "{generation:?}");
-    assert!(chart_scale(&history, ChartMetric::Generation, 4).1 >= 20_000);
+    // Rate bars stand on zero; the top follows the visible peak and zoom.
+    for metric in [ChartMetric::Generation, ChartMetric::Prefill] {
+        let wide = chart_scale(&history, metric, 4);
+        let zoomed = chart_scale(&history, metric, 3);
+        assert_eq!((wide.0, zoomed.0), (0, 0));
+        assert!(wide.1 >= 20_000);
+        assert!(zoomed.1 >= 360 && zoomed.1 <= 450, "{zoomed:?}");
+        assert_eq!(chart_display_value(metric, 0, zoomed), 0);
+        assert_eq!(chart_display_value(metric, zoomed.1, zoomed), 100);
+    }
     assert_eq!(chart_stat_label(ChartMetric::Generation, Some(355)), "35.5");
-    assert_eq!(
-        chart_display_value(ChartMetric::Prefill, zoomed.0, zoomed),
-        0
-    );
-    assert_eq!(
-        chart_display_value(ChartMetric::Prefill, zoomed.1, zoomed),
-        100
-    );
+    let zoomed = chart_scale(&history, ChartMetric::Generation, 3);
     let columns = chart_columns_for_plot(&history, 3, ChartMetric::Generation, 10, zoomed);
     assert_eq!(
         columns.iter().map(|point| point.tone).collect::<Vec<_>>(),
@@ -2504,13 +2520,7 @@ fn percent_midpoint_trace_lines_up_with_its_tick_at_even_and_odd_heights() {
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(40, height)).unwrap();
         terminal
             .draw(|frame| {
-                app.render_indicator_chart(
-                    frame,
-                    frame.area(),
-                    "cache",
-                    &history,
-                    ChartMetric::Cache,
-                )
+                app.render_indicator_chart(frame, frame.area(), "GPU", &history, ChartMetric::Gpu)
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
@@ -2529,6 +2539,7 @@ fn stepped_chart_connectors_follow_the_level_being_crossed() {
             TraceCell {
                 glyph: ' ',
                 tone: Tone::Muted,
+                fill: false,
             };
             3
         ];
@@ -4512,4 +4523,171 @@ fn throughput_and_cache_charts_grade_against_their_thresholds() {
     ] {
         assert_eq!(ChartMetric::Cache.tone(value, defaults()), tone, "{value}");
     }
+}
+
+#[test]
+fn levels_are_areas_and_bursty_rates_are_bars() {
+    for metric in [ChartMetric::Memory, ChartMetric::Gpu] {
+        assert_eq!(chart_form(metric), ChartForm::Area);
+    }
+    for metric in [
+        ChartMetric::Compression,
+        ChartMetric::Swap,
+        ChartMetric::Generation,
+        ChartMetric::Prefill,
+        ChartMetric::Cache,
+    ] {
+        assert_eq!(chart_form(metric), ChartForm::Bars);
+    }
+}
+
+fn render_chart(
+    metric: ChartMetric,
+    history: &VecDeque<ChartPoint>,
+    width: u16,
+) -> ratatui::buffer::Buffer {
+    render_zoomed_chart(metric, history, width, 1)
+}
+
+fn render_zoomed_chart(
+    metric: ChartMetric,
+    history: &VecDeque<ChartPoint>,
+    width: u16,
+    zoom: u16,
+) -> ratatui::buffer::Buffer {
+    let mut app = test_app(0);
+    app.charts.focused = Chart::from(metric);
+    while app.charts.zoom(Chart::from(metric)) < zoom {
+        app.charts.change_zoom(true);
+    }
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, 12)).unwrap();
+    terminal
+        .draw(|frame| app.render_indicator_chart(frame, frame.area(), "chart", history, metric))
+        .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+#[test]
+fn bars_keep_a_gap_between_samples_when_there_is_room_and_show_raw_heights() {
+    // At 1× each sample has one column; zoomed in, a column between samples
+    // stays empty so each bar reads on its own. Solid cells are green backgrounds.
+    let history = VecDeque::from(vec![ChartPoint::new(Some(400), Tone::Green); 8]);
+    let buffer = render_zoomed_chart(ChartMetric::Generation, &history, 90, 4);
+    let row = (0..12)
+        .map(|y| {
+            (0..90)
+                .map(|x| buffer[(x, y)].bg == GREEN)
+                .collect::<Vec<_>>()
+        })
+        .find(|row| row.iter().any(|filled| *filled))
+        .expect("bars drawn");
+    let runs = row
+        .split(|filled| !filled)
+        .filter(|run| !run.is_empty())
+        .count();
+    assert_eq!(runs, 8, "one solid run per sample: {row:?}");
+    let unzoomed = render_chart(ChartMetric::Generation, &history, 90);
+    let solid = (0..90).filter(|x| (0..12).any(|y| unzoomed[(*x, y)].bg == GREEN));
+    assert_eq!(solid.count(), 8, "one column per sample, adjacent");
+
+    // Two close rates a line would hold level at the same height stay distinct.
+    let history = VecDeque::from(vec![
+        ChartPoint::new(Some(400), Tone::Green),
+        ChartPoint::new(Some(430), Tone::Green),
+    ]);
+    let buffer = render_chart(ChartMetric::Generation, &history, 40);
+    // Height in eighths: full (filled) cells plus the block that tops them.
+    let eighths: Vec<usize> = (0..40)
+        .map(|x| {
+            (0..12)
+                .map(|y| {
+                    let cell = &buffer[(x, y)];
+                    if cell.bg == GREEN {
+                        8
+                    } else {
+                        "▁▂▃▄▅▆▇"
+                            .chars()
+                            .position(|glyph| cell.symbol().starts_with(glyph))
+                            .map_or(0, |index| index + 1)
+                    }
+                })
+                .sum()
+        })
+        .filter(|height| *height > 0)
+        .collect();
+    assert_eq!(eighths.len(), 2);
+    assert!(eighths[1] > eighths[0], "{eighths:?}");
+}
+
+#[test]
+fn areas_fill_beneath_their_graded_line_in_one_quiet_colour() {
+    let body = crate::theme::AREA_FILL;
+    // Busy samples flipping between the warning and critical grades: the line
+    // keeps each grade, the body stays one colour instead of striping.
+    let history: VecDeque<_> = (0..40)
+        .map(|i| {
+            if i % 2 == 0 {
+                ChartPoint::new(Some(100), Tone::Red)
+            } else {
+                ChartPoint::new(Some(88), Tone::Yellow)
+            }
+        })
+        .collect();
+    let buffer = render_chart(ChartMetric::Gpu, &history, 50);
+    let bottom = (0..12)
+        .rev()
+        .find(|y| buffer[(47, *y)].bg == body)
+        .expect("area body drawn");
+    assert!(
+        (20..48).all(|x| buffer[(x, bottom)].bg == body),
+        "one body colour"
+    );
+
+    let history = VecDeque::from(vec![ChartPoint::new(Some(60), Tone::Yellow); 40]);
+    let buffer = render_chart(ChartMetric::Gpu, &history, 50);
+    let column = 47;
+    let line = (0..12)
+        .find(|y| buffer[(column, *y)].symbol() == "━")
+        .expect("line drawn");
+    assert_eq!(
+        buffer[(column, line)].fg,
+        YELLOW,
+        "the line carries the grade"
+    );
+    assert_eq!(
+        buffer[(column, line)].bg,
+        body,
+        "the line is the area's top edge"
+    );
+    assert!((line + 1..11).all(|y| buffer[(column, y)].bg == body));
+    assert!(
+        (0..line).all(|y| buffer[(column, y)].bg != body),
+        "nothing above it"
+    );
+}
+
+#[test]
+fn meters_fill_in_eighths_and_the_wide_process_table_shows_one_per_share() {
+    assert_eq!(meter_cells(0.0, 3), "   ");
+    assert_eq!(meter_cells(100.0, 3), "███");
+    assert_eq!(meter_cells(50.0, 3), "█▌ ");
+    assert_eq!(meter_cells(4.0, 3), "▏  ", "a small share still shows");
+    assert_eq!(meter_cells(250.0, 2), "██");
+
+    let mut app = test_app(1);
+    app.collector.current.llm_processes = vec![LlmProcess {
+        pid: 42,
+        name: "omlx-server".into(),
+        command: "/usr/local/bin/omlx-server --port 8080".into(),
+        rss: 14 << 30,
+        cpu: 3.0,
+        memory_percent: Some(40.0),
+        state: "S".into(),
+        pageins: None,
+        pagein_rate: None,
+    }];
+    let rendered = render_app(&app, 180, 40);
+    assert!(rendered.contains("MEM%"), "{rendered}");
+    // 40% of three cells is 9.6 eighths: one full cell and a quarter.
+    assert!(rendered.contains("█▎  40.0%"), "{rendered}");
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-use crate::chart_render::chart_window_label;
+use crate::chart_render::{bar_cells, chart_window_label};
 use crate::chart_scale;
 use crate::domain::Tone;
 use crate::formatting::{count, telemetry_age};
@@ -103,6 +103,19 @@ fn panel_area(
         inner.width,
         inner.height.saturating_sub(1),
     )
+}
+
+/// One mark per request, as many as fit, so a queue reads at a glance:
+/// `●●` running, `○○○○` waiting. A queue longer than the room ends in `+`.
+fn request_icons(count: Option<u64>, icon: char, room: usize) -> String {
+    let count = usize::try_from(count.unwrap_or(0)).unwrap_or(usize::MAX);
+    if count <= room {
+        std::iter::repeat_n(icon, count).collect()
+    } else {
+        std::iter::repeat_n(icon, room.saturating_sub(1))
+            .chain(std::iter::once('+'))
+            .collect()
+    }
 }
 
 fn queue_tick(value: u64) -> String {
@@ -212,28 +225,46 @@ pub(super) fn queue(
     // both exact counts. Expanding it reveals the full history.
     if area.height <= 5 {
         let queued_color = waiting_color(waiting.is_some_and(|n| n > 0));
-        let active = format!("active {}", count(active));
+        let active_label = format!("active {}", count(active));
         let waiting_label = format!("waiting {}", count(waiting));
         let mut block = panel(
             &if area.height <= 2 {
-                format!("queue {active}")
+                format!("queue {active_label}")
             } else {
                 "queue".into()
             },
             Tone::Cyan,
         );
         let mut lines = Vec::new();
+        // Counts first, then a mark per request, starting in one column just
+        // past the longer label so both rows line up.
+        let start = active_label.len().max(waiting_label.len()) + 1;
+        let room = usize::from(area.width.saturating_sub(2)).saturating_sub(start);
+        let row = |label: &str, value: Option<u64>, icon: char, color: Color| {
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<start$}", format!("{label} {}", count(value))),
+                    Style::default().fg(color),
+                ),
+                Span::styled(request_icons(value, icon, room), Style::default().fg(color)),
+            ])
+        };
         if area.height >= 3 {
-            lines.push(Line::from(Span::styled(active, Style::default().fg(CYAN))));
+            lines.push(row("active", active, '●', CYAN));
         }
         if area.height >= 4 {
-            lines.push(Line::from(Span::styled(
-                waiting_label,
-                Style::default().fg(queued_color),
-            )));
+            lines.push(row("waiting", waiting, '○', queued_color));
         } else {
+            // In the border there is room for the marks after the label too.
+            let room =
+                usize::from(area.width.saturating_sub(4)).saturating_sub(waiting_label.len() + 3);
+            let icons = request_icons(waiting, '○', room);
             block = block.title_bottom(Line::from(Span::styled(
-                format!(" {waiting_label} "),
+                if icons.is_empty() {
+                    format!(" {waiting_label} ")
+                } else {
+                    format!(" {waiting_label} {icons} ")
+                },
                 Style::default().fg(queued_color),
             )));
         }
@@ -479,16 +510,25 @@ pub(super) fn latency(frame: &mut Frame, area: Rect, history: &History, zoom: u1
             .and_then(|index| values.get(index))
         {
             let x = plot.right() - 1 - column;
-            let h = if plot.height == 0 {
-                0
-            } else {
-                ((*value).min(ceiling) as u128 * plot.height as u128).div_ceil(ceiling as u128)
-                    as u16
-            };
-            for y in plot.bottom().saturating_sub(h)..plot.bottom() {
-                frame.buffer_mut()[(x, y)]
-                    .set_symbol(if *value > ceiling { "↑" } else { "▇" })
-                    .set_fg(BLUE);
+            // Eighth-block tops and filled cells, as the throughput bars.
+            let percent = ((*value).min(ceiling) as u128 * 100 / ceiling.max(1) as u128) as u64;
+            let mut glyphs = bar_cells(percent, usize::from(plot.height));
+            if glyphs.is_empty() {
+                glyphs.push('▁');
+            }
+            for (height, glyph) in glyphs.into_iter().enumerate() {
+                let cell = &mut frame.buffer_mut()[(x, plot.bottom() - 1 - height as u16)];
+                if glyph == '█' {
+                    cell.set_symbol(" ").set_bg(BLUE);
+                } else {
+                    cell.set_symbol(&glyph.to_string()).set_fg(BLUE);
+                }
+            }
+            if *value > ceiling {
+                frame.buffer_mut()[(x, plot.y)]
+                    .set_symbol("↑")
+                    .set_fg(BLUE)
+                    .set_bg(PANEL);
             }
         }
     }
