@@ -8,53 +8,69 @@ Detailed controls, runtime setup, and explanations of the dashboard readings.
 
 | View | Question answered | Key information |
 | --- | --- | --- |
-| Overview | Is memory or paging limiting inference? | Memory pressure and paging, readable throughput, GPU, prompt history, cache, queue and recent events |
-| MLX Top | Which process owns the workload? | PID, command, CPU, memory %, RSS, page-ins, OS state and selected runtime details |
+| Overview | Is memory or paging limiting inference? | Memory pressure and composition, compression, paging, prompt history, throughput, GPU, cache, queue and recent events |
+| Processes | Which process owns the workload? | PID, command, CPU, memory %, RSS, page-ins, OS state and selected runtime details |
 | Journal | What changed during this session? | Request lifecycle, provider/model changes, paging, pressure, compression, GPU, thermal and recovery events |
 
-Overview starts with a dense full-width **SYSINFO** strip and a fixed two-row
-assessment: the current finding and a suggested check or neutral observation. **Memory / pressure**
-and **paging** share a compact first row. **Generation**, **prefill** and **GPU**
-use the next row, with enough height to show rate changes clearly. Select a
-chart and press Enter for its full view. OS process footprint is available in
-MLX Top and the static report; Overview has no process-memory chart.
-System memory shows **resident** physical RAM, its byte count/total, and
-**Includes file cache**. This is occupied RAM, including reclaimable cache.
-On macOS it is total RAM minus free and speculative pages; on Linux it is
-`MemTotal - MemFree`. It is independent of **PRESSURE**, which retains OS severity.
-Its reading, trace and compact gauge use cyan for occupancy. The separate
-PRESSURE label uses green for normal, yellow for watch, red for critical and
-muted for unknown.
-A full cache alone does not establish memory pressure. Linux derives pressure
-from unavailable memory (`MemTotal - MemAvailable`) and full PSI stalls;
+The **top bar** holds the views, a heartbeat spinner that turns with every
+sample (a frozen spinner means sampling stopped or is paused), the refresh
+interval and the time window every Overview chart shares, for example
+`every 1s · window 46s`.
+
+Overview starts with the **runtime card**: the provider, engine and model, a
+status badge, and the machine along its bottom edge (device, GPU cores, a GPU
+memory meter graded at 90% and 97%, the runtime's memory and CPU). The badge
+spins while work is under way and reads, for example, `PREFILLING 52%` while
+one prompt is prefilled. The source shows its age only once a reading is 3 s
+old, and thermal state appears only when it is not normal. The card's top
+border repeats the runtime's prompt counters only when they differ from the
+request shown in prompt load.
+
+Below it, a one-line **assessment** leads with an icon: ✓ for
+`Healthy · no bottleneck`, ▲ for a condition to inspect, ✖ for a critical one.
+Evidence follows only when something is wrong, and a second line appears only
+for a suggested check (→) or a missing reading worth knowing about.
+
+The **host row** takes the remaining height: **memory**, **compression** and
+**paging / I/O** on macOS (memory spans two columns on Linux and Windows).
+**Prompt load** spans two columns of the next row, with **cache** above
+**queue** in the third. **Generation**, **prefill** and **GPU** share a compact
+row, and the bottom **recent Journal** shows timestamped changes, newest
+first. Select a chart and press Enter for its full view. Each panel keeps its
+place when requests arrive or the model becomes idle; an empty prompt load is
+one line, and the host charts get its rows.
+
+**Memory** puts the OS **PRESSURE** label in the reading slot, then bytes in
+use and the resident percentage, then a bar of what RAM holds: wired, app,
+compressed, cache and free, with the GPU wired limit marked (yellow, with a
+legend reason, when wired memory exceeds it). Its history stacks the same
+kinds for every sample, at eighth-cell precision with free memory empty at
+the top, so a model load reads as wired memory jumping while cache is
+squeezed out. The bottom row is a ribbon in each sample's pressure colour:
+green for normal, yellow for warning, red for critical. Linux stacks app and
+cache, Windows memory in use; without composition counters the history is an
+area of resident occupancy. Resident memory is total RAM minus free (and, on
+macOS, speculative) pages, so it includes reclaimable file cache; a full cache
+alone does not establish memory pressure. Linux derives pressure from
+unavailable memory (`MemTotal - MemAvailable`) and full PSI stalls;
 `memory_warn_load` and `memory_critical_load` configure those Linux bands.
-macOS uses native pressure rather than percentage thresholds. macOS `memory_pressure -Q` includes pageable
-application pages in its reported percentage and is not used as RAM usage.
+macOS uses native pressure rather than percentage thresholds. macOS
+`memory_pressure -Q` includes pageable application pages in its reported
+percentage and is not used as RAM usage.
 
-A compact row holds **prompt load**, **Cache** and **Queue**. The bottom **recent
-Journal** shows timestamped changes, newest first. At 170×42 the resource row is
-eight rows high, throughput twelve and Journal has three event rows, with long messages
-wrapping to a second line. Press `3` for the full Journal.
-
-Prompt load uses nine to thirteen rows on regular terminals. Each panel keeps its place
-when requests arrive or the model becomes idle. Each chart has one border and
-independent selection and expansion controls. Time-series panels share zoom;
-request bars retain independent zoom. Hardware, RAM, CPU/RSS,
-thermal and GPU allocation live in SYSINFO alongside model and telemetry age.
-The top bar holds view navigation and sampling state; the bottom bar shows
-controls for the current view and selected chart. Detailed chart statistics
-appear in expanded views.
-
-**SWAP** is a horizontal used/total capacity bar inside paging / I/O. Its
-percentage describes occupied capacity; the separate B/s history describes
-paging traffic. A measured all-zero window says **No paging traffic** and keeps
-its zero trace without inventing a 1 B/s ceiling. Missing samples remain gaps.
-On short terminals, percentage panels show a capacity bar and
-exact reading; Enter opens the full history. If only aggregate cache reuse is
-available, Cache retains its interval empty state and TOTAL/prefix hit text.
-It never switches to a cumulative gauge.
-Idle models can show the latest observed prompt with its age. Selected prompt
-history identifies a different provider/model when browsing retained requests.
+**Compression** (macOS) shows the compressor's stored and compressed bytes and
+ratio, compress plus decompress traffic as bars, and the compressor's share of
+RAM. **Paging / I/O** shows disk paging as bars, page-in and page-out rates
+and a swap capacity bar (`swap off` when none is allocated). On macOS paging
+includes file page-ins and page-outs as well as swap: without swap, macOS
+drops file-backed pages, model weights included, and reads them back from
+disk. File paging counts against the system only while memory is tight
+(warning pressure, or 10% free or less); otherwise it is drawn in green as
+`Disk reads · memory not tight`, for example while a model loads. Both
+charts' axes never shrink below their warning rate, which is drawn as a
+dotted yellow line, so a trickle stays a short bar. A measured all-zero
+window says **No paging traffic** without inventing a ceiling; missing samples
+remain gaps.
 
 Only percentage charts use a 0–100 axis. Numeric charts automatically fit the
 visible observations in their actual units: tok/s, tokens, bytes, bytes/s,
@@ -64,36 +80,41 @@ history recalculates these ranges. The current axis is labeled; its limits are
 display ranges, not hardware or model limits. See the
 [chart specification](CHART_SPEC.md) for the rules shared by every chart.
 
-Each time series is a stepped trace, newest at the right. Overview uses the
-same trailing sample window for every time-series panel. Wider plots widen
-those same observations; no samples are dropped. Window labels describe
-sample slots at the selected sampling cadence. Expanded charts show more history. Rate traces contain only active-request
-telemetry. Server averages and retained results stay explicitly labeled
-`AVG` or `LAST`; they are never plotted as live samples. Missing, stale, idle
-and completion-log-only rate samples leave gaps. A provider/model change
-starts a new throughput history.
-An isolated observation appears as a dot. When recent samples are missing, the
-chart labels the last visible reading and its age. `window avg` summarizes the
-visible captured samples; `SERVER AVG` in expanded views is the separate
-provider average, which may predate mlxtop. Overview prioritizes LIVE and LAST.
-Cache labels interval samples independently from its cumulative `TOTAL` reuse.
-oMLX's initial prefill speed placeholder leaves a gap until a measured rate is
+Each chart's form follows its data. Levels (GPU busy, memory without
+composition) are areas: a graded line over a neutral fill. Bursty
+per-sample rates (generation, prefill, compression, paging) and the cache
+interval are bars from zero, one per sample as measured; a measured zero is a
+coloured tick on the baseline, while a missing sample leaves the column empty.
+Rate panels too short for axes, and the row under compact gauges, draw a
+sparkline of recent samples. Newest samples are at the right, and every
+Overview time series uses the same trailing window. Wider plots widen those
+same observations; no samples are dropped. Expanded charts show more history.
+
+Rate charts contain only active-request telemetry. Server averages and
+retained results stay explicitly labeled `AVG` or `LAST`; they are never
+plotted as live samples. Missing, stale, idle and completion-log-only rate
+samples leave gaps. A provider/model change starts a new throughput history.
+When recent samples are missing, the chart labels the last visible reading and
+its age. An expanded chart's `avg` and `peak` summarize the visible captured samples; `SERVER AVG` in
+expanded views is the separate provider average, which may predate mlxtop.
+Cache labels interval samples independently from its cumulative reuse since
+start and prefix hit rate; it never switches to a cumulative gauge. oMLX's
+initial prefill speed placeholder leaves a gap until a measured rate is
 available. A short prefill can finish between polls without producing a live
-rate sample; its server average remains available in the expanded chart. Short Queue panels show exact
-counts; Enter expands their history with a readable request scale.
-A trace keeps the severity tone recorded with its sample, so a later refresh
-cannot recolor or rewrite history. For readability, the plotted position uses
-a causal deadband derived from the chart's drawable row resolution: movement of
-at most a quarter-row is held at the prior plotted level, while larger changes
-and spikes pass through immediately. The calculation uses only the samples up
-to each point, so future samples never change an older plotted point. Raw values
-remain the source for headlines and statistics. The tone is only a secondary
-visual cue:
-visible labels use meaningful states such as `normal`,
-`watch`, `critical`, `busy` and `saturated` rather than asking users to
-interpret color names. On narrower terminals, the detailed cards collapse
-by keeping numeric readings when a secondary trace cannot fit. Journal records
-transitions rather than duplicating the live process table.
+rate sample; its server average remains available in the expanded chart.
+Compact Queue panels show the counts with a mark per request (`●` running,
+`○` waiting); Enter expands their history with a readable request scale.
+
+Each sample keeps the severity colour recorded with it, so a later refresh
+cannot recolor history. An area's line uses a causal deadband derived from
+the chart's row resolution: movement of at most a quarter-row is held at the
+prior plotted level, while larger changes pass through immediately, using only
+earlier samples. Bars show raw values. Headlines and statistics always use raw
+values. Colour is a secondary cue: labels use states such as `normal`,
+`watch`, `critical`, `busy` and `saturated`, and verdicts carry an icon. On
+narrower terminals, panels keep numeric readings when a secondary trace
+cannot fit. Journal records transitions rather than duplicating the live
+process table.
 
 ## Throughput correlation
 
@@ -139,6 +160,25 @@ API credentials are sent only to loopback endpoints by default. To use an
 intentionally remote oMLX endpoint, set `MLXTOP_ALLOW_REMOTE_AUTH=1` and use a
 trusted, protected network path.
 
+### oMLX serving through Splash
+
+oMLX 0.7.1 can serve a model through [Splash](https://github.com/incoai/splash)
+as an external engine: it starts `splash serve` on a private loopback port and
+keeps reporting the model, requests and cache through its own admin API. mlxtop
+stays on oMLX in that setup, even when the Splash engine sorts first in the
+process list, and names the engine in the runtime card and report
+(`oMLX · Splash · <model>`). oMLX's own MLX memory readings (active, cache,
+peak, footprint) are dropped, because the model does not live in oMLX's MLX
+runtime; device facts stay.
+
+oMLX's admin benchmark sends its requests straight to Splash, so oMLX reports
+nothing active while the GPU is saturated. When the GPU is busy and oMLX
+tracks no active or waiting request, the status reads **untracked** rather than
+idle, the assessment says `GPU busy outside oMLX's request tracking (oMLX
+benchmark on Splash?) · no live rates`, and prompt load says it is busy outside
+oMLX. Splash's own `/status` needs the key oMLX generates, so mlxtop does not
+read it.
+
 ## MLX and Metal telemetry
 
 MLX allocator state belongs to the serving process. When an oMLX-compatible
@@ -164,7 +204,7 @@ report retains `—` for missing fields. RSS, GPU load and model memory are neve
 substituted for allocator readings. mlxtop reads existing provider interfaces
 and operating-system metrics; it does not patch or restart serving runtimes.
 
-On macOS, MLX Top and the static report show OS process memory. Values come
+On macOS, Processes and the static report show OS process memory. Values come
 directly from `proc_pid_rusage` for the detected LLM process with the largest
 RSS. They describe that one process, not the sum of all model servers; the PID
 identifies the scope.
@@ -221,7 +261,7 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 | Key | Action |
 | --- | --- |
 | `1` / `o` | Overview |
-| `2` / `t` | MLX Top |
+| `2` / `t` | Processes |
 | `3` / `j` | Journal |
 | `Tab` / `Shift-Tab` | Next / previous view, including while filtering processes |
 | `p` / `Space` | Pause or resume sampling |
@@ -273,7 +313,7 @@ Credentials and raw API responses are excluded from the report.
 
 ![Read-only Diagnostics panel with runtime capabilities](screenshots/diagnostics.png)
 
-On compact terminals, the two-row assessment uses the Overview Journal preview's
+On compact terminals, the assessment uses the Overview Journal preview's
 space. The complete Journal remains accessible with `3`.
 
 ### Overview charts
@@ -300,8 +340,8 @@ terminal's selection modifier (usually Shift) to select text with the mouse.
 
 Critical memory pressure, heavy paging, swap thrashing and page-in recovery
 ring the terminal bell once and display a banner. In Overview the banner takes
-the place of the assessment rows, so SYSINFO's model, state and data age stay
-visible. Enable the audible bell in
+the place of the assessment, so the runtime card's model, state and data age
+stay visible. Enable the audible bell in
 your terminal settings to hear it. `a` dismisses the banner for the rest of
 that episode; a confirmed recovery re-arms the alarm. Missing system counters
 do not count as recovery. High GPU utilization is normal workload activity
@@ -338,9 +378,10 @@ spill into shared system memory, which the driver does not report; the
 finding says so. Offload is not reported for a remote runtime, whose
 placement says nothing about local cards.
 
-### MLX Top
+### Processes
 
-The process table fills the view, with aggregate CPU/RSS for the current filter.
+The process table fills the view, with the process count and aggregate
+CPU/RSS for the current filter in its title.
 Select a row to see its full command, OS state, CPU, RAM share, RSS and page-ins
 per second. OS footprint/peak/growth appear only for their measured PID.
 Provider-wide model/state telemetry is labeled **RUNTIME** in the details;
@@ -373,7 +414,19 @@ that a corresponding process exists on the machine running mlxtop.
 -1, --once         print a static report and exit
 -V, --version      print the installed version and exit
 -h, --help         show help
+
+mlxtop doctor [--interval N]   diagnose the connection and readings, then exit
+mlxtop update [--rc]           install the latest release (--rc: or release candidate)
 ```
+
+`mlxtop update` downloads the release archive for this platform from GitHub,
+checks it against the release's `SHA256SUMS` and the new binary's reported
+version, and renames it over the running binary, so a failed update leaves the
+old one in place. `--rc` also considers release candidates, which are
+published as GitHub prereleases. Homebrew installs are pointed to
+`brew upgrade mlxtop`, and an install in a root-owned directory, such as the
+macOS package in `/usr/local/bin`, needs `sudo mlxtop update`. Restart open
+sessions afterwards.
 
 ## Crash diagnostics
 
@@ -382,6 +435,7 @@ Every run writes a small local diagnostic log to:
 ```text
 ~/Library/Logs/mlxtop/mlxtop.log        # macOS
 ~/.local/state/mlxtop/mlxtop.log        # Linux ($XDG_STATE_HOME respected)
+%LOCALAPPDATA%\mlxtop\mlxtop.log        # Windows
 ```
 
 Follow it while reproducing a crash:
@@ -410,21 +464,39 @@ tokens. For example, a 20,000-token prompt with 15,000 cached tokens still shows
 observed request, and selecting an older request updates the headline to that
 request's size.
 
-The summary also shows the change from the previous observed request and the
-observation's freshness. Prompt load uses half the width of a compact row,
-beside Cache and Queue. It is nine to thirteen rows high, or seven on short macOS terminals
-and six with a compact NVIDIA device table. Enter expands it for a larger view.
+The summary also shows the change from the previous observed request, for
+example `Δ +12,768 (+63.8%) vs previous`, when there is one. Prompt load spans
+two of the three columns, beside Cache and Queue. It is nine to thirteen rows
+high, or seven on short macOS terminals and six with a compact NVIDIA device
+table; with no requests yet it is a single line (`no requests yet`, `waiting
+for the prompt size`, or `busy outside oMLX`). Enter expands it for a larger
+view.
 Newest requests stay at the right with fixed spacing, including a single bar.
 Every visible bar has a size label beneath it,
 such as `12.0k` for 12,000 tokens (`k` means thousands, `M` means millions;
 these are token counts, not kilobytes). Each request gets enough horizontal
 space to keep its label readable, including at 1×. Older requests remain
-available with Shift+↑↓ and Home/End. Exact selected
-tokens, observation time in UTC, age, cache reuse and the previous-request
-comparison stay above the chart; recent prompt-size statistics sit in the
+available with Shift+↑↓ and Home/End; `#n / m` shows the position while
+browsing. Exact selected tokens, cache reuse and the previous-request
+comparison stay above the chart, with the local observation time and age for
+requests that are no longer live; recent prompt-size statistics sit in the
 bottom border.
-`LIVE` requires a matching request in a fresh live sample. Once absent or stale,
-an incomplete request reads `LAST SEEN`; completed request counts read `REPORTED`.
+`LIVE` requires a matching request in a fresh live sample. A request waiting
+in the runtime's queue reads `QUEUED` and its bar is hatched. Once absent or
+stale, an incomplete request reads `LAST SEEN`; completed request counts read
+`REPORTED`.
+
+While the selected live request is still prefilling, its output line becomes
+a progress bar:
+
+```text
+PREFILL ▕████████░░░░░░░▏ 52% · 34,078 / 65,536 · 4m 12s left
+```
+
+The time left divides the remaining prompt tokens by the live prefill rate;
+narrow panels drop the counts first, then the time left. Progress comes from
+oMLX's prefilling rows and Splash's `prompt_processed`; runtimes that do not
+report it keep the output line.
 Age comes from the request observation or the client timestamp, not the most
 recent redraw. The last sampled output is not assumed to be a final total.
 
@@ -436,7 +508,7 @@ for earlier prompts. Missing request timing shows `SPEED —`; the server averag
 prefill rate and other concurrent requests are never used as substitutes.
 A later observation without timing retains the previous speed and its original
 age, labeled `LAST`. Request speed uses the existing prompt metadata rows;
-small panels prioritize it over the UTC clock and optional comparison details.
+small panels prioritize it over the clock and optional comparison details.
 
 Prompt counts, output-speed observations, chart samples and Journal events are
 kept in memory for this mlxtop session. After a restart, the prompt panel waits
@@ -452,8 +524,8 @@ Total request duration and prompt-evaluation duration are not decode timing.
 
 The colored bar chart reads older to newer, with the selected request marked
 `▲` beside the size label below the rightmost bar. A single request starts at
-the right edge; fixed spacing keeps it there as more requests arrive. Its UTC timestamp stays in
-the headline. Spacing represents request order, not elapsed time; the selected marker
+the right edge; fixed spacing keeps it there as more requests arrive. Its local
+timestamp stays in the headline once it is no longer live. Spacing represents request order, not elapsed time; the selected marker
 remains visible during jumps and overflow. When request-specific cache counts are reported, bars stack
 green cached tokens below uncached tokens (cyan for live requests, blue for
 history). Without a cache count, a solid bar represents the whole prompt and
@@ -464,14 +536,16 @@ Where a partial cell cannot show both segments and empty space, it uses the
 dominant segment color. Exact selected values remain in the summary and cache
 readout. Labels accompany color cues.
 
-The bottom line shows the median and range of up to eight contiguous
-observations ending at the selection, from the same provider/model. Moving
+The bottom line shows the median of up to eight contiguous observations
+ending at the selection, from the same provider/model, and how many it covers
+(`MEDIAN 12,000 tokens · RECENT 7`); the bars show the range. Moving
 back through history excludes later requests from those statistics. These are
 prompt sizes in tokens, not health or latency assessments. The headline keeps
 the exact selected prompt size and its observation age visible.
 
-Request cache reuse is green at 80% or more, yellow below 20% for prompts of at
-least 4,096 tokens, and cyan otherwise. Low reuse on a cold request is expected;
+Request cache reuse uses the cache chart's bands for prompts of at least 4,096
+tokens: green from 50%, yellow from 20%, red below 20%. Smaller prompts stay
+cyan. Low reuse on a cold request is expected;
 a low percentage by itself does not establish a cache problem.
 
 The chart uses an **automatic zero-based token scale** derived from the visible
@@ -482,8 +556,8 @@ range, not a context limit or pressure threshold.
 Cache counts appear only when reported for the selected request. Aggregate cache
 statistics and prefill rates are never substituted for request-specific data.
 
-Comparisons are labeled **PREVIOUS OBSERVED**, and are suppressed across changes
-of provider or model. They do not establish conversation membership or explain
+Comparisons are with the previous observed request (`vs previous`), and are
+suppressed across changes of provider or model. They do not establish conversation membership or explain
 latency on their own. Request identifiers and sampled output counts remain in
 Journal instead of occupying an Overview table.
 
@@ -493,25 +567,31 @@ observation, and past requests stay available. Use **Shift-↑ / Shift-↓** or
 
 ## Operator charts
 
-**Memory** shows system resident occupancy in cyan, with a separate pressure
-severity label. **GPU** shows utilization history, with hardware and allocation
-details in SYSINFO. **Paging / I/O** shows byte rates, separate input/output
-rates and a SWAP capacity bar. **Cache** always shows interval history with
-cumulative reuse kept in text. **Queue** shows active and waiting requests.
-All time-series panels share a visible sample window and zoom in Overview.
+| Chart | Form | Reading |
+| --- | --- | --- |
+| memory | stacked composition history over a pressure ribbon (area without composition counters) | PRESSURE, bytes in use, resident % and a composition bar |
+| compression | bars from zero, axis at least the warning rate | stored / compressed bytes and ratio, compressing / decompressing rates, share of RAM |
+| paging / I/O | bars from zero, axis at least the warning rate | page-in / page-out rates, swap capacity bar |
+| generation, prefill | bars from zero | live tok/s, or a labeled `LAST` reading |
+| GPU | area on 0–100% | utilization and load state |
+| cache | bars on 0–100% | interval hit %, reuse since start and prefix hit |
+| queue | two series on a shared count axis; `●`/`○` marks when compact | running and waiting counts |
+| prompt load, first token | one bar per request | the selected request |
 
-Chart labels such as `window 34s` describe the rolling history span, not elapsed
-runtime. The span stays fixed while new samples enter on the right. Resize the
-terminal, expand a chart or change zoom to change the visible span.
+All time-series panels share a visible sample window and zoom in Overview. The
+window in the top bar, such as `window 46s`, is the rolling history span, not
+elapsed runtime. The span stays fixed while new samples enter on the right.
+Resize the terminal, expand a chart or change zoom to change the visible span.
 
-GPU and paging traces retain green/yellow/red value bands.
+GPU and paging samples retain green/yellow/red value bands.
 GPU defaults are green below 75%, yellow from 75% and red from 90%; these are
 load bands, not proof of a bottleneck. Configured thresholds apply consistently
 to numeric readings, traces and device meters. Percentage axes stay at 0–100;
 all other axes use the real measured unit and fit the visible data.
 
 **Queue** plots active requests in cyan and waiting requests in yellow on one
-shared, labeled zero baseline. A white `═` marks equal measured counts. Overlapping connectors merge into continuous muted lines and junctions.
+shared, labeled zero baseline. A compact queue keeps its counts and adds a
+mark per request: `●` running, `○` waiting, `+` when they do not fit. A white `═` marks equal measured counts. Overlapping connectors merge into continuous muted lines and junctions.
 Muted `≈` marks unequal values that coincide at terminal resolution. Exact
 counts remain visible in the panel. Both series share an automatic request-count scale based on their visible
 maximum. Idle zeros are valid; stale, missing and client-reported values
@@ -531,7 +611,8 @@ Use a nonnegative integer measured from request dispatch to the first generated
 token. Add this field alongside `provider`, `request_id`, `observed_at` and
 `usage` in a complete record. The chart uses one column per observed request at 1×,
 shows missing timings as gaps, and automatically scales its millisecond axis
-to the visible requests. Its latest measured value is labeled REPORTED with observation age.
+to the visible requests; bars have eighth-block tops. Its latest measured value
+is labeled REPORTED with observation age.
 Repeated polls update the same request rather than adding duplicate bars.
 Prompt-evaluation duration, generation speed and polling intervals are never
 used to estimate first-token latency. No provider changes are required.
@@ -598,7 +679,7 @@ become stale after five seconds. Invalid URLs or rejected authentication leave
 telemetry unavailable; there is no unauthenticated fallback to another server.
 
 oMLX retains its existing endpoint and login configuration; these provider
-variables apply to the other adapters. API details appear in **Top** and
+variables apply to the other adapters. API details appear in **Processes** and
 `--once` reports. With a remote URL, OS memory, GPU and process readings still
 belong to the machine running mlxtop. Remote rates are excluded from local
 hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
@@ -638,7 +719,7 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   counter resets, changed series and gaps longer than five seconds produce no
   rate. vLLM also supplies interval and cumulative prefix-token cache reuse;
   SGLang supplies prefix hit rate when a single series is unambiguous.
-  Top shows maximum reported KV occupancy across engines and cumulative mean
+  Processes shows maximum reported KV occupancy across engines and cumulative mean
   TTFT. Aggregate latency is never inserted into individual request history.
   No per-request prompt counts or IDs are inferred from aggregate counters.
 - **mlx-serve:** polls `/metrics` (start the server with `--metrics`; set
@@ -666,7 +747,14 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   stays shown, not live, for three seconds. Cache reuse is `cache.reused_tokens` over
   reused plus prefilled tokens. An engine restart or a gap longer than 30 seconds
   produces no rate. Memory is Splash's Metal allocations (`memory_actual`), not process
-  RSS, against `memory_governor.limit_bytes`.
+  RSS, against `memory_governor.limit_bytes`. A request decoding alone gets its own
+  output speed from the decode tokens over decode time; concurrent requests share those
+  counters and keep their last observed output instead. A request that leaves the
+  engine becomes a completed record for prompt load and the Journal, with an exact
+  final output when nothing else was running. The details line leads with problems
+  (failed or cancelled requests, Metal health, capacity failures, requests waiting for
+  memory, gated SSD cache writes, thermal state, pressure), then TTFT and inter-token
+  p50/p95 and Metal headroom. Splash reports no per-request cached tokens or TTFT.
 - **MLX-LM, LocalAI, Jan and GPT4All:** `/v1/models` supplies the available model
   catalogue. This is not proof that models are loaded or processing a request.
   Completion usage needs client integration, and missing counts/rates stay
@@ -884,7 +972,7 @@ all, pass its tag. The script picks the archive for the remote's platform and
 verifies it against the release's `SHA256SUMS` before installing:
 
 ```sh
-./scripts/cicd.sh --release v3.0.0 --host example.local --user deploy
+./scripts/cicd.sh --release v3.1.0 --host example.local --user deploy
 ```
 
 Useful overrides:

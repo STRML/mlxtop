@@ -173,16 +173,18 @@ and automatically scale numeric axes in their actual units. Only percentages
 use 0–100. Consolidate related readings instead of duplicating summary cards.
 
 - Keep Overview focused on current health and LLM impact.
-- Keep MLX Top focused on live process/resource inspection.
+- Keep Processes focused on live process/resource inspection.
 - Keep Journal focused on meaningful historical transitions.
 - Never display historical provider values as live telemetry.
 - Show telemetry provenance and age whenever a provider API is unavailable.
-- Use fixed-width stepped time-series traces for indicator history. One
+- Pick each chart's form from its data, as the
+  [chart forms](docs/CHART_SPEC.md#chart-forms) table sets out: areas for
+  levels, bars from zero for bursty rates, stacked columns for composition. One
   displayed column maps to one captured sample. Overview shares a trailing
   window and zoom across time series, widening samples for larger panels
   without decimation. New samples enter on the right. Gaps must remain
   disconnected, and a sample's recorded severity tone must not be recolored by
-  a later refresh. If smoothing is needed for readability, make it causal and
+  a later refresh. Bars show raw values. If a line needs smoothing, make it causal and
   derive it from the current drawable resolution using only the samples up to
   that point. Keep raw readings and captured tones unchanged; never recalculate
   history from a future or centered display-time window.
@@ -196,6 +198,9 @@ use 0–100. Consolidate related readings instead of duplicating summary cards.
   columns may collapse in documented priority order.
 - Keep keyboard hints contextual to the active view and reserve color for
   identity, severity and selected state rather than decoration.
+- Add text only when it tells the operator something the screen does not
+  already show; prefer an icon, meter or mark with a value beside it (see the
+  [UX design rules](docs/UX_DESIGN.md#say-it-once-show-it-if-you-can)).
 - Keep provider network/authentication and metric parsing out of the native
   collector. Add or extend a provider adapter instead; process signatures may
   be used only for lightweight detection and labeling.
