@@ -56,14 +56,59 @@ fn composition_partitions_ram_and_never_exceeds_it() {
         "never report all RAM as free"
     );
 
-    let (bar, colors, legend) = row(&sample(), 32);
+    let (bar, _, legend) = row(&sample(), 32);
     assert!(legend.contains("wired 4.0 GiB"), "{legend}");
     assert_eq!(bar.chars().count(), 32, "every column is assigned once");
-    assert_eq!(&bar[..12], "████");
-    assert_eq!(colors[0], BLUE);
-    assert_eq!(colors[4], CYAN);
-    assert_eq!(bar.chars().filter(|c| *c == '▓').count(), 4);
-    assert_eq!(bar.chars().filter(|c| *c == '░').count(), 4);
+    // Solid fills, no textures: wired, app, compressed, cache, free track.
+    assert!(bar.chars().all(|c| c == ' '), "{bar}");
+    let mut terminal = Terminal::new(TestBackend::new(32, 1)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw_bar(frame, frame.area(), &sample());
+        })
+        .unwrap();
+    let backgrounds: Vec<Color> = (0..32)
+        .map(|x| terminal.backend().buffer()[(x, 0)].bg)
+        .collect();
+    let fills = kind_colors();
+    assert_eq!(fills[0], BLUE);
+    assert_eq!(fills[1], CYAN);
+    for (range, fill) in [(0..4, 0), (4..20, 1), (20..24, 2), (24..28, 3), (28..32, 4)] {
+        assert!(
+            backgrounds[range.clone()]
+                .iter()
+                .all(|bg| *bg == fills[fill]),
+            "{range:?}: {backgrounds:?}"
+        );
+    }
+    // Compressed and cache differ in lightness, not just in name.
+    assert_ne!(fills[2], fills[3]);
+}
+
+#[test]
+fn history_columns_stack_kinds_in_eighths_and_leave_free_empty() {
+    // 8 GiB of 32 in each kind, over two rows = 16 eighths: 4 per kind.
+    let sizes = [8 * GIB, 8 * GIB, 8 * GIB, 0, 8 * GIB];
+    let mut terminal = Terminal::new(TestBackend::new(1, 2)).unwrap();
+    terminal
+        .draw(|frame| paint_column(frame, 0, 0, 2, sizes))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let fills = kind_colors();
+    // Bottom cell: half wired (a ▄ in wired) over app.
+    assert_eq!(buffer[(0, 1)].symbol(), "▄");
+    assert_eq!(buffer[(0, 1)].fg, fills[0]);
+    assert_eq!(buffer[(0, 1)].bg, fills[1]);
+    // Top cell: half compressed over the free panel, cache being empty.
+    assert_eq!(buffer[(0, 0)].symbol(), "▄");
+    assert_eq!(buffer[(0, 0)].fg, fills[2]);
+    assert_eq!(buffer[(0, 0)].bg, PANEL);
+    // A column that is all one kind fills whole cells.
+    terminal
+        .draw(|frame| paint_column(frame, 0, 0, 2, [32 * GIB, 0, 0, 0, 0]))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!((0..2).all(|y| buffer[(0, y)].bg == fills[0] && buffer[(0, y)].symbol() == " "));
 }
 
 #[test]

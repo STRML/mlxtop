@@ -51,6 +51,9 @@ pub(crate) struct CollectorView {
     pub(crate) prefill_history: VecDeque<ChartPoint>,
     pub(crate) cache_history: VecDeque<ChartPoint>,
     pub(crate) load_history: VecDeque<ChartPoint>,
+    /// RAM by kind (wired, app, compressed, cache, free) for each memory
+    /// sample, aligned one to one with `load_history`.
+    pub(crate) composition_history: VecDeque<Option<[u64; 5]>>,
     pub(crate) swap_history: VecDeque<ChartPoint>,
     pub(crate) compression_history: VecDeque<ChartPoint>,
     /// Which host counters exist; Linux has no compressor counters to chart.
@@ -85,6 +88,9 @@ pub(crate) struct Collector {
     pub(crate) prefill_history: VecDeque<ChartPoint>,
     pub(crate) cache_history: VecDeque<ChartPoint>,
     pub(crate) load_history: VecDeque<ChartPoint>,
+    /// RAM by kind (wired, app, compressed, cache, free) for each memory
+    /// sample, aligned one to one with `load_history`.
+    pub(crate) composition_history: VecDeque<Option<[u64; 5]>>,
     pub(crate) swap_history: VecDeque<ChartPoint>,
     pub(crate) compression_history: VecDeque<ChartPoint>,
     pub(crate) gpu_history: VecDeque<ChartPoint>,
@@ -171,6 +177,7 @@ impl Collector {
             prefill_history: VecDeque::with_capacity(history_limit),
             cache_history: VecDeque::with_capacity(history_limit),
             load_history: VecDeque::with_capacity(history_limit),
+            composition_history: VecDeque::with_capacity(history_limit),
             swap_history: VecDeque::with_capacity(history_limit),
             compression_history: VecDeque::with_capacity(history_limit),
             gpu_history: VecDeque::with_capacity(history_limit),
@@ -518,6 +525,11 @@ impl Collector {
             sample.pressure_tone,
             self.history_limit,
         );
+        self.composition_history
+            .push_back(crate::memory_composition::segments(&sample));
+        while self.composition_history.len() > self.history_limit {
+            self.composition_history.pop_front();
+        }
         // Captured tones follow the assessment's states, so a chart never
         // shows a severity the headline does not report.
         // The chart plots all disk paging; its grade is what counted against
@@ -594,6 +606,7 @@ impl Collector {
             prefill_history: self.prefill_history.clone(),
             cache_history: self.cache_history.clone(),
             load_history: self.load_history.clone(),
+            composition_history: self.composition_history.clone(),
             swap_history: self.swap_history.clone(),
             compression_history: self.compression_history.clone(),
             platform: self.platform,
@@ -834,6 +847,7 @@ impl Collector {
         self.prefill_history.clear();
         self.cache_history.clear();
         self.load_history.clear();
+        self.composition_history.clear();
         self.swap_history.clear();
         self.compression_history.clear();
         self.gpu_history.clear();

@@ -620,6 +620,30 @@ impl App {
         }
     }
 
+    /// The composition samples behind each memory chart column, aligned with
+    /// the memory history exactly as its points are: the newest at the right,
+    /// spread over the plot width.
+    pub(crate) fn composition_columns(
+        &self,
+        visible: usize,
+        width: usize,
+    ) -> Vec<Option<[u64; 5]>> {
+        let history = &self.collector.composition_history;
+        if visible == 0 || width == 0 {
+            return Vec::new();
+        }
+        let start = history.len().saturating_sub(visible);
+        let padding = visible - (history.len() - start);
+        (0..width)
+            .map(|column| {
+                let index = column * visible / width;
+                index
+                    .checked_sub(padding)
+                    .and_then(|offset| history.get(start + offset).copied().flatten())
+            })
+            .collect()
+    }
+
     pub(crate) fn gpu_chart_title(&self) -> &'static str {
         if self.collector.current.has_nvidia_gpus() && self.collector.current.gpus.len() > 1 {
             "GPU max"
@@ -1196,6 +1220,13 @@ impl App {
             chart_columns_for_plot(history, visible_count, metric, plot_height, scale)
         };
         let visible_points = stretch_chart_columns(&points, plot_width);
+        // Memory shows what the RAM holds over time: its kinds stacked in each
+        // column, with the pressure grade as a ribbon along the bottom row.
+        let composition = (metric == ChartMetric::Memory && plot_height >= 4)
+            .then(|| self.composition_columns(visible_count, plot_width))
+            .filter(|columns| columns.iter().any(Option::is_some));
+        let stack = composition.is_some();
+        let axis_rows = if stack { plot_height - 1 } else { plot_height };
         let mut cells = vec![
             vec![
                 TraceCell {
@@ -1213,10 +1244,10 @@ impl App {
             Some(rate) => trace_point(chart_display_value(metric, rate, scale), plot_height)
                 .map(|(row, _)| row)
                 .filter(|row| row + 1 < plot_height),
-            None => (!paging_idle).then_some(plot_height.saturating_sub(1) / 2),
+            None => (!paging_idle).then_some(axis_rows.saturating_sub(1) / 2),
         };
         for (row, row_cells) in cells.iter_mut().enumerate() {
-            let guide = if row + 1 == plot_height {
+            let guide = if row + 1 == axis_rows {
                 Some(('─', Tone::Muted))
             } else if Some(row) == guide_row {
                 Some((
@@ -1270,7 +1301,11 @@ impl App {
                 }
             }
         }
-        for (column, point) in visible_points.iter().enumerate().filter(|_| !bars) {
+        for (column, point) in visible_points
+            .iter()
+            .enumerate()
+            .filter(|_| !bars && !stack)
+        {
             let Some(value) = point.value else {
                 previous_point = None;
                 continue;
@@ -1327,7 +1362,18 @@ impl App {
             );
         }
 
-        if form == ChartForm::Area {
+        if stack {
+            // The ribbon: each sample's pressure grade, under its column.
+            for (column, point) in visible_points.iter().enumerate() {
+                if point.value.is_some() {
+                    cells[plot_height - 1][column] = TraceCell {
+                        glyph: '▀',
+                        tone: point.tone,
+                        fill: false,
+                    };
+                }
+            }
+        } else if form == ChartForm::Area {
             // The level's body beneath its line, quiet so a full chart is not
             // a solid block; guides stay visible through it.
             // The line's own cell is filled too, so the line is the area's top
@@ -1343,9 +1389,11 @@ impl App {
 
         let mut lines = Vec::with_capacity(plot_height);
         for (row, row_cells) in cells.iter().enumerate() {
-            let label = if row == 0 && !paging_idle {
+            let label = if stack && row + 1 == plot_height {
+                String::new()
+            } else if row == 0 && !paging_idle {
                 format!("{top_axis} ")
-            } else if row + 1 == plot_height {
+            } else if row + 1 == axis_rows {
                 format!("{} ", chart_axis_label(metric, scale.0))
             } else if Some(row) == guide_row && scale.1.saturating_sub(scale.0) > 1 {
                 format!(
@@ -1388,6 +1436,20 @@ impl App {
             lines.push(Line::from(spans));
         }
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+        if let Some(columns) = composition {
+            let x = inner.x + label_width as u16;
+            for (column, sizes) in columns.into_iter().enumerate() {
+                if let Some(sizes) = sizes {
+                    memory_composition::paint_column(
+                        frame,
+                        x + column as u16,
+                        inner.y,
+                        axis_rows as u16,
+                        sizes,
+                    );
+                }
+            }
+        }
         if paging_idle && inner.height >= 4 {
             frame.render_widget(
                 Paragraph::new(match (metric, inner.width >= 32) {

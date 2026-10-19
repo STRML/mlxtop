@@ -207,6 +207,7 @@ impl App {
                 prefill_history: VecDeque::new(),
                 cache_history: VecDeque::new(),
                 load_history: VecDeque::new(),
+                composition_history: VecDeque::new(),
                 swap_history: VecDeque::new(),
                 compression_history: VecDeque::new(),
                 platform: crate::host::Platform::current(),
