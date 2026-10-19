@@ -659,7 +659,7 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
             ChartMetric::Swap,
         )
     });
-    assert!(screen.contains("SWAP"));
+    assert!(screen.contains("swap"));
     assert!(screen.contains("1.1/2.0 GiB 54%"));
     app.collector.cache_history.clear();
     let screen = render_view(45, 8, |frame| {
@@ -1890,7 +1890,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
     app.collector.current.llm_provider = "oMLX".into();
     app.collector.current.llm_model = "test-model".into();
     let empty = render_app(&app, 80, 24);
-    assert!(empty.contains("Waiting for per-request prompt counts"));
+    assert!(empty.contains("no requests yet"), "{empty}");
     assert!(!empty.contains("0–1 tokens"));
     assert!(
         app.charts
@@ -1901,7 +1901,8 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
             .unwrap()
             .1
             .height
-            == 7,
+            == 6,
+        "no requests: one line, plus what cache and queue need"
     );
     for (i, prompt) in [12000, 20000, 32768].into_iter().enumerate() {
         app.collector
@@ -1928,11 +1929,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
                 "missing {label} at {width}x{height}"
             );
         }
-        assert!(screen.contains(if width < 180 {
-            "PREV"
-        } else {
-            "PREVIOUS OBSERVED"
-        }));
+        assert!(screen.contains("vs previous"), "{width}x{height}\n{screen}");
     }
     app.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
     assert_eq!(app.request_scroll, 2);
@@ -1959,7 +1956,8 @@ fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
         render_app(&app, width, height);
         let empty_regions = app.charts.regions.borrow().clone();
         let region = |chart| empty_regions.iter().find(|(id, _)| *id == chart).unwrap().1;
-        assert!((7..=17).contains(&region(Chart::Prompt).height));
+        // No requests yet: prompt load keeps only what cache and queue need.
+        assert_eq!(region(Chart::Prompt).height, 6);
         assert!(
             region(Chart::Generation).height <= 7,
             "throughput stays a compact row at {width}x{height}"
@@ -2006,13 +2004,25 @@ fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
         if height >= 40 {
             assert!(region(Chart::Memory).height >= 12);
             assert!(region(Chart::Prefill).height >= 7);
-            assert!(region(Chart::Prompt).height >= 9);
         }
+        // Requests arriving give prompt load its rows back; the throughput
+        // row and every column edge stay where they were.
         populate_dashboard_fixture(&mut app);
         render_app(&app, width, height);
+        let live = app.charts.regions.borrow().clone();
+        let live_region = |chart| live.iter().find(|(id, _)| *id == chart).unwrap().1;
+        assert!(live_region(Chart::Prompt).height >= 7);
+        for chart in [Chart::Generation, Chart::Prefill, Chart::Gpu] {
+            assert_eq!(live_region(chart), region(chart), "{width}x{height}");
+        }
         assert_eq!(
-            *app.charts.regions.borrow(),
-            empty_regions,
+            live.iter()
+                .map(|(chart, area)| (*chart, area.x, area.width))
+                .collect::<Vec<_>>(),
+            empty_regions
+                .iter()
+                .map(|(chart, area)| (*chart, area.x, area.width))
+                .collect::<Vec<_>>(),
             "request arrival must not rearrange the dashboard at {width}x{height}"
         );
         app.collector.current.pressure = "RED".into();
@@ -2021,7 +2031,7 @@ fn overview_sizes_histories_by_importance_and_keeps_idle_geometry_stable() {
         render_app(&app, width, height);
         assert_eq!(
             *app.charts.regions.borrow(),
-            empty_regions,
+            live,
             "transient counters must not move the charts at {width}x{height}"
         );
     }
@@ -4310,7 +4320,7 @@ fn overview_review_fixes_keep_one_reading_per_fact_and_identity_during_alarms() 
     for label in [
         "Qwen3.8-27B-oQ4e-mtp",
         "Qwen3.8-27B-oQ4e-mtp",
-        "LIVE · ",
+        "LIVE",
         "⚠ MEMORY BOTTLENECK",
         "a acknowledge",
     ] {
@@ -4350,7 +4360,7 @@ fn host_row_leads_with_memory_compression_and_paging_on_macos_only() {
         "wired 3.2 GiB",
         "4.6 GiB stored in 1.6 GiB · 2.9× ratio",
         "comp 3.0 · decomp 1.5 MiB/s",
-        "1.6/36.0 GiB 4%",
+        "4% of RAM",
     ] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
@@ -4678,4 +4688,21 @@ fn meters_fill_in_eighths_and_the_wide_process_table_shows_one_per_share() {
     assert!(rendered.contains("MEM%"), "{rendered}");
     // 40% of three cells is 9.6 eighths: one full cell and a quarter.
     assert!(rendered.contains("█▎  40.0%"), "{rendered}");
+}
+
+#[test]
+fn paging_scales_to_its_warning_rate_so_a_trickle_stays_small() {
+    // 124 KiB/s of steady page-ins: well under the 1 MiB/s warning rate.
+    let history = VecDeque::from(vec![ChartPoint::new(Some(124 * 1024), Tone::Green); 40]);
+    let buffer = render_chart(ChartMetric::Swap, &history, 60);
+    let column = 57;
+    let bar = (0..12).filter(|y| buffer[(column, *y)].bg == GREEN).count();
+    assert!(bar <= 2, "a trickle is a short bar, not a slab: {bar} rows");
+    // The warning rate is the reference line, yellow and labelled with its value.
+    let guide = (0..12)
+        .find(|y| buffer[(40, *y)].symbol() == "┄")
+        .expect("warning line drawn");
+    assert_eq!(buffer[(40, guide)].fg, YELLOW);
+    let label: String = (0..14).map(|x| buffer[(x, guide)].symbol()).collect();
+    assert!(label.contains("1.0 MiB/s"), "{label}");
 }

@@ -136,15 +136,18 @@ fn comparison_is_explicit_and_handles_zero_and_provider_changes() {
     history.observe(&[usage("previous", 22710)]);
     assert_eq!(
         compact_comparison(&usage("latest", 20055), history.entries.back()),
-        "Δ −2,655 (−11.7%) · PREVIOUS OBSERVED 22,710"
+        "Δ −2,655 (−11.7%) vs previous"
     );
+    // A different runtime is not comparable, and the first request has nothing
+    // before it: no line rather than a placeholder.
     let mut other = usage("other", 20055);
     other.model = "different".into();
-    assert!(compact_comparison(&other, history.entries.back()).contains("different provider/model"));
+    assert_eq!(compact_comparison(&other, history.entries.back()), "");
+    assert_eq!(compact_comparison(&other, None), "");
     history.observe(&[usage("zero", 0)]);
     assert_eq!(
         compact_comparison(&usage("new", 10), history.entries.back()),
-        "Δ +10 · PREVIOUS OBSERVED 0"
+        "Δ +10 vs previous"
     );
 }
 
@@ -253,14 +256,18 @@ fn recent_sizes_keep_model_boundaries_and_ignore_future_requests() {
     let summary = size_summary(&history, 3, 100).to_string();
     assert!(summary.contains("RECENT 4"));
     assert!(summary.contains("MEDIAN 20,278 tokens"));
-    assert!(summary.contains("RANGE 20,000–21,000"));
+    assert!(
+        !summary.contains("RANGE"),
+        "the bars and axis show the range"
+    );
     assert!(!summary.contains("40,000"));
     let mut other = usage("other", 100000);
     other.model = "different".into();
     history.observe(&[other]);
     assert_eq!(
         size_summary(&history, 5, 100).to_string(),
-        " RECENT 1 · newest at right"
+        "",
+        "one request has no typical size"
     );
 }
 
@@ -357,7 +364,7 @@ fn every_visible_bar_has_a_size_at_supported_sizes() {
             "CACHED —",
             "22:23:15",
             "UTC",
-            "PREVIOUS OBSERVED",
+            "vs previous",
         ] {
             assert!(text.contains(label), "missing {label} at {width}x{height}");
         }
@@ -400,7 +407,8 @@ fn selection_survives_a_jump_and_overflow_and_zero_stays_zero() {
     );
     let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
     assert!(text.contains("100,000 tokens"));
-    assert!(text.contains("0–150,000 tokens · auto"));
+    assert!(text.contains("0–150,000 tokens"));
+    assert!(!text.contains("auto"));
     assert!(text.contains("MEDIAN 12,000 tokens"));
     assert!(!text.contains('!'));
 }
@@ -479,12 +487,11 @@ fn prompt_sizes_and_cache_render_without_growth_warnings() {
     let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
     for label in [
         "LIVE",
-        "OBSERVED",
+        "vs previous",
         "40,000 tokens",
         "CACHED 90%",
         "4,000 uncached",
         "MEDIAN 20,000 tokens",
-        "RANGE 10,000–40,000",
         "10.0k",
         "12.0k",
         "20.0k",

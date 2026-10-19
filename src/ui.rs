@@ -394,7 +394,11 @@ impl App {
         } else {
             (5 + available.saturating_sub(35) / 3).min(JOURNAL_MAX_HEIGHT)
         };
+        // With no requests yet, prompt load is one line: the row keeps only
+        // what cache and queue need in their compact forms, and the rest goes
+        // to the host charts until there is something to draw.
         let request_height = match (compact, devices) {
+            _ if self.collector.request_history.len() == 0 => 6,
             (true, true) => 6,
             (true, false) => 7,
             (false, _) => (available * 28 / 100).clamp(9, REQUEST_MAX_HEIGHT),
@@ -654,7 +658,19 @@ impl App {
             .rev()
             .take(visible_count)
             .all(|point| point.value.is_none());
+        // Paging and compression are judged against their warning rates: the
+        // axis never shrinks below one, so a trickle stays a small bar and the
+        // threshold has a place on the chart.
+        let warning = match metric {
+            ChartMetric::Swap => Some(self.thresholds.swap_warn_rate),
+            ChartMetric::Compression => Some(self.thresholds.compression_warn_rate),
+            _ => None,
+        };
         let scale = chart_scale(history, metric, visible_count);
+        let scale = match warning {
+            Some(rate) => (0, scale.1.max(crate::chart_scale::ceiling(rate, 1))),
+            None => scale,
+        };
         let top_axis = chart_axis_label(metric, scale.1);
         let (average, peak) = chart_stats_for_width(history, metric, visible_count);
         let window = format!(
@@ -1137,18 +1153,33 @@ impl App {
             ];
             plot_height
         ];
+        // The reference line: a rate chart's warning threshold where it has
+        // one, otherwise the middle of the axis.
+        let guide_row = match warning {
+            Some(rate) => trace_point(chart_display_value(metric, rate, scale), plot_height)
+                .map(|(row, _)| row)
+                .filter(|row| row + 1 < plot_height),
+            None => (!paging_idle).then_some(plot_height.saturating_sub(1) / 2),
+        };
         for (row, row_cells) in cells.iter_mut().enumerate() {
             let guide = if row + 1 == plot_height {
-                Some('─')
-            } else if row == plot_height.saturating_sub(1) / 2 && !paging_idle {
-                Some('┄')
+                Some(('─', Tone::Muted))
+            } else if Some(row) == guide_row {
+                Some((
+                    '┄',
+                    if warning.is_some() {
+                        Tone::Yellow
+                    } else {
+                        Tone::Muted
+                    },
+                ))
             } else {
                 None
             };
-            if let Some(glyph) = guide {
+            if let Some((glyph, tone)) = guide {
                 row_cells.fill(TraceCell {
                     glyph,
-                    tone: Tone::Muted,
+                    tone,
                     fill: false,
                 });
             }
@@ -1262,13 +1293,10 @@ impl App {
                 format!("{top_axis} ")
             } else if row + 1 == plot_height {
                 format!("{} ", chart_axis_label(metric, scale.0))
-            } else if row == plot_height.saturating_sub(1) / 2
-                && !paging_idle
-                && scale.1.saturating_sub(scale.0) > 1
-            {
+            } else if Some(row) == guide_row && scale.1.saturating_sub(scale.0) > 1 {
                 format!(
                     "{} ",
-                    chart_axis_label(metric, scale.0 + (scale.1 - scale.0) / 2)
+                    chart_axis_label(metric, warning.unwrap_or(scale.0 + (scale.1 - scale.0) / 2))
                 )
             } else {
                 String::new()

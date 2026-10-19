@@ -182,11 +182,20 @@ impl Navigation {
                 match key {
                     KeyCode::Left | KeyCode::Right => (
                         !(area.y < current.bottom() && current.y < area.bottom()),
+                        0,
                         (y - cy).abs() * 4 + (x - cx).abs(),
                     ),
+                    // Up and Down go to the adjacent row first, by the gap
+                    // between edges: a short panel must not lose to a tall
+                    // one further away just because their centres differ.
                     _ => (
                         !(area.x < current.right() && current.x < area.right()),
-                        (y - cy).abs() * 4 + (x - cx).abs(),
+                        if key == KeyCode::Down {
+                            i32::from(area.y) - i32::from(current.bottom())
+                        } else {
+                            i32::from(current.y) - i32::from(area.bottom())
+                        },
+                        (x - cx).abs(),
                     ),
                 }
             })
