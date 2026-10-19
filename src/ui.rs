@@ -3,9 +3,9 @@
 use crate::app::App;
 use crate::chart_navigation::Chart;
 use crate::chart_render::{
-    chart_axis_label, chart_columns_for_plot, chart_display_value, chart_inactive_rate_label,
-    chart_scale, chart_stat_label, chart_stats_for_width, chart_window_label,
-    stretch_chart_columns, trace_connector, trace_point, TraceCell, TraceStyle,
+    bar_cells, chart_axis_label, chart_columns_for_plot, chart_display_value,
+    chart_inactive_rate_label, chart_scale, chart_stat_label, chart_stats_for_width,
+    chart_window_label, stretch_chart_columns, trace_connector, trace_point, TraceCell, TraceStyle,
 };
 use crate::cli::VERSION;
 use crate::config::PAGING_ACTIVE_ENTER_RATE;
@@ -1130,7 +1130,27 @@ impl App {
         let mut point_rows = vec![None; plot_width];
         let mut connect_before = vec![false; plot_width];
         let mut previous_point = None;
-        for (column, point) in visible_points.iter().enumerate() {
+        // Generation comes in bursts of a few seconds per request: bars from
+        // zero read better than a line broken into short steps.
+        let bars = metric == ChartMetric::Generation;
+        if bars {
+            for (column, point) in visible_points.iter().enumerate() {
+                let Some(value) = point.value else {
+                    continue;
+                };
+                let display_value = chart_display_value(metric, value, scale);
+                for (height, glyph) in bar_cells(display_value, plot_height)
+                    .into_iter()
+                    .enumerate()
+                {
+                    cells[plot_height - 1 - height][column] = TraceCell {
+                        glyph,
+                        tone: point.tone,
+                    };
+                }
+            }
+        }
+        for (column, point) in visible_points.iter().enumerate().filter(|_| !bars) {
             let Some(value) = point.value else {
                 previous_point = None;
                 continue;
@@ -1209,21 +1229,29 @@ impl App {
             )];
             let mut run = String::new();
             let mut run_tone = None;
-            for cell in row_cells.iter().take(plot_width).copied() {
-                let (cell, tone) = (cell.glyph, cell.tone);
-                if run_tone != Some(tone) {
-                    if let Some(tone) = run_tone {
-                        spans.push(Span::styled(
-                            std::mem::take(&mut run),
-                            Style::default().fg(tone.color()),
-                        ));
-                    }
-                    run_tone = Some(tone);
+            // A full block is drawn as a filled cell: terminals leave a gap
+            // between rows of glyphs, but not of backgrounds.
+            let style = |(tone, filled): (Tone, bool)| {
+                let style = Style::default().fg(tone.color());
+                if filled {
+                    style.bg(tone.color())
+                } else {
+                    style
                 }
-                run.push(cell);
+            };
+            for cell in row_cells.iter().take(plot_width).copied() {
+                let filled = cell.glyph == '█';
+                let key = (cell.tone, filled);
+                if run_tone != Some(key) {
+                    if let Some(key) = run_tone {
+                        spans.push(Span::styled(std::mem::take(&mut run), style(key)));
+                    }
+                    run_tone = Some(key);
+                }
+                run.push(if filled { ' ' } else { cell.glyph });
             }
-            if let Some(tone) = run_tone {
-                spans.push(Span::styled(run, Style::default().fg(tone.color())));
+            if let Some(key) = run_tone {
+                spans.push(Span::styled(run, style(key)));
             }
             lines.push(Line::from(spans));
         }

@@ -222,6 +222,7 @@ fn draw_bar(
     color: Color,
     ceiling: u64,
 ) {
+    let queued = usage.queued;
     if area.is_empty() {
         return;
     }
@@ -247,10 +248,18 @@ fn draw_bar(
             continue;
         }
         let cached_part = cached.saturating_sub(u64::from(row) * 8).min(8) as usize;
-        let (glyph, fg, bg) = if cached_part == part {
+        // Full cells are filled backgrounds: terminals leave a gap between
+        // rows of block glyphs. A queued request is hatched: not running yet.
+        let (glyph, fg, bg) = if queued {
+            (if part == 8 { "░" } else { blocks[part] }, color, PANEL)
+        } else if cached_part == part && part == 8 {
+            (" ", GREEN, GREEN)
+        } else if cached_part == part {
             (blocks[part], GREEN, PANEL)
         } else if cached_part > 0 && part == 8 {
             (blocks[cached_part], GREEN, color)
+        } else if part == 8 {
+            (" ", color, color)
         } else {
             // A partial cell has an empty area too: keep its measured height
             // and leave a mixed cell unsplit, so equal cache ratios never flip
@@ -380,7 +389,9 @@ pub(super) fn draw(
     let entry = &history.entries[index];
     let previous = index.checked_sub(1).and_then(|i| history.entries.get(i));
     let color = if live { CYAN } else { BLUE };
-    let state = if live {
+    let state = if live && entry.usage.queued {
+        "QUEUED"
+    } else if live {
         "LIVE"
     } else if entry.usage.completed {
         "REPORTED"

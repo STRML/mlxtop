@@ -621,6 +621,8 @@ pub(crate) struct RequestUsage {
     /// or the prefill phase; a completed record supplies its final average.
     pub output_tps: Option<f64>,
     pub completed: bool,
+    /// Waiting in the server's queue, not yet running.
+    pub queued: bool,
     pub ttft_ms: Option<u64>,
     pub observed_at: Option<SystemTime>,
 }

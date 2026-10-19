@@ -89,7 +89,21 @@ pub(crate) fn chart_scale(
     metric: ChartMetric,
     width: usize,
 ) -> (u64, u64) {
-    if matches!(metric, ChartMetric::Generation | ChartMetric::Prefill) {
+    if metric == ChartMetric::Generation {
+        // Bars stand on zero, so their height is the rate itself.
+        (
+            0,
+            crate::chart_scale::ceiling(
+                history
+                    .iter()
+                    .skip(history.len().saturating_sub(width))
+                    .filter_map(|point| point.value)
+                    .max()
+                    .unwrap_or(0),
+                10,
+            ),
+        )
+    } else if metric == ChartMetric::Prefill {
         crate::chart_scale::range(
             history
                 .iter()
@@ -249,6 +263,18 @@ pub(crate) fn chart_display_delta(
     let left = chart_display_value(metric, left, scale) as f64;
     let right = chart_display_value(metric, right, scale) as f64;
     (left - right).abs()
+}
+
+/// A bar's cells from the bottom up for a 0–100 display value: full cells,
+/// then the eighth-block that tops it. A measured rate above zero always shows.
+pub(crate) fn bar_cells(value: u64, height: usize) -> Vec<char> {
+    const BLOCKS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    let eighths = (value.min(100) as usize * height * 8 + 50) / 100;
+    let eighths = if value > 0 { eighths.max(1) } else { 0 };
+    (0..height)
+        .map(|row| BLOCKS[eighths.saturating_sub(row * 8).min(8)])
+        .take_while(|glyph| *glyph != ' ')
+        .collect()
 }
 
 pub(crate) fn trace_point(value: u64, height: usize) -> Option<(usize, char)> {

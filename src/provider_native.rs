@@ -631,6 +631,7 @@ pub(super) fn apply_mlx_serve_sessions(result: &mut LlmTelemetry, value: &Value,
                 output: Some(output),
                 output_tps: None,
                 completed: false,
+                queued: false,
                 ttft_ms: None,
                 observed_at: Some(now),
             })

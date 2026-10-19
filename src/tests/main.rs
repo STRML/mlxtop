@@ -303,6 +303,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
             cached: Some(prompt / 2),
             output: Some(1200),
             completed: index < 5,
+            queued: false,
             ttft_ms: None,
             output_tps: Some(35.5 + (5 - index) as f64),
             observed_at: Some(now - Duration::from_secs((5 - index) as u64 * 10)),
@@ -349,6 +350,7 @@ pub(super) fn populate_single_idle_fixture(app: &mut App) {
             cached: None,
             output: Some(346),
             completed: false,
+            queued: false,
             ttft_ms: None,
             output_tps: Some(40.0),
             observed_at: Some(now - Duration::from_secs(25)),
@@ -731,7 +733,13 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
         for label in labels {
             assert!(screen.contains(label), "missing {label}\n{screen}");
         }
-        assert_eq!(screen.contains('●'), last.is_some(), "{screen}");
+        if metric == ChartMetric::Generation {
+            // A bar of filled cells (blank in text) cutting the guides, not a point.
+            assert!(screen.contains("┄ ┄") && screen.contains("─ ─"), "{screen}");
+            assert!(!screen.contains('●'), "{screen}");
+        } else {
+            assert_eq!(screen.contains('●'), last.is_some(), "{screen}");
+        }
         if last.is_none() {
             assert!(!screen.contains("window avg"));
         }
@@ -1798,6 +1806,7 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
             output: Some(100),
             completed: false,
             observed_at: Some(SystemTime::now()),
+            queued: false,
             ttft_ms: None,
             output_tps: None,
         }];
@@ -1882,6 +1891,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
                 cached: Some(prompt / 2),
                 output: Some(40),
                 completed: true,
+                queued: false,
                 ttft_ms: None,
                 output_tps: None,
                 observed_at: Some(SystemTime::now()),
@@ -2407,6 +2417,18 @@ fn numeric_axes_keep_units_and_only_percentages_use_zero_to_one_hundred() {
 }
 
 #[test]
+fn bars_fill_whole_cells_then_an_eighth_block_and_never_vanish() {
+    assert_eq!(bar_cells(0, 4), Vec::<char>::new());
+    assert_eq!(bar_cells(100, 4), ['█'; 4]);
+    assert_eq!(bar_cells(50, 4), ['█', '█']);
+    // 60% of 4 rows is 19.2 eighths: two full cells and a three-eighth top.
+    assert_eq!(bar_cells(60, 4), ['█', '█', '▃']);
+    // A measured rate too small for an eighth still shows.
+    assert_eq!(bar_cells(1, 4), ['▁']);
+    assert_eq!(bar_cells(250, 2), ['█', '█'], "clamped to the plot");
+}
+
+#[test]
 fn throughput_axes_follow_visible_workload_and_zoom() {
     let history = VecDeque::from([
         ChartPoint::new(Some(20_000), Tone::Cyan),
@@ -2414,18 +2436,22 @@ fn throughput_axes_follow_visible_workload_and_zoom() {
         ChartPoint::new(Some(355), Tone::Yellow),
         ChartPoint::new(Some(360), Tone::Red),
     ]);
-    let wide = chart_scale(&history, ChartMetric::Generation, 4);
-    let zoomed = chart_scale(&history, ChartMetric::Generation, 3);
+    let wide = chart_scale(&history, ChartMetric::Prefill, 4);
+    let zoomed = chart_scale(&history, ChartMetric::Prefill, 3);
     assert!(wide.1 >= 20_000);
     assert!(zoomed.0 >= 250 && zoomed.1 <= 450);
-    assert_eq!(chart_scale(&history, ChartMetric::Prefill, 3), zoomed);
+    // Generation bars stand on zero; the ceiling still follows the visible peak.
+    assert_eq!(chart_scale(&history, ChartMetric::Generation, 3).0, 0);
+    let generation = chart_scale(&history, ChartMetric::Generation, 3);
+    assert!(generation.1 >= 360 && generation.1 <= 450, "{generation:?}");
+    assert!(chart_scale(&history, ChartMetric::Generation, 4).1 >= 20_000);
     assert_eq!(chart_stat_label(ChartMetric::Generation, Some(355)), "35.5");
     assert_eq!(
-        chart_display_value(ChartMetric::Generation, zoomed.0, zoomed),
+        chart_display_value(ChartMetric::Prefill, zoomed.0, zoomed),
         0
     );
     assert_eq!(
-        chart_display_value(ChartMetric::Generation, zoomed.1, zoomed),
+        chart_display_value(ChartMetric::Prefill, zoomed.1, zoomed),
         100
     );
     let columns = chart_columns_for_plot(&history, 3, ChartMetric::Generation, 10, zoomed);
