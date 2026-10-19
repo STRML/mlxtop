@@ -140,6 +140,33 @@ pub(crate) fn telemetry_source(sample: &Sample) -> String {
     }
 }
 
+/// A short duration for people: "38s", "4m 12s", "1h 5m".
+pub(crate) fn duration_label(seconds: f64) -> String {
+    let seconds = if seconds.is_finite() {
+        seconds.max(0.0).round() as u64
+    } else {
+        0
+    };
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
+/// The one prompt being prefilled right now, as (done, total), when there is
+/// exactly one: concurrent prefills have no single progress.
+pub(crate) fn prefill_progress(sample: &Sample) -> Option<(u64, u64)> {
+    let mut prefilling = sample.llm_requests.iter().filter_map(|request| {
+        request
+            .prefilled
+            .filter(|done| !request.queued && !request.completed && *done < request.prompt)
+            .map(|done| (done, request.prompt))
+    });
+    let only = prefilling.next()?;
+    prefilling.next().is_none().then_some(only)
+}
+
 /// A spinner frame that advances with every sample, from the sample's clock.
 pub(crate) fn activity_frame(sample: &Sample) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];

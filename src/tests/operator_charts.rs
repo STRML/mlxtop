@@ -47,6 +47,7 @@ fn latency_requires_explicit_measurement_and_deduplicates_requests() {
         completed: true,
         observed_at: Some(SystemTime::now()),
         queued: false,
+        prefilled: None,
         ttft_ms: None,
         output_tps: None,
     });
@@ -566,6 +567,7 @@ fn first_token_bars_are_solid_with_eighth_block_tops() {
             completed: true,
             observed_at: Some(SystemTime::now()),
             queued: false,
+            prefilled: None,
             ttft_ms: Some(ttft),
             output_tps: None,
         });

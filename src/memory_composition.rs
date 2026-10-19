@@ -5,46 +5,59 @@
 //! it turns yellow, with a legend reason, once wired memory exceeds the limit.
 use crate::domain::Sample;
 use crate::formatting::bytes;
-use crate::theme::{BLUE, CYAN, DIM, EDGE, MUTED, YELLOW};
+use crate::theme::{BLUE, CYAN, DIM, EDGE, MUTED, PANEL, YELLOW};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-/// One segment: legend name, glyph and color. Glyphs keep kinds distinct
-/// without relying on color.
+/// One segment: legend name and fill. Solid fills that differ in hue (wired,
+/// app) or lightness (compressed, cache) tell kinds apart; free is the track.
 struct Kind {
     name: &'static str,
-    glyph: &'static str,
     color: Color,
 }
 
 const WIRED: Kind = Kind {
     name: "wired",
-    glyph: "█",
     color: BLUE,
 };
 const APP: Kind = Kind {
     name: "app",
-    glyph: "█",
     color: CYAN,
 };
 const COMPRESSED: Kind = Kind {
     name: "comp",
-    glyph: "▓",
-    color: MUTED,
+    color: Color::Rgb(128, 140, 158),
 };
 const CACHE: Kind = Kind {
     name: "cache",
-    glyph: "░",
-    color: MUTED,
+    color: Color::Rgb(84, 98, 120),
 };
 const FREE: Kind = Kind {
     name: "free",
-    glyph: " ",
     color: EDGE,
 };
+
+/// Each kind's fill, in stacking order from the bottom: wired, app,
+/// compressed, cache, free.
+pub(crate) fn kind_colors() -> [Color; 5] {
+    kinds().map(|kind| kind.color)
+}
+
+/// The history's fills: the same hues as the bar, softened toward the panel.
+/// The one-row bar is a small mark and keeps full colour; a chart-sized
+/// stack of saturated blue would outshout every other panel.
+pub(crate) fn history_colors() -> [Color; 5] {
+    kind_colors().map(|color| match (color, PANEL) {
+        (Color::Rgb(r, g, b), Color::Rgb(pr, pg, pb)) => {
+            let mix = |c: u8, p: u8| ((u16::from(c) * 60 + u16::from(p) * 40) / 100) as u8;
+            Color::Rgb(mix(r, pr), mix(g, pg), mix(b, pb))
+        }
+        (color, _) => color,
+    })
+}
 
 /// The GPU wired-memory cap: an explicit `iogpu.wired_limit_mb`, else the
 /// runtime's reported Metal recommended working set.
@@ -105,12 +118,9 @@ pub(crate) fn draw_bar(frame: &mut Frame, area: Rect, sample: &Sample) -> bool {
     let mut x = area.x;
     for (kind, count) in kinds().iter().zip(columns) {
         for _ in 0..count {
-            let cell = &mut frame.buffer_mut()[(x, area.y)];
-            if kind.glyph == " " {
-                cell.set_symbol(" ").set_bg(kind.color);
-            } else {
-                cell.set_symbol(kind.glyph).set_fg(kind.color).set_bg(EDGE);
-            }
+            frame.buffer_mut()[(x, area.y)]
+                .set_symbol(" ")
+                .set_bg(kind.color);
             x += 1;
         }
     }
@@ -126,6 +136,45 @@ pub(crate) fn draw_bar(frame: &mut Frame, area: Rect, sample: &Sample) -> bool {
     true
 }
 
+/// One column of the composition history: wired, app, compressed and cache
+/// stacked from the bottom of `rows` cells at eighth-cell precision, free
+/// above them left empty. A cell two kinds share shows the lower kind as a
+/// block of its height over the upper kind's colour.
+pub(crate) fn paint_column(frame: &mut Frame, x: u16, top: u16, rows: u16, sizes: [u64; 5]) {
+    const BLOCKS: [&str; 8] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇"];
+    let total: u128 = sizes.iter().map(|size| u128::from(*size)).sum();
+    if total == 0 || rows == 0 {
+        return;
+    }
+    let eighths = u128::from(rows) * 8;
+    // Where each used kind ends, in eighths from the bottom.
+    let mut ends = [0_u128; 4];
+    let mut cumulative = 0_u128;
+    for (end, size) in ends.iter_mut().zip(sizes) {
+        cumulative += u128::from(size);
+        *end = (cumulative * eighths + total / 2) / total;
+    }
+    let kind_at = |eighth: u128| ends.iter().position(|end| eighth < *end).unwrap_or(4);
+    let colors = history_colors();
+    for row in 0..rows {
+        let base = u128::from(row) * 8;
+        let lower = kind_at(base);
+        if lower == 4 {
+            break;
+        }
+        let filled = (ends[lower].min(base + 8) - base) as usize;
+        let cell = &mut frame.buffer_mut()[(x, top + rows - 1 - row)];
+        if filled >= 8 {
+            cell.set_symbol(" ").set_bg(colors[lower]);
+        } else {
+            let upper = kind_at(base + filled as u128);
+            cell.set_symbol(BLOCKS[filled])
+                .set_fg(colors[lower])
+                .set_bg(if upper == 4 { PANEL } else { colors[upper] });
+        }
+    }
+}
+
 /// Legend with exact sizes, flowing onto at most `max_lines` rows. Entries
 /// never split; ones that do not fit are dropped whole.
 pub(crate) fn legend(sample: &Sample, width: u16, max_lines: usize) -> Vec<Line<'static>> {
@@ -135,46 +184,61 @@ pub(crate) fn legend(sample: &Sample, width: u16, max_lines: usize) -> Vec<Line<
             Style::default().fg(MUTED),
         ))];
     };
-    let mut entries: Vec<(String, Color)> = kinds()
+    // The swatch carries the kind's colour; the words stay in text colour.
+    let mut entries: Vec<(&'static str, Color, String, Color)> = kinds()
         .iter()
         .zip(sizes)
         .filter(|(kind, size)| *size > 0 || kind.name == "free")
         .map(|(kind, size)| {
-            let swatch = if kind.glyph == " " { "□" } else { kind.glyph };
-            (format!("{swatch}{} {}", kind.name, bytes(size)), kind.color)
+            let swatch = if kind.name == "free" { "□" } else { "█" };
+            let text = format!("{} {}", kind.name, bytes(size));
+            (swatch, kind.color, text, MUTED)
         })
         .collect();
     if let Some(limit) = gpu_limit(sample) {
         // Over the limit is worth inspecting; the legend states the reason.
         entries.push(if sample.wired > limit {
-            (format!("┃wired over GPU limit {}", bytes(limit)), YELLOW)
+            (
+                "┃",
+                YELLOW,
+                format!("wired over GPU limit {}", bytes(limit)),
+                YELLOW,
+            )
         } else {
-            (format!("┃GPU limit {}", bytes(limit)), Color::White)
+            (
+                "┃",
+                Color::White,
+                format!("GPU limit {}", bytes(limit)),
+                Color::White,
+            )
         });
     }
     if max_lines == 0 {
         return Vec::new();
     }
     let mut lines = vec![Line::default()];
-    for (text, color) in entries {
-        let style = Style::default().fg(if color == EDGE { DIM } else { color });
+    for (swatch, swatch_color, text, text_color) in entries {
+        let swatch_style = Style::default().fg(if swatch_color == EDGE {
+            DIM
+        } else {
+            swatch_color
+        });
+        let entry_width = Line::from(format!("{swatch}{text}")).width();
         let line = lines.last_mut().unwrap();
-        let spaced = Span::styled(format!("  {text}"), style);
-        if line.spans.is_empty() || line.width() + spaced.width() > usize::from(width) {
-            let span = Span::styled(text, style);
-            if span.width() > usize::from(width) {
+        let fits = line.spans.is_empty() || line.width() + 2 + entry_width <= usize::from(width);
+        if !fits || entry_width > usize::from(width) {
+            if entry_width > usize::from(width) || lines.len() == max_lines {
                 continue;
             }
-            if !line.spans.is_empty() {
-                if lines.len() == max_lines {
-                    continue;
-                }
-                lines.push(Line::default());
-            }
-            lines.last_mut().unwrap().spans.push(span);
-        } else {
-            line.spans.push(spaced);
+            lines.push(Line::default());
         }
+        let line = lines.last_mut().unwrap();
+        if !line.spans.is_empty() {
+            line.spans.push(Span::raw("  "));
+        }
+        line.spans.push(Span::styled(swatch, swatch_style));
+        line.spans
+            .push(Span::styled(text, Style::default().fg(text_color)));
     }
     lines
 }

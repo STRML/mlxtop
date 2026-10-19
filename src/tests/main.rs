@@ -69,6 +69,7 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
             prefill_history: VecDeque::new(),
             cache_history: VecDeque::new(),
             load_history: VecDeque::new(),
+            composition_history: VecDeque::new(),
             swap_history: VecDeque::new(),
             compression_history: VecDeque::new(),
             platform: Platform::MacOs,
@@ -120,6 +121,7 @@ pub(super) fn view_with_impact(impact: &str, updated: &str) -> CollectorView {
         prefill_history: VecDeque::new(),
         cache_history: VecDeque::new(),
         load_history: VecDeque::new(),
+        composition_history: VecDeque::new(),
         swap_history: VecDeque::new(),
         compression_history: VecDeque::new(),
         platform: Platform::MacOs,
@@ -304,6 +306,7 @@ pub(super) fn populate_dashboard_fixture(app: &mut App) {
             output: Some(1200),
             completed: index < 5,
             queued: false,
+            prefilled: None,
             ttft_ms: None,
             output_tps: Some(35.5 + (5 - index) as f64),
             observed_at: Some(now - Duration::from_secs((5 - index) as u64 * 10)),
@@ -351,6 +354,7 @@ pub(super) fn populate_single_idle_fixture(app: &mut App) {
             output: Some(346),
             completed: false,
             queued: false,
+            prefilled: None,
             ttft_ms: None,
             output_tps: Some(40.0),
             observed_at: Some(now - Duration::from_secs(25)),
@@ -1829,6 +1833,7 @@ fn operator_grid_shows_available_metrics_and_conditionally_shows_latency() {
             completed: false,
             observed_at: Some(SystemTime::now()),
             queued: false,
+            prefilled: None,
             ttft_ms: None,
             output_tps: None,
         }];
@@ -1915,6 +1920,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
                 output: Some(40),
                 completed: true,
                 queued: false,
+                prefilled: None,
                 ttft_ms: None,
                 output_tps: None,
                 observed_at: Some(SystemTime::now()),
@@ -4739,4 +4745,72 @@ fn short_rate_panels_draw_a_sparkline_instead_of_a_hint() {
         columns.windows(2).any(|pair| pair[0] != pair[1]),
         "idle samples stay empty"
     );
+}
+
+#[test]
+fn memory_history_stacks_what_ram_holds_over_a_pressure_ribbon() {
+    let gib = 1024 * MIB;
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    // A model loads halfway: wired jumps, cache is squeezed; pressure turns yellow.
+    app.collector.load_history = (0..40)
+        .map(|i| ChartPoint::new(Some(90), if i < 20 { Tone::Green } else { Tone::Yellow }))
+        .collect();
+    app.collector.composition_history = (0..40)
+        .map(|i| {
+            Some(if i < 20 {
+                [4 * gib, 12 * gib, 2 * gib, 14 * gib, 4 * gib]
+            } else {
+                [20 * gib, 6 * gib, 2 * gib, 4 * gib, 4 * gib]
+            })
+        })
+        .collect();
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
+    terminal
+        .draw(|frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "memory",
+                &app.collector.load_history,
+                ChartMetric::Memory,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let fills = crate::memory_composition::history_colors();
+    let wired_rows = |x: u16| (0..20).filter(|y| buffer[(x, *y)].bg == fills[0]).count();
+    // Before the load little is wired; after it, much more.
+    assert!(
+        wired_rows(57) > wired_rows(30) + 2,
+        "{} vs {}",
+        wired_rows(57),
+        wired_rows(30)
+    );
+    // The ribbon under the stack carries each sample's pressure grade.
+    let ribbon = (0..20)
+        .rev()
+        .find(|y| buffer[(57, *y)].symbol() == "▀")
+        .expect("pressure ribbon");
+    assert_eq!(buffer[(57, ribbon)].fg, YELLOW);
+    assert_eq!(buffer[(30, ribbon)].fg, GREEN);
+    // No line: the stack's top is the level.
+    assert!((0..20).all(|y| buffer[(57, y)].symbol() != "━"));
+
+    // Without composition counters (Linux), memory stays an area chart.
+    app.collector.composition_history = std::iter::repeat_n(None, 40).collect();
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(60, 20)).unwrap();
+    terminal
+        .draw(|frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "memory",
+                &app.collector.load_history,
+                ChartMetric::Memory,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    assert!((0..20).any(|y| buffer[(57, y)].symbol() == "━"));
 }
