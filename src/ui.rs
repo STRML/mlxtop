@@ -3,9 +3,10 @@
 use crate::app::App;
 use crate::chart_navigation::Chart;
 use crate::chart_render::{
-    bar_cells, chart_axis_label, chart_columns_for_plot, chart_display_value,
-    chart_inactive_rate_label, chart_scale, chart_stat_label, chart_stats_for_width,
-    chart_window_label, stretch_chart_columns, trace_connector, trace_point, TraceCell, TraceStyle,
+    bar_cells, chart_axis_label, chart_columns, chart_columns_for_plot, chart_display_value,
+    chart_form, chart_inactive_rate_label, chart_scale, chart_stat_label, chart_stats_for_width,
+    chart_window_label, stretch_chart_columns, trace_connector, trace_point, ChartForm, TraceCell,
+    TraceStyle,
 };
 use crate::cli::VERSION;
 use crate::config::PAGING_ACTIVE_ENTER_RATE;
@@ -17,7 +18,7 @@ use crate::formatting::{
 use crate::host::Platform;
 use crate::processes::process_provider;
 use crate::theme::{
-    centered_rect, panel, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED, YELLOW,
+    centered_rect, faint, panel, CYAN, DIM, EDGE, MUTED, PANEL, PANEL_RAISED, RED, YELLOW,
 };
 use crate::{
     gpu_dashboard, memory_composition, model_dashboard, operator_charts, process_memory,
@@ -1099,13 +1100,22 @@ impl App {
         // sample: smoothing uses only the causal prefix and the current chart
         // resolution. Auto-scaling changes coordinates, never captured values,
         // ordering or colors; there is no future-sample smoothing.
-        let points = chart_columns_for_plot(history, visible_count, metric, plot_height, scale);
+        let form = chart_form(metric);
+        let bars = form == ChartForm::Bars;
+        // Bars show each sample as measured; the line's deadband, which keeps a
+        // trace from jittering, would misstate a bar's height.
+        let points = if bars {
+            chart_columns(history, visible_count)
+        } else {
+            chart_columns_for_plot(history, visible_count, metric, plot_height, scale)
+        };
         let visible_points = stretch_chart_columns(&points, plot_width);
         let mut cells = vec![
             vec![
                 TraceCell {
                     glyph: ' ',
                     tone: Tone::Muted,
+                    fill: None,
                 };
                 plot_width
             ];
@@ -1123,6 +1133,7 @@ impl App {
                 row_cells.fill(TraceCell {
                     glyph,
                     tone: Tone::Muted,
+                    fill: None,
                 });
             }
         }
@@ -1130,22 +1141,30 @@ impl App {
         let mut point_rows = vec![None; plot_width];
         let mut connect_before = vec![false; plot_width];
         let mut previous_point = None;
-        // Generation comes in bursts of a few seconds per request: bars from
-        // zero read better than a line broken into short steps.
-        let bars = metric == ChartMetric::Generation;
         if bars {
+            // With two or more columns per sample, the last one of each stays
+            // empty so neighbouring bars read as separate samples.
+            let samples = points.len().max(1);
+            let gaps = plot_width >= 2 * samples;
             for (column, point) in visible_points.iter().enumerate() {
                 let Some(value) = point.value else {
                     continue;
                 };
+                if gaps && (column + 1) * samples / plot_width != column * samples / plot_width {
+                    continue;
+                }
                 let display_value = chart_display_value(metric, value, scale);
-                for (height, glyph) in bar_cells(display_value, plot_height)
-                    .into_iter()
-                    .enumerate()
-                {
+                let mut glyphs = bar_cells(display_value, plot_height);
+                if glyphs.is_empty() {
+                    // A measured zero is a reading, unlike a missing sample:
+                    // it marks the baseline in its grade. Any rate shows.
+                    glyphs.push(if value > 0 { '▁' } else { '─' });
+                }
+                for (height, glyph) in glyphs.into_iter().enumerate() {
                     cells[plot_height - 1 - height][column] = TraceCell {
                         glyph,
                         tone: point.tone,
+                        fill: None,
                     };
                 }
             }
@@ -1168,6 +1187,7 @@ impl App {
             }
             point_rows[column] = Some((row, point.tone));
             cells[row][column] = TraceCell {
+                fill: None,
                 glyph: if previous_point.is_none()
                     && visible_points
                         .get(column + 1)
@@ -1206,6 +1226,18 @@ impl App {
             );
         }
 
+        if form == ChartForm::Area {
+            // The level's body beneath its line, faint so a full chart is not
+            // a solid block; guides stay visible through it.
+            for (column, point) in point_rows.iter().enumerate() {
+                if let Some((row, tone)) = point {
+                    for below in cells.iter_mut().skip(row + 1) {
+                        below[column].fill = Some(*tone);
+                    }
+                }
+            }
+        }
+
         let mut lines = Vec::with_capacity(plot_height);
         for (row, row_cells) in cells.iter().enumerate() {
             let label = if row == 0 && !paging_idle {
@@ -1231,17 +1263,17 @@ impl App {
             let mut run_tone = None;
             // A full block is drawn as a filled cell: terminals leave a gap
             // between rows of glyphs, but not of backgrounds.
-            let style = |(tone, filled): (Tone, bool)| {
+            let style = |(tone, filled, fill): (Tone, bool, Option<Tone>)| {
                 let style = Style::default().fg(tone.color());
-                if filled {
-                    style.bg(tone.color())
-                } else {
-                    style
+                match (filled, fill) {
+                    (true, _) => style.bg(tone.color()),
+                    (false, Some(fill)) => style.bg(faint(fill.color())),
+                    (false, None) => style,
                 }
             };
             for cell in row_cells.iter().take(plot_width).copied() {
                 let filled = cell.glyph == '█';
-                let key = (cell.tone, filled);
+                let key = (cell.tone, filled, cell.fill);
                 if run_tone != Some(key) {
                     if let Some(key) = run_tone {
                         spans.push(Span::styled(std::mem::take(&mut run), style(key)));
