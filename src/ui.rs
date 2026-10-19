@@ -5,8 +5,8 @@ use crate::chart_navigation::Chart;
 use crate::chart_render::{
     bar_cells, chart_axis_label, chart_columns, chart_columns_for_plot, chart_display_value,
     chart_form, chart_inactive_rate_label, chart_scale, chart_stat_label, chart_stats_for_width,
-    chart_window_label, stretch_chart_columns, trace_connector, trace_point, ChartForm, TraceCell,
-    TraceStyle,
+    chart_window_label, meter_cells, stretch_chart_columns, trace_connector, trace_point,
+    ChartForm, TraceCell, TraceStyle,
 };
 use crate::cli::VERSION;
 use crate::config::PAGING_ACTIVE_ENTER_RATE;
@@ -1229,9 +1229,11 @@ impl App {
         if form == ChartForm::Area {
             // The level's body beneath its line, faint so a full chart is not
             // a solid block; guides stay visible through it.
+            // The line's own cell is filled too, so the line is the area's top
+            // edge rather than floating above it.
             for (column, point) in point_rows.iter().enumerate() {
                 if let Some((row, tone)) = point {
-                    for below in cells.iter_mut().skip(row + 1) {
+                    for below in cells.iter_mut().skip(*row) {
                         below[column].fill = Some(*tone);
                     }
                 }
@@ -1483,7 +1485,7 @@ impl App {
                     Constraint::Length(8),
                     Constraint::Length(20),
                     Constraint::Length(8),
-                    Constraint::Length(8),
+                    Constraint::Length(10),
                     Constraint::Length(13),
                     Constraint::Length(11),
                     Constraint::Length(9),
@@ -1538,12 +1540,14 @@ impl App {
                     Cell::from(format!("{:.1}%", process.cpu)),
                 ];
                 if table_mode == 2 {
-                    cells.push(Cell::from(
-                        process
-                            .memory_percent
-                            .map(|value| format!("{value:.1}%"))
-                            .unwrap_or_else(|| "—".into()),
-                    ));
+                    // A three-cell meter on a dim track beside the share of RAM.
+                    cells.push(Cell::from(match process.memory_percent {
+                        Some(value) => Line::from(vec![
+                            Span::styled(meter_cells(value, 3), Style::default().fg(CYAN).bg(EDGE)),
+                            Span::raw(format!(" {value:.1}%")),
+                        ]),
+                        None => Line::from("—"),
+                    }));
                 }
                 cells.push(Cell::from(bytes(process.rss)));
                 if table_mode > 0 {

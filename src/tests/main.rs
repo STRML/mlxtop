@@ -4643,8 +4643,39 @@ fn areas_fill_beneath_their_line_faintly_in_its_grade() {
         .take_while(|bg| *bg == body)
         .collect();
     assert!(!below.is_empty(), "faint body beneath the line");
+    assert_eq!(
+        buffer[(column, line)].bg,
+        body,
+        "the line is the area's top edge"
+    );
     assert!(
         (0..line).all(|y| buffer[(column, y)].bg != body),
         "nothing above it"
     );
+}
+
+#[test]
+fn meters_fill_in_eighths_and_the_wide_process_table_shows_one_per_share() {
+    assert_eq!(meter_cells(0.0, 3), "   ");
+    assert_eq!(meter_cells(100.0, 3), "███");
+    assert_eq!(meter_cells(50.0, 3), "█▌ ");
+    assert_eq!(meter_cells(4.0, 3), "▏  ", "a small share still shows");
+    assert_eq!(meter_cells(250.0, 2), "██");
+
+    let mut app = test_app(1);
+    app.collector.current.llm_processes = vec![LlmProcess {
+        pid: 42,
+        name: "omlx-server".into(),
+        command: "/usr/local/bin/omlx-server --port 8080".into(),
+        rss: 14 << 30,
+        cpu: 3.0,
+        memory_percent: Some(40.0),
+        state: "S".into(),
+        pageins: None,
+        pagein_rate: None,
+    }];
+    let rendered = render_app(&app, 180, 40);
+    assert!(rendered.contains("MEM%"), "{rendered}");
+    // 40% of three cells is 9.6 eighths: one full cell and a quarter.
+    assert!(rendered.contains("█▎  40.0%"), "{rendered}");
 }

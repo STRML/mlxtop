@@ -293,6 +293,19 @@ pub(crate) fn bar_cells(value: u64, height: usize) -> Vec<char> {
         .collect()
 }
 
+/// A small horizontal meter for a 0–100 share, `cells` wide, filled in
+/// eighths from the left; the unfilled rest is spaces for a track to show.
+pub(crate) fn meter_cells(percent: f64, cells: usize) -> String {
+    const PARTS: [char; 8] = ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+    let eighths = (percent.clamp(0.0, 100.0) / 100.0 * (cells * 8) as f64).round() as usize;
+    (0..cells)
+        .map(|cell| match eighths.saturating_sub(cell * 8).min(8) {
+            0 => ' ',
+            part => PARTS[part - 1],
+        })
+        .collect()
+}
+
 pub(crate) fn trace_point(value: u64, height: usize) -> Option<(usize, char)> {
     if height == 0 {
         return None;
