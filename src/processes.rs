@@ -89,7 +89,15 @@ pub(crate) fn snapshot(rows: Vec<ProcessRow>) -> ProcessSnapshot {
         } = row;
         let lower = format!("{name} {command}").to_ascii_lowercase();
         if let Some(detected) = process_provider(&name, &command) {
-            provider.get_or_insert(detected);
+            // oMLX 0.7.1 can serve a model through a Splash child process on
+            // a private port; its API still belongs to oMLX, so a Splash
+            // engine never outranks another runtime, whatever the ps order.
+            if provider
+                .as_deref()
+                .is_none_or(|current| current == "Splash")
+            {
+                provider = Some(detected);
+            }
             llm_count += 1;
             llm_rss += rss;
             llm_cpu += cpu;

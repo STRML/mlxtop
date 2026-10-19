@@ -41,6 +41,17 @@ fn high_gpu_usage_is_evidence_not_a_slowdown_or_alarm() {
     sample.llm_generation_tps_live = false;
     sample.llm_status = "idle".into();
     assert_eq!(assess(&sample).next, "Idle · waiting for the next request.");
+    // oMLX says `healthy` after its last request; with nothing active or
+    // queued that is idle too, but only while the reading is fresh.
+    sample.llm_status = "healthy".into();
+    sample.llm_active_requests = Some(0);
+    sample.llm_waiting_requests = Some(0);
+    assert_eq!(assess(&sample).next, "Idle · waiting for the next request.");
+    sample.llm_active_requests = Some(1);
+    assert_eq!(assess(&sample).next, "Live generation rate unavailable.");
+    sample.llm_active_requests = Some(0);
+    sample.llm_observed_at = Some(SystemTime::now() - Duration::from_secs(60));
+    assert_eq!(assess(&sample).next, "Live generation rate unavailable.");
 }
 
 #[test]
