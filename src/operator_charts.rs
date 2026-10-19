@@ -90,7 +90,7 @@ fn panel_area(
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.is_empty() {
+    if inner.is_empty() || subtitle.is_empty() {
         return inner;
     }
     frame.render_widget(
@@ -268,12 +268,7 @@ pub(super) fn queue(
                 Style::default().fg(queued_color),
             )));
         }
-        if area.height >= 5 {
-            lines.push(Line::from(Span::styled(
-                "Enter: history",
-                Style::default().fg(MUTED),
-            )));
-        }
+
         frame.render_widget(Paragraph::new(lines).block(block), area);
         return;
     }
@@ -291,6 +286,7 @@ pub(super) fn queue(
     let ceiling_label = queue_tick(ceiling);
     let counts = format!("active {} waiting {}", count(active), count(waiting));
     let split_counts = narrow && counts.len() > usize::from(area.width.saturating_sub(2));
+    let overview = window.is_some();
     let window = chart_window_label(
         if window.is_some() {
             visible
@@ -299,18 +295,14 @@ pub(super) fn queue(
         },
         interval,
     );
+    // On the Overview the axis ticks give the range and the top bar the
+    // window, so the plot gets the row; an expanded queue names its window.
     let subtitle = if split_counts {
         format!("active {}", count(active))
+    } else if overview {
+        String::new()
     } else {
-        [
-            format!("0–{ceiling_label} req · auto · {window}"),
-            format!("0–{ceiling_label} req · {window}"),
-            format!("req · {window}"),
-            window,
-        ]
-        .into_iter()
-        .find(|text| Line::from(text.as_str()).width() <= usize::from(area.width.saturating_sub(2)))
-        .unwrap_or_default()
+        window
     };
     let plot = panel_area(
         frame,
@@ -492,12 +484,7 @@ pub(super) fn latency(frame: &mut Frame, area: Rect, history: &History, zoom: u1
         1,
     );
     let subtitle = latest
-        .map(|p| {
-            format!(
-                "0–{ceiling} ms · auto · {zoom}× · {}",
-                telemetry_age(Some(p.2))
-            )
-        })
+        .map(|p| format!("0–{ceiling} ms · {}", telemetry_age(Some(p.2))))
         .unwrap_or_default();
     let plot = panel_area(frame, area, "first token", caption, subtitle, None);
     let values: Vec<_> = history.timings.iter().map(|p| p.1).collect();

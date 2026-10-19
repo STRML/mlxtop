@@ -632,9 +632,8 @@ fn compact_resource_panels_use_capacity_bars_without_false_axes() {
         });
         assert!(screen.contains(label), "{screen}");
         assert!(!screen.contains("100"));
-        if metric == ChartMetric::Gpu {
-            assert!(screen.contains("Enter: history"));
-        }
+        // The row under the gauge is a sparkline of the history, not a hint.
+        assert!(!screen.contains("Enter: history"), "{screen}");
     }
     // Memory keeps its exact reading with the bar instead of a flat 3-row trace.
     let screen = render_view(40, 5, |frame| {
@@ -2117,7 +2116,7 @@ fn recent_journal_wraps_messages_without_overwriting_the_next_event() {
     );
     assert!(lines[3].contains("12:00:00"));
     assert!(lines[3].contains("older event"));
-    assert!(lines[5].contains("latest first · 2 events"));
+    assert!(lines[5].contains(" 2 events "));
 }
 
 #[test]
@@ -2168,7 +2167,7 @@ fn overview_remains_useful_at_a_classic_eighty_column_size() {
 #[test]
 fn process_table_adapts_to_medium_terminals() {
     let rendered = render_app(&test_app(1), 100, 40);
-    for label in ["MLX TOP", "SELECTED PROCESS", "PAGEIN/s", "OS STATE"] {
+    for label in ["LLM PROCESSES", "SELECTED PROCESS", "PAGEIN/s", "OS STATE"] {
         assert!(rendered.contains(label), "missing process label: {label}");
     }
     assert!(!rendered.contains("MEM%"));
@@ -4705,4 +4704,39 @@ fn paging_scales_to_its_warning_rate_so_a_trickle_stays_small() {
     assert_eq!(buffer[(40, guide)].fg, YELLOW);
     let label: String = (0..14).map(|x| buffer[(x, guide)].symbol()).collect();
     assert!(label.contains("1.0 MiB/s"), "{label}");
+}
+
+#[test]
+fn short_rate_panels_draw_a_sparkline_instead_of_a_hint() {
+    let history: VecDeque<_> = (0..30)
+        .map(|i| ChartPoint::new((i % 3 != 0).then_some(300 + i as u64 * 5), Tone::Green))
+        .collect();
+    let app = test_app(0);
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(40, 4)).unwrap();
+    terminal
+        .draw(|frame| {
+            app.render_indicator_chart(
+                frame,
+                frame.area(),
+                "generation",
+                &history,
+                ChartMetric::Generation,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+    assert!(!text.contains("Enter: history"), "{text}");
+    // Bars in the sample's grade, with gaps where nothing was generating.
+    let columns: Vec<bool> = (1..39)
+        .map(|x| (1..3).any(|y| buffer[(x, y)].bg == GREEN))
+        .collect();
+    assert!(
+        columns.iter().filter(|filled| **filled).count() >= 15,
+        "{columns:?}"
+    );
+    assert!(
+        columns.windows(2).any(|pair| pair[0] != pair[1]),
+        "idle samples stay empty"
+    );
 }

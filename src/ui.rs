@@ -5,8 +5,8 @@ use crate::chart_navigation::Chart;
 use crate::chart_render::{
     bar_cells, chart_axis_label, chart_columns, chart_columns_for_plot, chart_display_value,
     chart_form, chart_inactive_rate_label, chart_scale, chart_stat_label, chart_stats_for_width,
-    chart_window_label, meter_cells, stretch_chart_columns, trace_connector, trace_point,
-    ChartForm, TraceCell, TraceStyle,
+    chart_window_label, meter_cells, normalize_chart_value, stretch_chart_columns, trace_connector,
+    trace_point, ChartForm, TraceCell, TraceStyle,
 };
 use crate::cli::VERSION;
 use crate::config::PAGING_ACTIVE_ENTER_RATE;
@@ -565,6 +565,61 @@ impl App {
         );
     }
 
+    /// Recent history as bars across `area`, for panels too short for axes:
+    /// zero at the bottom, the visible peak (or 100%) at the top, one column
+    /// per sample in its grade, the newest at the right.
+    pub(crate) fn draw_sparkline(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        history: &VecDeque<ChartPoint>,
+        metric: ChartMetric,
+    ) {
+        if area.is_empty() {
+            return;
+        }
+        let points = chart_columns(history, usize::from(area.width));
+        let percent = matches!(
+            metric,
+            ChartMetric::Memory | ChartMetric::Gpu | ChartMetric::Cache
+        );
+        let ceiling = if percent {
+            100
+        } else {
+            points
+                .iter()
+                .filter_map(|point| point.value)
+                .max()
+                .unwrap_or(0)
+                .max(1)
+        };
+        for (column, point) in points.iter().enumerate() {
+            let Some(value) = point.value else {
+                continue;
+            };
+            let value = if percent {
+                normalize_chart_value(metric, value)
+            } else {
+                value
+            };
+            let display = (u128::from(value) * 100 / u128::from(ceiling)).min(100) as u64;
+            let mut glyphs = bar_cells(display, usize::from(area.height));
+            if glyphs.is_empty() {
+                glyphs.push(if value > 0 { '▁' } else { '─' });
+            }
+            let color = point.tone.color();
+            for (height, glyph) in glyphs.into_iter().enumerate() {
+                let cell = &mut frame.buffer_mut()
+                    [(area.x + column as u16, area.bottom() - 1 - height as u16)];
+                if glyph == '█' {
+                    cell.set_symbol(" ").set_bg(color);
+                } else {
+                    cell.set_symbol(&glyph.to_string()).set_fg(color);
+                }
+            }
+        }
+    }
+
     pub(crate) fn gpu_chart_title(&self) -> &'static str {
         if self.collector.current.has_nvidia_gpus() && self.collector.current.gpus.len() > 1 {
             "GPU max"
@@ -1018,9 +1073,11 @@ impl App {
                     Rect::new(inner.x, inner.y, inner.width, 1),
                 );
                 if inner.height > 1 {
-                    frame.render_widget(
-                        Paragraph::new("Enter: history").style(Style::default().fg(MUTED)),
-                        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                    self.draw_sparkline(
+                        frame,
+                        Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1),
+                        history,
+                        metric,
                     );
                 }
             } else {
@@ -1082,10 +1139,7 @@ impl App {
         // and its gaps, but do not invent a 1 B/s ceiling for an idle window.
         let paging_idle = metric.is_byte_rate() && peak == Some(0);
         if rate_chart && inner.height < 3 {
-            frame.render_widget(
-                Paragraph::new("Enter: history").style(Style::default().fg(MUTED)),
-                inner,
-            );
+            self.draw_sparkline(frame, inner, history, metric);
             return;
         }
 
@@ -1356,7 +1410,7 @@ impl App {
                     .alignment(Alignment::Right),
             )
             .title_bottom(Line::from(Span::styled(
-                format!(" latest first · {} events ", self.collector.signals.len()),
+                format!(" {} events ", self.collector.signals.len()),
                 Style::default().fg(MUTED),
             )));
         let inner = block.inner(area);
@@ -1366,7 +1420,7 @@ impl App {
         }
         if self.collector.signals.is_empty() {
             frame.render_widget(
-                Paragraph::new("No events yet. Requests and resource changes appear here.")
+                Paragraph::new("No events yet.")
                     .style(Style::default().fg(MUTED))
                     .wrap(Wrap { trim: true }),
                 inner,
@@ -1443,7 +1497,7 @@ impl App {
     pub(crate) fn draw_journal(&self, frame: &mut Frame, area: Rect) {
         let rows = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(5), Constraint::Min(10)])
+            .constraints([Constraint::Length(3), Constraint::Min(10)])
             .split(area);
         self.draw_journal_header(frame, rows[0]);
         self.draw_journal_events(frame, rows[1]);
@@ -1451,8 +1505,10 @@ impl App {
 
     pub(crate) fn draw_llm_top(&self, frame: &mut Frame, area: Rect) {
         let details = self.collector.current.llm_details.as_deref();
+        // The table title carries the totals; a panel above it only when the
+        // runtime reports engine details worth reading.
         let rows = Layout::vertical([
-            Constraint::Length(if details.is_some() { 5 } else { 4 }),
+            Constraint::Length(if details.is_some() { 3 } else { 0 }),
             Constraint::Min(6),
             Constraint::Length(7),
         ])
@@ -1461,52 +1517,19 @@ impl App {
         let filtered = self.filtered_llm_processes();
         let total_rss = filtered.iter().map(|p| p.rss).sum::<u64>();
         let total_cpu = filtered.iter().map(|p| p.cpu).sum::<f64>();
-        let filter_label = if self.top_filter.is_empty() {
-            "all local LLM processes".to_owned()
-        } else {
-            format!("filter /{}", self.top_filter)
-        };
-        frame.render_widget(
-            Paragraph::new(
-                [
-                    Line::from(Span::styled(
-                        format!(
-                            " {} of {} processes · RSS {} · CPU {:.1}% · sort {}",
-                            filtered.len(),
-                            sample.llm_processes.len(),
-                            bytes(total_rss),
-                            total_cpu,
-                            self.top_sort.label()
-                        ),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(Span::styled(
-                        format!(
-                            " {}{}",
-                            filter_label,
-                            if self.top_filtering {
-                                " · typing · Enter/Esc finish"
-                            } else {
-                                " · ↑↓ select · s sort · / filter · c clear"
-                            }
-                        ),
-                        Style::default().fg(if self.top_filtering { YELLOW } else { MUTED }),
-                    )),
-                ]
-                .into_iter()
-                .chain(details.map(|text| {
-                    Line::from(Span::styled(
-                        format!(" API · {text}"),
-                        Style::default().fg(CYAN),
-                    ))
-                }))
-                .collect::<Vec<_>>(),
-            )
-            .block(panel("MLX TOP · LOCAL OS READINGS", Tone::Cyan)),
-            rows[0],
-        );
+        if let Some(text) = details {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {text}"),
+                    Style::default().fg(CYAN),
+                )))
+                .block(panel(
+                    &format!("{} ENGINE", sample.llm_provider),
+                    Tone::Cyan,
+                )),
+                rows[0],
+            );
+        }
         let selected = self.top_selected.min(filtered.len().saturating_sub(1));
         let visible = rows[1].height.saturating_sub(3).max(1) as usize;
         let start = selected
@@ -1607,12 +1630,32 @@ impl App {
                 Row::new(cells)
             })
             .collect::<Vec<_>>();
-        let title = format!(
-            "LLM PROCESSES · {}–{} of {}",
-            if filtered.is_empty() { 0 } else { start + 1 },
-            (start + visible).min(filtered.len()),
-            filtered.len()
+        let mut title = format!(
+            "LLM PROCESSES · {} · RSS {} · CPU {:.1}% · sort {}",
+            filtered.len(),
+            bytes(total_rss),
+            total_cpu,
+            self.top_sort.label()
         );
+        if filtered.len() > visible {
+            title.push_str(&format!(
+                " · {}–{} of {}",
+                start + 1,
+                (start + visible).min(filtered.len()),
+                filtered.len()
+            ));
+        }
+        if !self.top_filter.is_empty() || self.top_filtering {
+            title.push_str(&format!(
+                " · filter /{}{}",
+                self.top_filter,
+                if self.top_filtering {
+                    "▏ · Enter/Esc finish"
+                } else {
+                    ""
+                }
+            ));
+        }
         let table = Table::new(table_rows, widths)
             .header(
                 Row::new(headers).style(Style::default().fg(MUTED).add_modifier(Modifier::BOLD)),
@@ -1646,20 +1689,24 @@ impl App {
             return;
         };
         let provider = process_provider(&process.name, &process.command);
-        let mut detail = vec![Line::from(format!(
-            "CPU {:.1}% · RSS {} · RAM {} · OS {} · PAGEIN {} pages/s",
-            process.cpu,
-            bytes(process.rss),
-            process
-                .memory_percent
-                .map(|v| format!("{v:.1}%"))
-                .unwrap_or_else(|| "—".into()),
-            process.state,
-            process
-                .pagein_rate
-                .map(|v| format!("{v:.1}"))
-                .unwrap_or_else(|| "—".into())
-        ))];
+        // The wide table already shows these; narrower ones drop some columns.
+        let mut detail = Vec::new();
+        if table_mode < 2 {
+            detail.push(Line::from(format!(
+                "CPU {:.1}% · RSS {} · RAM {} · OS {} · PAGEIN {} pages/s",
+                process.cpu,
+                bytes(process.rss),
+                process
+                    .memory_percent
+                    .map(|v| format!("{v:.1}%"))
+                    .unwrap_or_else(|| "—".into()),
+                process.state,
+                process
+                    .pagein_rate
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "—".into())
+            )));
+        }
         if sample
             .process_memory
             .as_ref()
@@ -1704,61 +1751,33 @@ impl App {
         );
     }
 
+    /// One line: how many events, which filter, and how recent the last one
+    /// is. The list below shows the events themselves, newest first.
     pub(crate) fn draw_journal_header(&self, frame: &mut Frame, area: Rect) {
         let filtered_events = self.filtered_journal_events();
         let event_count = filtered_events.len();
         let total_count = self.collector.signals.len();
-        let latest = filtered_events
-            .last()
-            .map(|event| event.summary.as_str())
-            .unwrap_or("waiting for the first recorded event");
-        let latest_tone = filtered_events
-            .last()
-            .map(|event| event.tone)
-            .unwrap_or(Tone::Muted);
-        let latest_age = filtered_events
-            .last()
-            .map(|event| telemetry_age(Some(event.recorded_at)))
-            .unwrap_or_else(|| "age —".into());
+        let mut line = Line::from(Span::styled(
+            if event_count == total_count {
+                format!(" {total_count} events")
+            } else {
+                format!(
+                    " {event_count} {} of {total_count} events",
+                    self.journal_filter.label()
+                )
+            },
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
+        if let Some(event) = filtered_events.last() {
+            line.spans.push(Span::styled(
+                format!(" · latest {}", telemetry_age(Some(event.recorded_at))),
+                Style::default().fg(MUTED),
+            ));
+        }
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(vec![
-                    Span::styled(
-                        " JOURNAL  ",
-                        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        if event_count == total_count {
-                            format!("{total_count} events · f/[/] filter")
-                        } else {
-                            format!(
-                                "{event_count} {} of {total_count} events · f/[/] filter",
-                                self.journal_filter.label(),
-                            )
-                        },
-                        Style::default().fg(Color::White),
-                    ),
-                    Span::styled("  ·  ", Style::default().fg(DIM)),
-                    Span::styled("meaningful changes only", Style::default().fg(MUTED)),
-                ]),
-                Line::from(vec![
-                    Span::styled("  LATEST  ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        format!("{latest} · {latest_age}"),
-                        Style::default().fg(latest_tone.color()),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("  SCOPE   ", Style::default().fg(MUTED)),
-                    Span::styled(
-                        "what changed · why it matters · what recovered",
-                        Style::default().fg(CYAN),
-                    ),
-                    Span::styled("  ·  ↑ newer · ↓ older", Style::default().fg(DIM)),
-                ]),
-            ])
-            .block(panel("EVENT JOURNAL · IMPACT TIMELINE", Tone::Cyan))
-            .wrap(Wrap { trim: true }),
+            Paragraph::new(line).block(panel("JOURNAL", Tone::Cyan)),
             area,
         );
     }
@@ -1789,7 +1808,7 @@ impl App {
             .collect::<Vec<_>>();
         let text = if lines.is_empty() {
             Text::from(Line::from(Span::styled(
-                " waiting for the first recorded event",
+                " No events yet.",
                 Style::default().fg(MUTED),
             )))
         } else {
