@@ -206,6 +206,7 @@ fn mlx_serve_sessions_name_the_model_and_list_only_running_requests() {
             {"model":"Qwen", "phase":"cached", "context_tokens":50000, "generated_tokens":0, "cached_tokens":50000}
         ]}),
         now,
+        &mut BTreeMap::new(),
     );
     assert_eq!(result.model.as_deref(), Some("Qwen"));
     let requests = &result.requests;
@@ -228,11 +229,58 @@ fn mlx_serve_sessions_name_the_model_and_list_only_running_requests() {
         &mut one,
         &json!({"sessions":[{"phase":"decode","context_tokens":50,"generated_tokens":20}]}),
         now,
+        &mut BTreeMap::new(),
     );
     assert_eq!((one.prompt_tokens, one.output_tokens), (Some(30), Some(20)));
     let mut none = LlmTelemetry::default();
-    apply_mlx_serve_sessions(&mut none, &json!({}), now);
+    apply_mlx_serve_sessions(&mut none, &json!({}), now, &mut BTreeMap::new());
     assert!(none.requests.is_empty() && none.model.is_none());
+}
+
+#[test]
+fn mlx_serve_reports_each_requests_own_decode_speed() {
+    let now = SystemTime::now();
+    let mut previous = BTreeMap::new();
+    let sample = |generated: u64| json!({"sessions":[{"model":"Qwen","phase":"decode","context_tokens":1300 + generated,"generated_tokens":generated,"cached_tokens":0,"request_id":7}]});
+    let mut first = LlmTelemetry::default();
+    apply_mlx_serve_sessions(&mut first, &sample(100), now, &mut previous);
+    assert_eq!(
+        first.requests[0].output_tps, None,
+        "one sample measures nothing"
+    );
+    let mut second = LlmTelemetry::default();
+    apply_mlx_serve_sessions(
+        &mut second,
+        &sample(300),
+        now + Duration::from_secs(2),
+        &mut previous,
+    );
+    assert_eq!(second.requests[0].output_tps, Some(100.0));
+    // The prompt is the request's identity: a reused id with a different prompt carries no speed.
+    let mut reused = LlmTelemetry::default();
+    apply_mlx_serve_sessions(
+        &mut reused,
+        &json!({"sessions":[{"phase":"decode","context_tokens":9000,"generated_tokens":10,"request_id":7}]}),
+        now + Duration::from_secs(3),
+        &mut previous,
+    );
+    assert_eq!(reused.requests[0].output_tps, None);
+    // A synthetic slot id is positional, so it never carries one.
+    let mut slots = BTreeMap::new();
+    apply_mlx_serve_sessions(
+        &mut LlmTelemetry::default(),
+        &json!({"sessions":[{"phase":"decode","context_tokens":50,"generated_tokens":5}]}),
+        now,
+        &mut slots,
+    );
+    let mut slot_again = LlmTelemetry::default();
+    apply_mlx_serve_sessions(
+        &mut slot_again,
+        &json!({"sessions":[{"phase":"decode","context_tokens":150,"generated_tokens":105}]}),
+        now + Duration::from_secs(1),
+        &mut slots,
+    );
+    assert_eq!(slot_again.requests[0].output_tps, None);
 }
 
 #[test]
@@ -587,7 +635,12 @@ fn mlx_serve_fallback_ids_follow_the_running_request() {
     let now = SystemTime::now();
     let ids = |sessions: Value| {
         let mut r = LlmTelemetry::default();
-        apply_mlx_serve_sessions(&mut r, &json!({ "sessions": sessions }), now);
+        apply_mlx_serve_sessions(
+            &mut r,
+            &json!({ "sessions": sessions }),
+            now,
+            &mut BTreeMap::new(),
+        );
         r.requests.iter().map(|q| q.id.clone()).collect::<Vec<_>>()
     };
     let decode = |generated: u64| json!({"phase":"decode","context_tokens":700,"generated_tokens":generated});

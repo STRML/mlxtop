@@ -788,7 +788,10 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
 - **mlx-serve:** polls `/metrics` (start the server with `--metrics`; set
   `MLXTOP_PROVIDER_API_KEY` if it has an API key) and `/metrics.json` for the model and
   one entry per running request (prompt, cached and output counts; cache-only sessions
-  are skipped). Generation rate is the delta of `mlx_serve:generation_tokens_live`, which
+  are skipped). Each running request's speed is the growth of its own
+  `generated_tokens`, which counts the tokens its client receives, so a row can be
+  compared directly with the client's own tokens/s while the generation panel reports
+  the whole server. Generation rate is the delta of `mlx_serve:generation_tokens_live`, which
   includes tokens of requests still running. Prefill rate is the growth of
   `mlx_serve:prefill_tokens_live` since the prefill was first seen, over the time to its
   latest advance, because the gauge moves in coarse chunks; it shows nothing until the
