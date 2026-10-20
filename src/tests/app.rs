@@ -385,6 +385,34 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
 }
 
 #[test]
+fn the_static_report_carries_the_prefill_progress() {
+    let sample = Sample {
+        llm_generation_tps: Some(105.0),
+        llm_generation_tps_live: true,
+        llm_prefill_tps: Some(4100.0),
+        llm_prefill_tps_live: true,
+        llm_prefill_tokens_done: Some(40960),
+        llm_prefill_tokens_expected: Some(61455),
+        ..Sample::default()
+    };
+    let text = report(&sample, Platform::MacOs);
+    assert!(
+        text.contains("PREFILL 4100.0 tok/s · 41.0k / 61.5k · 67%"),
+        "{text}"
+    );
+    // An idle prefill gauge is not progress.
+    let idle = Sample {
+        llm_prefill_tokens_done: Some(0),
+        llm_prefill_tokens_expected: Some(0),
+        ..Sample::default()
+    };
+    assert!(
+        report(&idle, Platform::MacOs).contains("SERVING      GEN — · PREFILL — · active —"),
+        "progress needs a target, and an idle gauge has none"
+    );
+}
+
+#[test]
 fn static_report_marks_missing_swap_and_unknown_hardware() {
     let empty = report(&Sample::default(), Platform::MacOs);
     assert!(empty.contains("PAGING       —"));

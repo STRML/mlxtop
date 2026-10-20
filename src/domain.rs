@@ -342,6 +342,9 @@ pub(crate) struct LlmTelemetry {
     pub(crate) generation_tps_live: bool,
     pub(crate) prefill_tps: Option<f64>,
     pub(crate) prefill_tps_live: bool,
+    /// Prompt tokens the prefill in flight has forwarded, and the total it will forward.
+    pub(crate) prefill_tokens_done: Option<u64>,
+    pub(crate) prefill_tokens_expected: Option<u64>,
     pub(crate) output_tokens: Option<u64>,
     pub(crate) prompt_tokens: Option<u64>,
     pub(crate) requests: Vec<RequestUsage>,
@@ -424,6 +427,9 @@ pub(crate) struct Sample {
     pub(crate) llm_generation_tps_live: bool,
     pub(crate) llm_prefill_tps: Option<f64>,
     pub(crate) llm_prefill_tps_live: bool,
+    /// The prefill in flight: tokens forwarded so far and the total it will forward.
+    pub(crate) llm_prefill_tokens_done: Option<u64>,
+    pub(crate) llm_prefill_tokens_expected: Option<u64>,
     pub(crate) llm_output_tokens: Option<u64>,
     pub(crate) llm_prompt_tokens: Option<u64>,
     pub(crate) llm_requests: Vec<RequestUsage>,
@@ -558,6 +564,8 @@ impl Default for Sample {
             llm_generation_tps_live: false,
             llm_prefill_tps: None,
             llm_prefill_tps_live: false,
+            llm_prefill_tokens_done: None,
+            llm_prefill_tokens_expected: None,
             llm_output_tokens: None,
             llm_prompt_tokens: None,
             llm_requests: Vec::new(),

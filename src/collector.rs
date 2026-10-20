@@ -433,6 +433,11 @@ impl Collector {
             && llm_stats
                 .map(|stats| stats.prefill_tps_live)
                 .unwrap_or(false);
+        let prefill_progress = llm_stats.filter(|_| !live_is_stale);
+        sample.llm_prefill_tokens_done =
+            prefill_progress.and_then(|stats| stats.prefill_tokens_done);
+        sample.llm_prefill_tokens_expected =
+            prefill_progress.and_then(|stats| stats.prefill_tokens_expected);
         sample.llm_output_tokens = llm_stats.and_then(|stats| stats.output_tokens).or_else(|| {
             if live_stats.is_none() && use_omlx_log {
                 log_stats.output_tokens
