@@ -294,6 +294,60 @@ fn compact_queue_lists_each_running_request_with_its_rate() {
 }
 
 #[test]
+fn a_taller_queue_lists_every_running_request_and_keeps_the_waiting_row() {
+    let mut history = History::default();
+    let mut sample = live();
+    sample.llm_active_requests = Some(3);
+    sample.llm_waiting_requests = Some(1);
+    sample.llm_requests = [("201", 1200, 30.0), ("202", 800, 41.5), ("203", 40, 12.0)]
+        .into_iter()
+        .map(|(id, out, tps)| domain::RequestUsage {
+            provider: "mlx-serve".into(),
+            model: "test".into(),
+            id: id.into(),
+            prompt: 20,
+            cached: None,
+            output: Some(out),
+            output_tps: Some(tps),
+            completed: false,
+            queued: false,
+            prefilled: None,
+            ttft_ms: None,
+            observed_at: Some(SystemTime::now()),
+        })
+        .collect();
+    history.observe(&sample, 10);
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(44, 8)).unwrap();
+    terminal
+        .draw(|frame| {
+            queue(
+                frame,
+                frame.area(),
+                &history,
+                Duration::from_secs(1),
+                1,
+                None,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let text = (0..8)
+        .map(|y| (0..44).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for label in [
+        "active 3",
+        "201 1.2k · 30.0↓ tok/s",
+        "202 800 · 41.5↓ tok/s",
+        "203 40 · 12.0↓ tok/s",
+        "waiting 1",
+    ] {
+        assert!(text.contains(label), "missing {label}\n{text}");
+    }
+    assert!(!text.contains("more"), "{text}");
+}
+
+#[test]
 fn compact_queue_keeps_exact_counts_when_there_is_no_room_for_a_scale() {
     let mut history = History::default();
     let mut sample = live();

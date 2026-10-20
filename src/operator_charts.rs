@@ -239,9 +239,17 @@ pub(super) fn queue(
     let waiting = last.and_then(|p| p.waiting);
     // Yellow means "worth inspecting": an empty wait queue stays neutral.
     let waiting_color = |queued: bool| if queued { YELLOW } else { MUTED };
+    // Each running request's own rate, when the runtime reports one.
+    let rates: Vec<String> = history
+        .running
+        .iter()
+        .filter_map(|request| running_label(request, usize::from(area.width.saturating_sub(4))))
+        .collect();
     // A short terminal still gets a separate, selectable queue panel with
-    // both exact counts. Expanding it reveals the full history.
-    if area.height <= 5 {
+    // both exact counts. Expanding it reveals the full history. While requests
+    // report their speeds the list keeps the rows, because that is what the
+    // panel is read for; the history returns when nothing is decoding.
+    if area.height <= 5 || (!rates.is_empty() && area.height <= 8) {
         let queued_color = waiting_color(waiting.is_some_and(|n| n > 0));
         let active_label = format!("active {}", count(active));
         let waiting_label = format!("waiting {}", count(waiting));
@@ -268,17 +276,6 @@ pub(super) fn queue(
             ])
         };
         // The counts say how many are running; these say what each one is doing.
-        let rates: Vec<String> = if area.height >= 4 {
-            history
-                .running
-                .iter()
-                .filter_map(|request| {
-                    running_label(request, usize::from(area.width.saturating_sub(4)))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
         if !rates.is_empty() {
             let room = usize::from(area.height.saturating_sub(2)).saturating_sub(1);
             let label = if rates.len() > room {
@@ -293,10 +290,17 @@ pub(super) fn queue(
                     Style::default().fg(CYAN),
                 )));
             }
-            block = block.title_bottom(Line::from(Span::styled(
-                format!(" {waiting_label} "),
-                Style::default().fg(queued_color),
-            )));
+            if lines.len() < usize::from(area.height.saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(
+                    waiting_label.clone(),
+                    Style::default().fg(queued_color),
+                )));
+            } else {
+                block = block.title_bottom(Line::from(Span::styled(
+                    format!(" {waiting_label} "),
+                    Style::default().fg(queued_color),
+                )));
+            }
             frame.render_widget(Paragraph::new(lines).block(block), area);
             return;
         }

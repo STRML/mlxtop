@@ -528,8 +528,23 @@ impl App {
     pub(crate) fn draw_supporting_charts(&self, frame: &mut Frame, area: Rect) {
         let [first, second, third] = overview_grid(area);
         self.draw_request_chart(frame, first.union(second));
-        let [cache, queue] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(third);
+        // The queue lists one row per running request with a speed; when there
+        // are any, it takes the rows that list needs and cache keeps the rest.
+        let running = self
+            .collector
+            .operator_history
+            .running
+            .iter()
+            .filter(|request| request.tps.is_some())
+            .count();
+        let [cache, queue] = if running > 0 {
+            let wanted = (u16::try_from(running).unwrap_or(u16::MAX) + 4)
+                .clamp(5, 8)
+                .min(third.height.saturating_sub(3));
+            Layout::vertical([Constraint::Min(3), Constraint::Length(wanted)]).areas(third)
+        } else {
+            Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(third)
+        };
         self.render_indicator_chart(
             frame,
             cache,

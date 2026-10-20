@@ -22,7 +22,7 @@ fn usage(id: &str, prompt: u64) -> domain::RequestUsage {
 }
 
 #[test]
-fn each_bar_shows_the_whole_requests_tokens_under_its_prompt_size() {
+fn each_bar_shows_the_tokens_it_generated_under_its_prompt_size() {
     let now = SystemTime::now();
     let mut first = usage("a", 12000);
     first.output = Some(160);
@@ -44,8 +44,8 @@ fn each_bar_shows_the_whole_requests_tokens_under_its_prompt_size() {
     let screen = crate::tests::render_view(90, 12, |frame| {
         draw(frame, frame.area(), &history, &sample, 0, 1)
     });
-    // The bar's own size, then the whole request: prompt plus what it generated.
-    for label in ["12.0k", "20.0k", "12.2k", "20.3k"] {
+    // The bar's own size, then the tokens it generated: no subtraction needed.
+    for label in ["12.0k", "20.0k", "160", "300"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
     assert!(
@@ -56,7 +56,7 @@ fn each_bar_shows_the_whole_requests_tokens_under_its_prompt_size() {
     let short = crate::tests::render_view(90, 7, |frame| {
         draw(frame, frame.area(), &history, &sample, 0, 1)
     });
-    assert!(!short.contains("12.2k"), "{short}");
+    assert!(!short.contains("160"), "{short}");
     assert!(short.contains("20.0k"), "{short}");
 }
 

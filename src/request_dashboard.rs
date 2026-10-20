@@ -122,10 +122,12 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
     line
 }
 
-/// One bar's whole request: prompt plus the tokens it has generated so far.
-fn total_label(usage: &domain::RequestUsage, width: u16) -> String {
-    let total = usage.prompt.saturating_add(usage.output.unwrap_or(0));
-    let text = compact_tokens(total);
+/// The tokens a bar's request has generated, so the size above needs no subtraction.
+fn output_label(usage: &domain::RequestUsage, width: u16) -> String {
+    let Some(output) = usage.output.filter(|output| *output > 0) else {
+        return String::new();
+    };
+    let text = compact_tokens(output);
     if text.chars().count() <= usize::from(width) {
         text
     } else {
@@ -345,9 +347,9 @@ pub(super) fn draw(
         .map(|last| last - scroll.min(last));
     let window =
         selected.map(|index| history_window(history, index, area.width.saturating_sub(2), zoom));
-    // The prompt size sets the bar's height; the whole request's tokens go
+    // The prompt size sets the bar's height; the tokens generated so far go
     // under it when the panel can spare the row. Size labels outrank it.
-    let show_totals = area.height >= 8
+    let show_outputs = area.height >= 8
         && window.is_some_and(|(start, visible, _)| {
             history
                 .entries
@@ -587,7 +589,7 @@ pub(super) fn draw(
         2
     };
     let (start, visible, slot_width) = window.unwrap();
-    let footer = 1 + u16::from(show_totals);
+    let footer = 1 + u16::from(show_outputs);
     if inner.height < metadata_height + footer + 1 {
         return;
     }
@@ -636,9 +638,9 @@ pub(super) fn draw(
             }),
             Rect::new(x, plot.bottom(), slot_width, 1),
         );
-        if show_totals {
+        if show_outputs {
             frame.render_widget(
-                Paragraph::new(total_label(&old.usage, slot_width))
+                Paragraph::new(output_label(&old.usage, slot_width))
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(MUTED)),
                 Rect::new(x, plot.bottom() + 1, slot_width, 1),

@@ -8,8 +8,9 @@
   running request with its own decode rate (`↓`), taken from the growth of
   that request's `generated_tokens` in `/metrics.json`, which is the tokens its
   client receives. Prompt load keeps the prompt size as each bar's height and
-  writes the whole request, prompt plus generated tokens, under it when the
-  panel has a spare row.
+  writes the tokens that request has generated under it when the panel has a
+  spare row, so the count needs no subtraction. The queue takes the rows its
+  list needs while anything is decoding.
 
 ## 3.1.0 — 2026-10-19
 
