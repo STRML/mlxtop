@@ -177,12 +177,16 @@ pub(crate) struct App {
     pub(crate) diagnostics_scroll: u16,
     pub(crate) diagnostics_max_scroll: std::cell::Cell<u16>,
     pub(crate) quit: bool,
+    /// Esc at the top level asks before quitting, because quitting discards the session's history.
+    pub(crate) quit_prompt: bool,
     pub(crate) sampler_disconnected: bool,
     pub(crate) alert: Option<ActiveAlert>,
     pub(crate) alert_bells: usize,
     /// Rings the terminal bell; replaced in tests so no BEL reaches stdout.
     pub(crate) bell: fn(),
     pub(crate) critical_episode: bool,
+    /// Whether critical conditions ring the bell and raise the banner (`alarms` in the config).
+    pub(crate) alarms: bool,
     pub(crate) thresholds: Thresholds,
 }
 
@@ -234,11 +238,13 @@ impl App {
             diagnostics_scroll: 0,
             diagnostics_max_scroll: Default::default(),
             quit: false,
+            quit_prompt: false,
             sampler_disconnected: false,
             alert: None,
             alert_bells: 0,
             bell: ring_terminal_bell,
             critical_episode: false,
+            alarms: config.alarms.unwrap_or(true),
             thresholds,
         }
     }
@@ -285,6 +291,9 @@ impl App {
     /// Ring once per critical episode. Acknowledgment silences the episode;
     /// recovery re-arms it. Escalation refreshes the banner without repeating.
     pub(crate) fn track_critical_alert(&mut self, view: &CollectorView) {
+        if !self.alarms {
+            return;
+        }
         let state = critical_state(&view.current);
         if state.is_none() && matches!(view.current.impact.as_str(), "SAMPLING" | "DATA LIMITED") {
             return;
@@ -327,6 +336,15 @@ impl App {
 
     pub(crate) fn handle_key(&mut self, key: KeyEvent) {
         if key.kind != KeyEventKind::Press {
+            return;
+        }
+        if self.quit_prompt {
+            self.quit_prompt = false;
+            let ctrl_c =
+                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+            if ctrl_c || matches!(key.code, KeyCode::Char('y' | 'Y' | 'q') | KeyCode::Enter) {
+                self.quit = true;
+            }
             return;
         }
         if self.diagnostics_open {
@@ -572,7 +590,9 @@ impl App {
                 self.diagnostics_open = true;
                 self.diagnostics_scroll = 0;
             }
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') => self.quit = true,
+            // Esc backs out of whatever is open; with nothing open it asks first.
+            KeyCode::Esc => self.quit_prompt = true,
             KeyCode::Char('a') => {
                 if let Some(alert) = self.alert.take() {
                     diagnostics_log(

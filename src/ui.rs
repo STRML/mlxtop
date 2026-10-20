@@ -61,6 +61,9 @@ impl App {
         self.charts.overview_samples.set(None);
         if area.width < 72 || area.height < 24 {
             self.draw_compact_warning(frame, area);
+            if self.quit_prompt {
+                self.draw_quit_prompt(frame, area);
+            }
             return;
         }
         frame.render_widget(
@@ -104,6 +107,45 @@ impl App {
         if self.help {
             self.draw_help(frame, area);
         }
+        if self.quit_prompt {
+            self.draw_quit_prompt(frame, area);
+        }
+    }
+
+    /// Esc with nothing open: quitting discards the session's charts, prompts and Journal.
+    pub(crate) fn draw_quit_prompt(&self, frame: &mut Frame, area: Rect) {
+        let width = area.width.min(44);
+        let height = area.height.min(5);
+        let popup = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, popup);
+        let key = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let text = vec![
+            Line::from("Session history will be lost."),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("y", key),
+                Span::styled(" / ", Style::default().fg(MUTED)),
+                Span::styled("q", key),
+                Span::styled(" quit · any other key stays", Style::default().fg(MUTED)),
+            ]),
+        ];
+        frame.render_widget(
+            Paragraph::new(text).alignment(Alignment::Center).block(
+                Block::default()
+                    .title(" QUIT MLXTOP? ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(YELLOW))
+                    .style(Style::default().bg(PANEL)),
+            ),
+            popup,
+        );
     }
 
     /// Overview keeps SYSINFO (what is running, and how fresh) visible during an
@@ -2053,7 +2095,7 @@ impl App {
             Line::from("r               reset history, chart zoom and alarm"),
             Line::from("{ / }           change refresh interval (1–60s)"),
             Line::from("a               acknowledge critical system alarm"),
-            Line::from("q / Ctrl-C      quit; ? / h closes help"),
+            Line::from("q / Ctrl-C      quit; Esc asks first · ? / h closes help"),
             Line::from(""),
         ];
         text.extend(match self.tab {

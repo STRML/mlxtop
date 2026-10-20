@@ -807,6 +807,39 @@ fn global_keys_pause_resize_interval_switch_tabs_and_reset() {
     ));
     press(&mut app, &[KeyCode::Char('a')]);
     press(&mut app, &[KeyCode::Esc]);
+    assert!(
+        app.quit_prompt && !app.quit,
+        "Esc asks before discarding history"
+    );
+    press(&mut app, &[KeyCode::Char('y')]);
+    assert!(app.quit);
+}
+
+#[test]
+fn esc_asks_before_quitting_and_any_other_key_stays() {
+    let mut app = test_app(0);
+    press(&mut app, &[KeyCode::Esc]);
+    assert!(app.quit_prompt && !app.quit);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let screen = format!("{:?}", terminal.backend().buffer());
+    assert!(screen.contains("QUIT MLXTOP?"), "the prompt is drawn");
+    // Esc again, or any other key, cancels and is not acted on.
+    press(&mut app, &[KeyCode::Esc]);
+    assert!(!app.quit_prompt && !app.quit);
+    press(&mut app, &[KeyCode::Esc, KeyCode::Char('2')]);
+    assert!(
+        !app.quit && app.tab == 0,
+        "the cancelling key does nothing else"
+    );
+    for confirm in [KeyCode::Char('q'), KeyCode::Char('y'), KeyCode::Enter] {
+        let mut app = test_app(0);
+        press(&mut app, &[KeyCode::Esc, confirm]);
+        assert!(app.quit, "{confirm:?} confirms");
+    }
+    // q alone still quits straight away, as in htop.
+    let mut app = test_app(2);
+    press(&mut app, &[KeyCode::Char('q')]);
     assert!(app.quit);
 }
 

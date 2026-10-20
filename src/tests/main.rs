@@ -48,7 +48,8 @@ const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
     "swap_critical_rate": 25165824,
     "swap_warn_exit": 4194304,
     "compression_warn_rate": 100663296,
-    "compression_warn_exit": 50331648
+    "compression_warn_exit": 50331648,
+    "alarms": false
 }"#;
 
 pub(super) fn test_app(tab: usize) -> App {
@@ -100,11 +101,13 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         diagnostics_scroll: 0,
         diagnostics_max_scroll: Default::default(),
         quit: false,
+        quit_prompt: false,
         sampler_disconnected: false,
         alert: None,
         alert_bells: 0,
         bell: || {},
         critical_episode: false,
+        alarms: true,
         thresholds: Thresholds::default(),
     };
     (app, view_sender)
@@ -1495,6 +1498,22 @@ fn critical_host_conditions_drive_alerts_but_gpu_usage_does_not() {
     assert!(!is_critical_state("THERMAL LIMIT"));
     assert!(!is_critical_state("LLM READY"));
     assert!(!is_critical_state(""));
+}
+
+#[test]
+fn alarms_off_never_rings_or_raises_the_banner() {
+    let (mut app, views) = test_app_with_sender(0);
+    app.alarms = false;
+    let mut critical = view_with_impact("HEAVY PAGING", "12:00:00");
+    critical.current.pressure = "RED".into();
+    views.send(critical).unwrap();
+    app.tick();
+    assert_eq!(app.alert_bells, 0);
+    assert!(app.alert.is_none());
+    assert_eq!(
+        app.collector.current.impact, "HEAVY PAGING",
+        "the reading itself still arrives"
+    );
 }
 
 #[test]
@@ -3844,6 +3863,7 @@ fn every_config_field_reaches_the_resolved_settings() {
         swap_warn_exit,
         compression_warn_exit,
         gpu_warn_exit,
+        alarms,
     } = config.clone();
     let OmxConfig { host, port } = omx.expect("the fixture sets omx");
 
@@ -3880,6 +3900,20 @@ fn every_config_field_reaches_the_resolved_settings() {
         },
         "a Config field was parsed but never reached Thresholds"
     );
+
+    let (commands, _command_receiver) = mpsc::channel();
+    let (_view_sender, views) = mpsc::channel();
+    let app = App::with_sampler(
+        1,
+        60,
+        config.clone(),
+        Sampler {
+            commands,
+            views,
+            handle: None,
+        },
+    );
+    assert_eq!(app.alarms, alarms.expect("the fixture sets alarms"));
 }
 
 /**

@@ -269,7 +269,8 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 | `{` / `}` | Change refresh interval (1–60 seconds) |
 | `a` | Acknowledge the current critical system alarm |
 | `?` / `h` | Help |
-| `q` / `Ctrl-C` | Quit (`Esc` restores an enlarged chart before quitting) |
+| `q` / `Ctrl-C` | Quit |
+| `Esc` | Close help, diagnostics, a filter or an enlarged chart; with nothing open, ask before quitting (`y`, `q` or `Enter` quits, any other key stays) |
 
 ### Diagnostics and runtime setup
 
@@ -345,7 +346,8 @@ stay visible. Enable the audible bell in
 your terminal settings to hear it. `a` dismisses the banner for the rest of
 that episode; a confirmed recovery re-arms the alarm. Missing system counters
 do not count as recovery. High GPU utilization is normal workload activity
-and never triggers this alarm by itself.
+and never triggers this alarm by itself. Set `"alarms": false` in the
+[configuration](#configuration) to turn the bell and banner off.
 
 Diagnostics distinguish measured throughput drops from resource usage. When
 nothing needs action and memory pressure is normal, the assessment reads
@@ -470,6 +472,7 @@ and anything you leave out keeps its built-in default.
 | `swap_warn_exit` | integer | 2 MiB/s | Swap churn below which "PAGING ACTIVE" clears |
 | `compression_warn_rate` | integer | 64 MiB/s | Compression churn that raises "COMPRESSION ACTIVE" |
 | `compression_warn_exit` | integer | 32 MiB/s | Compression churn below which it clears |
+| `alarms` | boolean | true | `false` turns off the critical-condition bell and banner; charts, the assessment and the Journal still show the condition |
 
 Rates are bytes per second; loads are percentages.
 

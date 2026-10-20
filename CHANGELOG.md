@@ -15,6 +15,16 @@
   speed for four seconds after the gauge stops moving, and reads a live zero
   once nothing has been generated for that long.
 
+### Controls
+
+- **`Esc` no longer quits straight away.** It still closes help, diagnostics,
+  a filter or an enlarged chart; with nothing open it asks before quitting,
+  because quitting discards the session's charts and Journal. `q` still quits
+  at once.
+- **`"alarms": false` turns off critical alarms.** One config switch silences
+  the terminal bell and the banner; charts, the assessment and the Journal
+  still show the condition.
+
 ## 3.1.0 — 2026-10-19
 
 A redesigned Overview: every panel draws its data in the form that suits it,

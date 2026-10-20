@@ -105,7 +105,7 @@ your runtime, send it a prompt, and watch Overview while it answers.
 | `p` / `Space` | Pause sampling |
 | `[` `]` | Select an NVIDIA GPU |
 | `d` | Diagnostics and setup help for the current runtime |
-| `?` / `q` | Help / quit |
+| `?` / `q` | Help / quit (`Esc` asks first) |
 
 The [user guide](docs/USER_GUIDE.md) explains every chart, its thresholds and
 where each reading comes from.
