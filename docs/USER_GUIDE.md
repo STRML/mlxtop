@@ -11,6 +11,7 @@ Detailed controls, runtime setup, and explanations of the dashboard readings.
 | Overview | Is memory or paging limiting inference? | Memory pressure and composition, compression, paging, prompt history, throughput, GPU, cache, queue and recent events |
 | Processes | Which process owns the workload? | PID, command, CPU, memory %, RSS, page-ins, OS state and selected runtime details |
 | Journal | What changed during this session? | Request lifecycle, provider/model changes, paging, pressure, compression, GPU, thermal and recovery events |
+| Settings | How is mlxtop configured? | Every `config.json` option with its current value and default, editable in place |
 
 The **top bar** holds the views, a heartbeat spinner that turns with every
 sample (a frozen spinner means sampling stopped or is paused), the refresh
@@ -263,13 +264,15 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 | `1` / `o` | Overview |
 | `2` / `t` | Processes |
 | `3` / `j` | Journal |
+| `4` | Settings |
 | `Tab` / `Shift-Tab` | Next / previous view, including while filtering processes |
 | `p` / `Space` | Pause or resume sampling |
 | `r` | Reset rates, charts and journal |
 | `{` / `}` | Change refresh interval (1–60 seconds) |
 | `a` | Acknowledge the current critical system alarm |
 | `?` / `h` | Help |
-| `q` / `Ctrl-C` | Quit (`Esc` restores an enlarged chart before quitting) |
+| `q` / `Ctrl-C` | Quit |
+| `Esc` | Close help, diagnostics, a filter or an enlarged chart; with nothing open, ask before quitting (`y`, `q` or `Enter` quits, any other key stays) |
 
 ### Diagnostics and runtime setup
 
@@ -325,7 +328,7 @@ space. The complete Journal remains accessible with `3`.
 | `+` / `-` or mouse wheel | Zoom time series together, or selected request bars, from 1× to 8× |
 | `0` | Reset time-series zoom, or selected request bars, to 1× |
 | `Enter` / `Esc` | Enlarge / restore the selected chart |
-| Right-click | Toggle enlarged view |
+| Double-click / right-click | Toggle enlarged view |
 | `Shift-↑` / `Shift-↓` | Inspect newer / older prompt observations |
 | `Home` / `End` | Select newest / oldest prompt |
 | `PgUp` / `PgDn` | Move through prompt history by ten requests |
@@ -345,7 +348,8 @@ stay visible. Enable the audible bell in
 your terminal settings to hear it. `a` dismisses the banner for the rest of
 that episode; a confirmed recovery re-arms the alarm. Missing system counters
 do not count as recovery. High GPU utilization is normal workload activity
-and never triggers this alarm by itself.
+and never triggers this alarm by itself. Set `"alarms": false` in the
+[configuration](#configuration) to turn the bell and banner off.
 
 Diagnostics distinguish measured throughput drops from resource usage. When
 nothing needs action and memory pressure is normal, the assessment reads
@@ -406,6 +410,28 @@ that a corresponding process exists on the machine running mlxtop.
 | `f` / `]` | Next event filter |
 | `[` | Previous event filter |
 
+### Settings
+
+Settings lists every [configuration](#configuration) option, grouped into
+General, oMLX server and Thresholds. A value set in `config.json` is shown in
+white beside its default; an unset one shows the default in grey. Rates are
+entered in MiB/s and stored in bytes per second.
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` / `Home` / `End` | Select a setting |
+| `Enter` | Edit the value, or toggle an on/off setting (`Space` toggles too) |
+| `Enter` while editing | Check and save; an invalid value is refused with the reason |
+| `Esc` while editing | Cancel the edit |
+| `x` / `Delete` | Reset to the default by removing the key |
+
+A saved change takes effect at once and is written to `config.json`, so the
+next start uses it too. Keys the view doesn't know are kept. A file that
+doesn't parse is shown with the error and never overwritten; fix it by hand.
+Changing the refresh interval or history here replaces a value given with
+`--interval` or `--history` for the rest of the session. The file is read
+again each time Settings opens, so edits made by hand show up.
+
 ## Command-line options
 
 ```text
@@ -430,8 +456,9 @@ sessions afterwards.
 
 ## Configuration
 
-Create `~/.config/mlxtop/config.json` to customize mlxtop. All fields are optional,
-and anything you leave out keeps its built-in default.
+Press `4` to edit these options in [Settings](#settings), or create
+`~/.config/mlxtop/config.json` by hand. All fields are optional, and anything
+you leave out keeps its built-in default.
 
 ```json
 {
@@ -470,6 +497,7 @@ and anything you leave out keeps its built-in default.
 | `swap_warn_exit` | integer | 2 MiB/s | Swap churn below which "PAGING ACTIVE" clears |
 | `compression_warn_rate` | integer | 64 MiB/s | Compression churn that raises "COMPRESSION ACTIVE" |
 | `compression_warn_exit` | integer | 32 MiB/s | Compression churn below which it clears |
+| `alarms` | boolean | true | `false` turns off the critical-condition bell and banner; charts, the assessment and the Journal still show the condition |
 
 Rates are bytes per second; loads are percentages.
 

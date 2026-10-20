@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 3.1.1 — 2026-10-20
+
+A Settings tab edits the config in place, `Esc` asks before quitting, one
+switch turns off alarms, a double-click enlarges a chart, and mlx-serve shows
+prefill progress with a steadier decode rate.
 
 ### Dashboards
 
@@ -14,6 +18,23 @@
   the gauge advanced and divides across a six-second span, holds the last real
   speed for four seconds after the gauge stops moving, and reads a live zero
   once nothing has been generated for that long.
+
+### Controls
+
+- **A Settings tab.** Press `4` to see every config option with its value and
+  default, and edit it in place. A change is checked, applied without a
+  restart and saved to `~/.config/mlxtop/config.json`; `x` resets an option to
+  its default. Unknown keys are kept, and a file that doesn't parse is never
+  overwritten.
+- **Double-click enlarges a chart.** A double-click on an Overview chart
+  enlarges it, and another restores it, like `Enter` and right-click.
+- **`Esc` no longer quits straight away.** It still closes help, diagnostics,
+  a filter or an enlarged chart; with nothing open it asks before quitting,
+  because quitting discards the session's charts and Journal. `q` still quits
+  at once.
+- **`"alarms": false` turns off critical alarms.** One config switch silences
+  the terminal bell and the banner; charts, the assessment and the Journal
+  still show the condition.
 
 ## 3.1.0 — 2026-10-19
 

@@ -61,6 +61,9 @@ impl App {
         self.charts.overview_samples.set(None);
         if area.width < 72 || area.height < 24 {
             self.draw_compact_warning(frame, area);
+            if self.quit_prompt {
+                self.draw_quit_prompt(frame, area);
+            }
             return;
         }
         frame.render_widget(
@@ -79,7 +82,8 @@ impl App {
         match self.tab {
             0 => self.draw_overview(frame, outer[1]),
             1 => self.draw_llm_top(frame, outer[1]),
-            _ => self.draw_journal(frame, outer[1]),
+            2 => self.draw_journal(frame, outer[1]),
+            _ => self.draw_settings(frame, outer[1]),
         }
         // After the content: the header names the window the Overview chose.
         self.draw_header(frame, outer[0]);
@@ -104,6 +108,45 @@ impl App {
         if self.help {
             self.draw_help(frame, area);
         }
+        if self.quit_prompt {
+            self.draw_quit_prompt(frame, area);
+        }
+    }
+
+    /// Esc with nothing open: quitting discards the session's charts, prompts and Journal.
+    pub(crate) fn draw_quit_prompt(&self, frame: &mut Frame, area: Rect) {
+        let width = area.width.min(44);
+        let height = area.height.min(5);
+        let popup = Rect::new(
+            area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2,
+            width,
+            height,
+        );
+        frame.render_widget(Clear, popup);
+        let key = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
+        let text = vec![
+            Line::from("Session history will be lost."),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("y", key),
+                Span::styled(" / ", Style::default().fg(MUTED)),
+                Span::styled("q", key),
+                Span::styled(" quit · any other key stays", Style::default().fg(MUTED)),
+            ]),
+        ];
+        frame.render_widget(
+            Paragraph::new(text).alignment(Alignment::Center).block(
+                Block::default()
+                    .title(" QUIT MLXTOP? ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(YELLOW))
+                    .style(Style::default().bg(PANEL)),
+            ),
+            popup,
+        );
     }
 
     /// Overview keeps SYSINFO (what is running, and how fresh) visible during an
@@ -211,23 +254,20 @@ impl App {
                 Line::from("1 OVR"),
                 Line::from("2 TOP"),
                 Line::from("3 JRN"),
+                Line::from("4 SET"),
             ]
         } else {
             vec![
                 Line::from("1 Overview"),
                 Line::from("2 Processes"),
                 Line::from("3 Journal"),
+                Line::from("4 Settings"),
             ]
         };
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(21),
-                Constraint::Length(if compact_tabs { 30 } else { 42 }),
-                Constraint::Fill(1),
-            ])
-            .split(area);
-        let title = Paragraph::new(Line::from(vec![
+        // Tabs sit flush against their dividers so four names fit beside the
+        // title and the heartbeat at 80 columns.
+        let tabs_width = tab_labels.iter().map(Line::width).sum::<usize>() + 3 * 3;
+        let title = Line::from(vec![
             Span::styled(
                 " mlxtop ",
                 Style::default()
@@ -238,8 +278,17 @@ impl App {
                 format!("v{VERSION}"),
                 Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
             ),
-        ]));
-        frame.render_widget(title, chunks[0]);
+        ]);
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(u16::try_from(title.width() + 1).unwrap_or(21)),
+                // One cell keeps the last tab off the status.
+                Constraint::Length(u16::try_from(tabs_width + 1).unwrap_or(50)),
+                Constraint::Fill(1),
+            ])
+            .split(area);
+        frame.render_widget(Paragraph::new(title), chunks[0]);
 
         let tabs = Tabs::new(tab_labels)
             .select(self.tab)
@@ -250,6 +299,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )
             .style(Style::default().fg(MUTED))
+            .padding("", "")
             .divider(Span::styled(" · ", Style::default().fg(DIM)));
         frame.render_widget(tabs, chunks[1]);
         // A heartbeat that turns with every sample, the refresh interval, and
@@ -274,10 +324,15 @@ impl App {
             self.charts.expanded,
             self.charts.overview_samples.get(),
         ) {
-            status.push(Span::styled(
+            let window = Span::styled(
                 format!(" · {}", chart_window_label(samples, self.interval)),
                 Style::default().fg(MUTED),
-            ));
+            );
+            // The window goes first when space is short; the heartbeat stays.
+            let used: usize = status.iter().map(Span::width).sum();
+            if used + window.width() < usize::from(chunks[2].width) {
+                status.push(window);
+            }
         }
         status.push(Span::raw(" "));
         frame.render_widget(
@@ -1959,8 +2014,10 @@ impl App {
                 )
             } else if self.tab == 1 {
                 " Processes ".into()
-            } else {
+            } else if self.tab == 2 {
                 " Journal ".into()
+            } else {
+                " Settings ".into()
             },
             Style::default().fg(CYAN),
         ));
@@ -1996,12 +2053,21 @@ impl App {
                     ("Tab", "view"),
                     ("p", "pause"),
                 ],
-                _ => vec![
+                2 => vec![
                     ("↑↓", "scroll"),
                     ("f", "filter"),
                     ("Tab", "view"),
                     ("r", "reset"),
                     ("p", "pause"),
+                ],
+                _ if self.settings.editing.is_some() => {
+                    vec![("Enter", "save"), ("Esc", "cancel")]
+                }
+                _ => vec![
+                    ("↑↓", "select"),
+                    ("Enter", "edit"),
+                    ("x", "default"),
+                    ("Tab", "view"),
                 ],
             }
         };
@@ -2046,14 +2112,14 @@ impl App {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             )),
-            Line::from("1 / 2 / 3       Overview / Processes / Journal"),
+            Line::from("1 / 2 / 3 / 4   Overview / Processes / Journal / Settings"),
             Line::from("d               diagnostics and runtime setup"),
             Line::from("Tab / Shift-Tab next / previous view"),
             Line::from("p / Space       pause or resume"),
             Line::from("r               reset history, chart zoom and alarm"),
             Line::from("{ / }           change refresh interval (1–60s)"),
             Line::from("a               acknowledge critical system alarm"),
-            Line::from("q / Ctrl-C      quit; ? / h closes help"),
+            Line::from("q / Ctrl-C      quit; Esc asks first · ? / h closes help"),
             Line::from(""),
         ];
         text.extend(match self.tab {
@@ -2061,7 +2127,7 @@ impl App {
                 Line::from("Arrow keys      select a neighboring chart"),
                 Line::from("+ / - / wheel   zoom (time series linked); 0 reset"),
                 Line::from("Enter / Esc     enlarge / restore chart"),
-                Line::from("Mouse click     select chart; right-click enlarge"),
+                Line::from("Mouse click     select chart; double / right-click enlarge"),
                 Line::from("Shift-↑↓        newer / older prompt"),
                 Line::from("Home / End      newest / oldest prompt"),
                 Line::from("PgUp / PgDn     move by ten requests"),
@@ -2076,6 +2142,12 @@ impl App {
                 Line::from("Home / End      first / last process"),
                 Line::from("s               cycle RSS / CPU / PID / name sort"),
                 Line::from("f or /          filter processes; c clears filter"),
+            ],
+            3 => vec![
+                Line::from("↑↓ / Home / End select a setting"),
+                Line::from("Enter           edit, or toggle on / off"),
+                Line::from("x / Delete      reset to the default"),
+                Line::from("Esc             cancel an edit"),
             ],
             _ => vec![
                 Line::from("↑↓ / PgUp/PgDn  newer / older events"),

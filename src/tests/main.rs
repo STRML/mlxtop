@@ -35,7 +35,7 @@ pub(super) fn defaults() -> Thresholds {
  * A config file that sets every supported field to a value that differs
  * from the built-in default and survives normalization unchanged.
  */
-const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
+pub(crate) const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
     "interval": 7,
     "history": 1234,
     "omx": { "host": "10.1.2.3", "port": 9999 },
@@ -48,7 +48,8 @@ const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
     "swap_critical_rate": 25165824,
     "swap_warn_exit": 4194304,
     "compression_warn_rate": 100663296,
-    "compression_warn_exit": 50331648
+    "compression_warn_exit": 50331648,
+    "alarms": false
 }"#;
 
 pub(super) fn test_app(tab: usize) -> App {
@@ -100,12 +101,18 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         diagnostics_scroll: 0,
         diagnostics_max_scroll: Default::default(),
         quit: false,
+        quit_prompt: false,
         sampler_disconnected: false,
         alert: None,
         alert_bells: 0,
         bell: || {},
         critical_episode: false,
+        alarms: true,
         thresholds: Thresholds::default(),
+        settings: crate::settings::Settings::new(std::path::PathBuf::from(
+            "/nonexistent/mlxtop-test/config.json",
+        )),
+        last_click: None,
     };
     (app, view_sender)
 }
@@ -1498,6 +1505,22 @@ fn critical_host_conditions_drive_alerts_but_gpu_usage_does_not() {
 }
 
 #[test]
+fn alarms_off_never_rings_or_raises_the_banner() {
+    let (mut app, views) = test_app_with_sender(0);
+    app.alarms = false;
+    let mut critical = view_with_impact("HEAVY PAGING", "12:00:00");
+    critical.current.pressure = "RED".into();
+    views.send(critical).unwrap();
+    app.tick();
+    assert_eq!(app.alert_bells, 0);
+    assert!(app.alert.is_none());
+    assert_eq!(
+        app.collector.current.impact, "HEAVY PAGING",
+        "the reading itself still arrives"
+    );
+}
+
+#[test]
 fn critical_memory_alarm_survives_missing_counters_and_acknowledgment() {
     let (mut app, views) = test_app_with_sender(0);
     for utilization in [80, 99, 100] {
@@ -1545,12 +1568,12 @@ fn tab_switches_views_and_arrows_stay_contextual() {
     assert_eq!(app.tab, 0);
     assert_eq!(app.charts.focused, Chart::Generation);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    for expected in [1, 2, 0] {
+    for expected in [1, 2, 3, 0] {
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.tab, expected);
         assert!(!app.charts.expanded);
     }
-    for expected in [2, 1, 0] {
+    for expected in [3, 2, 1, 0] {
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(app.tab, expected);
     }
@@ -1974,7 +1997,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
     assert_eq!(app.charts.focused, Chart::Prompt);
     app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
     assert_eq!(app.tab, 1);
-    app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
     assert_eq!(app.tab, 1);
     assert!(!render_app(&app, 100, 40).contains("4 REQ"));
 }
@@ -3844,6 +3867,7 @@ fn every_config_field_reaches_the_resolved_settings() {
         swap_warn_exit,
         compression_warn_exit,
         gpu_warn_exit,
+        alarms,
     } = config.clone();
     let OmxConfig { host, port } = omx.expect("the fixture sets omx");
 
@@ -3880,6 +3904,20 @@ fn every_config_field_reaches_the_resolved_settings() {
         },
         "a Config field was parsed but never reached Thresholds"
     );
+
+    let (commands, _command_receiver) = mpsc::channel();
+    let (_view_sender, views) = mpsc::channel();
+    let app = App::with_sampler(
+        1,
+        60,
+        config.clone(),
+        Sampler {
+            commands,
+            views,
+            handle: None,
+        },
+    );
+    assert_eq!(app.alarms, alarms.expect("the fixture sets alarms"));
 }
 
 /**
