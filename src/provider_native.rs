@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::env;
 use std::time::{Duration, Instant, SystemTime};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Default)]
 pub(super) struct Endpoint {
@@ -402,10 +402,108 @@ impl PrefillWindow {
     }
 }
 
+/// How long a decode speed measured from the last gauge step stays shown once the gauge stops moving.
+const GENERATION_HOLD: Duration = Duration::from_secs(4);
+
+/// How far back a decode speed averages. Long enough to span several server refreshes, short enough
+/// that a request that slows down shows it.
+const GENERATION_WINDOW: Duration = Duration::from_secs(6);
+
+/// mlx-serve's decode speed.
+///
+/// `generation_tokens_live` is a gauge the server refreshes once every two seconds, so a delta between
+/// two one-second polls reads nothing or twice the true speed depending on where the polls land.
+/// Keep the points where the gauge moved instead, and divide across a span several steps wide: the
+/// gauge moves by exactly the tokens generated between two refreshes, whatever the poll rate.
+#[derive(Default)]
+struct GenerationWindow {
+    /// Each point where the gauge advanced: when, and by how much in total.
+    advances: VecDeque<(Instant, f64)>,
+    /// The latest measured speed and when it was taken.
+    last: Option<(f64, Instant)>,
+    /// Whether any poll has been taken yet.
+    polled: bool,
+}
+
+impl GenerationWindow {
+    /// Whether this is the first poll this process takes. A one-shot report keeps the plain interval
+    /// delta for that first poll, because the window needs a second sample before it can read a step.
+    fn first_poll(&mut self) -> bool {
+        !std::mem::replace(&mut self.polled, true)
+    }
+
+    /// Decode tokens/s and whether it is live.
+    ///
+    /// The gauge itself says whether the server is generating: a request that starts, stalls or ends
+    /// simply stops moving it. `num_requests_running` is not used, because it reads 0 between a
+    /// request's phases while in-flight tokens are still held, which would restart the window on
+    /// every hand-off. Nothing is reported until the first gauge step lands: before that there is no
+    /// measurement, and a zero would claim a stalled server.
+    fn rate(&mut self, now: Instant, metrics: &Metrics) -> Option<(f64, bool)> {
+        let live = metrics.sum("mlx_serve:generation_tokens_live")?;
+        // The gauge falling means a restart or a fresh window; its speed cannot be carried over.
+        if self.advances.back().is_some_and(|(_, seen)| *seen > live) {
+            self.advances.clear();
+            self.last = None;
+        }
+        if self.advances.back().is_none_or(|(_, seen)| live > *seen) {
+            self.advances.push_back((now, live));
+        }
+        let (advanced, to) = *self.advances.back()?;
+        if now.saturating_duration_since(advanced) > GENERATION_HOLD {
+            // Nothing has been generated for a hold: the server is idle, stalled or between requests.
+            // The next step starts a fresh window rather than carrying this gap into its average.
+            self.advances.clear();
+            self.last = Some((0.0, now));
+            return Some((0.0, true));
+        }
+        // The newest point at least one window behind the last advance, so the span covers whole steps.
+        let (start, from) = self
+            .advances
+            .iter()
+            .rev()
+            .find(|(at, _)| advanced.saturating_duration_since(*at) >= GENERATION_WINDOW)
+            .or_else(|| self.advances.front())
+            .copied()
+            .unwrap_or((advanced, to));
+        let horizon = GENERATION_WINDOW * 3;
+        while self
+            .advances
+            .front()
+            .is_some_and(|(at, _)| advanced.saturating_duration_since(*at) > horizon)
+        {
+            self.advances.pop_front();
+        }
+        let seconds = advanced.saturating_duration_since(start).as_secs_f64();
+        let rate = (to - from) / seconds;
+        if rate.is_finite() && rate > 0.0 {
+            self.last = Some((rate, now));
+            return Some((rate, true));
+        }
+        self.hold(now)
+    }
+
+    /// The last real speed, shown as an average only while its own step is recent.
+    fn hold(&self, now: Instant) -> Option<(f64, bool)> {
+        self.last
+            .filter(|(rate, at)| {
+                *rate > 0.0 && now.saturating_duration_since(*at) <= GENERATION_HOLD
+            })
+            .map(|(rate, _)| (rate, false))
+    }
+
+    fn reset(&mut self) {
+        // The poll history stays warm: only the measured run is discarded.
+        self.advances.clear();
+        self.last = None;
+    }
+}
+
 #[derive(Default)]
 pub(super) struct MetricsHistory {
     previous: Option<(String, Instant, Metrics)>,
     prefill: PrefillWindow,
+    generation: GenerationWindow,
     /// Start time of the mlx-serve process that answered `/metrics.json` with a 404.
     no_sessions: Option<f64>,
 }
@@ -485,15 +583,37 @@ impl MetricsHistory {
         result: &mut LlmTelemetry,
         now: Instant,
     ) {
-        let done = metrics.sum("mlx_serve:prefill_tokens_live");
-        let expected = metrics.sum("mlx_serve:prefill_tokens_expected");
-        if let Some((done, expected)) = done.zip(expected).filter(|(_, expected)| *expected > 0.0) {
+        let done = metrics.count("mlx_serve:prefill_tokens_live");
+        let expected = metrics.count("mlx_serve:prefill_tokens_expected");
+        result.prefill_tokens_done = done;
+        result.prefill_tokens_expected = expected.filter(|expected| *expected > 0);
+        if let Some((done, expected)) = done
+            .zip(result.prefill_tokens_expected)
+            .map(|(done, expected)| (done as f64, expected as f64))
+        {
             details.push(format!(
                 "prefill {done:.0} / {expected:.0} tokens ({:.0}%)",
                 done / expected * 100.0
             ));
         }
         result.model_memory = metrics.count("mlx_serve:mlx_active_bytes");
+        // The generation gauge is a staircase the server refreshes every two seconds; the stepping
+        // window reads its slope, so the panel never alternates between 0 and twice the true speed.
+        let first = self.generation.first_poll();
+        match self.generation.rate(now, metrics) {
+            Some((generation, live)) => {
+                result.generation_tps = Some(generation);
+                result.generation_tps_live = live;
+            }
+            // A one-shot report has only its cold-start sample, so it keeps the interval delta it
+            // already has rather than claiming nothing was measured.
+            None if first => {}
+            // A running window with no step yet: nothing is known about this request.
+            None => {
+                result.generation_tps = None;
+                result.generation_tps_live = false;
+            }
+        }
         // Always assigned: the generic gauge delta must never stand in for the prefill speed.
         let (tps, live) = self.prefill.rate(now, metrics).unzip();
         result.prefill_tps = tps;
@@ -549,6 +669,10 @@ impl MetricsHistory {
             let elapsed = now.saturating_duration_since(*old_time).as_secs_f64();
             let same_start = metrics.values.get("process_start_time_seconds")
                 == previous.values.get("process_start_time_seconds");
+            if !same_start {
+                // A restarted server's gauges start over, so no earlier speed applies to them.
+                self.generation.reset();
+            }
             if old_provider == provider && elapsed > 0.0 && elapsed <= 5.0 && same_start {
                 result.generation_tps = metrics.delta(previous, &generation).map(|n| n / elapsed);
                 result.prefill_tps = metrics.delta(previous, &prompt).map(|n| n / elapsed);

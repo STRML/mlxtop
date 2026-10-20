@@ -755,6 +755,32 @@ fn idle_charts_label_last_samples_separately_from_session_averages() {
 }
 
 #[test]
+fn the_prefill_chart_shows_how_far_the_prefill_has_got() {
+    let mut app = test_app(0);
+    app.collector.current = Sample {
+        llm_source: TelemetrySource::Live,
+        llm_status: "prefilling".into(),
+        llm_prefill_tps: Some(4100.0),
+        llm_prefill_tps_live: true,
+        llm_prefill_tokens_done: Some(40960),
+        llm_prefill_tokens_expected: Some(61455),
+        ..Sample::default()
+    };
+    let history = VecDeque::from([ChartPoint::new(Some(41000), Tone::Cyan)]);
+    let screen = render_view(90, 8, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "prefill",
+            &history,
+            ChartMetric::Prefill,
+        )
+    });
+    assert!(screen.contains("41.0k / 61.5k · 67%"), "{screen}");
+    assert!(screen.contains("LIVE 4100.0 tok/s"), "{screen}");
+}
+
+#[test]
 fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);

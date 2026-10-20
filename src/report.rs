@@ -3,9 +3,9 @@
 use crate::config::Thresholds;
 use crate::domain::Sample;
 use crate::formatting::{
-    bytes, llm_generation_rate_label, llm_model_label, llm_prefill_rate_label, llm_runtime_label,
-    optional_bytes, optional_tokens, percent, percent_u8, pressure_state_label, rate, signed_rate,
-    telemetry_source,
+    bytes, llm_generation_rate_label, llm_model_label, llm_prefill_progress_label,
+    llm_prefill_rate_label, llm_runtime_label, optional_bytes, optional_tokens, percent,
+    percent_u8, pressure_state_label, rate, signed_rate, telemetry_source,
 };
 use crate::host::Platform;
 use crate::{diagnosis, gpu_dashboard};
@@ -126,9 +126,12 @@ pub(crate) fn write_static(
     }
     writeln!(
         out,
-        "SERVING      {} · {} · active {} · cache {}",
+        "SERVING      {} · {}{} · active {} · cache {}",
         llm_generation_rate_label(sample),
         llm_prefill_rate_label(sample),
+        llm_prefill_progress_label(sample)
+            .map(|progress| format!(" · {progress}"))
+            .unwrap_or_default(),
         sample
             .llm_active_requests
             .map(|value| value.to_string())

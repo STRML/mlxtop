@@ -13,7 +13,8 @@ use crate::config::PAGING_ACTIVE_ENTER_RATE;
 use crate::domain::{ChartMetric, ChartPoint, Tone};
 use crate::formatting::{
     activity_frame, bytes, compact_label, gpu_load_label, llm_generation_rate_label,
-    llm_prefill_rate_label, percent, pressure_state_label, rate, telemetry_age, telemetry_source,
+    llm_prefill_progress_label, llm_prefill_rate_label, percent, pressure_state_label, rate,
+    telemetry_age, telemetry_source,
 };
 use crate::host::Platform;
 use crate::processes::process_provider;
@@ -819,7 +820,12 @@ impl App {
             {
                 Some(llm_prefill_rate_label(sample))
             }
-            ChartMetric::Generation | ChartMetric::Prefill => Some("tok/s".into()),
+            // While a prefill runs, its position replaces the unit: the rate is already in the title,
+            // and 40.9k / 61.5k tells you how long the wait is.
+            ChartMetric::Prefill => {
+                Some(llm_prefill_progress_label(sample).unwrap_or_else(|| "tok/s".into()))
+            }
+            ChartMetric::Generation => Some("tok/s".into()),
             ChartMetric::Memory => None,
             ChartMetric::Gpu => Some(if current == Some(0) {
                 "idle".into()

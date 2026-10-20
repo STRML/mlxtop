@@ -70,6 +70,18 @@ pub(crate) fn llm_prefill_rate_label(sample: &Sample) -> String {
     )
 }
 
+/// The prefill in flight as tokens forwarded over the tokens it will forward, with its percentage.
+pub(crate) fn llm_prefill_progress_label(sample: &Sample) -> Option<String> {
+    let expected = sample.llm_prefill_tokens_expected.filter(|n| *n > 0)?;
+    let done = sample.llm_prefill_tokens_done.unwrap_or(0).min(expected);
+    Some(format!(
+        "{} / {} · {:.0}%",
+        compact_tokens(done),
+        compact_tokens(expected),
+        done as f64 / expected as f64 * 100.0
+    ))
+}
+
 pub(crate) fn percent(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.1}%"))

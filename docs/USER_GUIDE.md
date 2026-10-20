@@ -788,11 +788,16 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
 - **mlx-serve:** polls `/metrics` (start the server with `--metrics`; set
   `MLXTOP_PROVIDER_API_KEY` if it has an API key) and `/metrics.json` for the model and
   one entry per running request (prompt, cached and output counts; cache-only sessions
-  are skipped). Generation rate is the delta of `mlx_serve:generation_tokens_live`, which
-  includes tokens of requests still running. Prefill rate is the growth of
+  are skipped). Generation rate keeps the points where `mlx_serve:generation_tokens_live`
+  advanced and divides across a span of at least six seconds, because the server
+  refreshes that gauge once every two seconds and a one-second delta reads 0 or twice
+  the true speed; the last real speed stays shown, not live, for four seconds after the
+  gauge stops, then the rate reads a live zero. Prefill rate is the growth of
   `mlx_serve:prefill_tokens_live` since the prefill was first seen, over the time to its
   latest advance, because the gauge moves in coarse chunks; it shows nothing until the
-  first chunk lands and is live only while a prefill is running. The last speed stays
+  first chunk lands and is live only while a prefill is running. While it runs, the
+  prefill panel's footer shows `prefill_tokens_live / prefill_tokens_expected` with the
+  percentage. The last speed stays
   shown, not live, for three seconds, replaced by the finished request's own speed when
   it ends inside that time. A server without `/metrics.json` is asked once per restart. Cache reuse is tokens
   restored from the prefix cache over all prompt tokens. Sampling follows the vLLM rules.

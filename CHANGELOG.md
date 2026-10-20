@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Dashboards
+
+- **mlx-serve prefill shows how far it has got.** While a prefill runs, the
+  prefill panel's footer reads `41.0k / 61.5k · 67%` from the server's
+  `prefill_tokens_live` and `prefill_tokens_expected` gauges, and `--once`
+  carries the same figures beside the prefill rate.
+- **mlx-serve decode speed no longer stutters.** The server refreshes
+  `generation_tokens_live` once every two seconds, so a one-second delta read 0
+  or twice the true speed on alternating samples. mlxtop keeps the points where
+  the gauge advanced and divides across a six-second span, holds the last real
+  speed for four seconds after the gauge stops moving, and reads a live zero
+  once nothing has been generated for that long.
+
 ## 3.1.0 — 2026-10-19
 
 A redesigned Overview: every panel draws its data in the form that suits it,
