@@ -8,6 +8,7 @@
   the growth of that request's `generated_tokens` in `/metrics.json`, which is
   the tokens its client receives, so it matches what the client reports while
   the generation panel shows the whole server.
+
 ## 3.1.0 — 2026-10-19
 
 A redesigned Overview: every panel draws its data in the form that suits it,
