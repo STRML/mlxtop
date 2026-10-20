@@ -4,13 +4,12 @@
 
 ### Dashboards
 
-- **Each mlx-serve request shows its own speed.** Prompt load prints the rate
-  under each request's bar once the panel has room, and the queue lists every
-  running request with its own rate. Both come from the growth of that
-  request's `generated_tokens` in `/metrics.json`, which is the tokens its
-  client receives, so a row matches what the client reports while the
-  generation panel shows the whole server. The number carries `↓` because it
-  is a decode rate.
+- **Each mlx-serve request shows its own speed.** The queue lists every
+  running request with its own decode rate (`↓`), taken from the growth of
+  that request's `generated_tokens` in `/metrics.json`, which is the tokens its
+  client receives. Prompt load keeps the prompt size as each bar's height and
+  writes the whole request, prompt plus generated tokens, under it when the
+  panel has a spare row.
 
 ## 3.1.0 — 2026-10-19
 

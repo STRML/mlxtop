@@ -122,23 +122,15 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
     line
 }
 
-/// One bar's output rate, narrowed until it fits the slot.
-fn rate_label(tps: Option<f64>, width: u16) -> String {
-    let Some(tps) = tps.filter(|tps| tps.is_finite()) else {
-        return String::new();
-    };
-    let precise = format!("{tps:.1}↓");
-    let rounded = if tps >= 1000.0 {
-        format!("{:.1}k↓", tps / 1000.0)
+/// One bar's whole request: prompt plus the tokens it has generated so far.
+fn total_label(usage: &domain::RequestUsage, width: u16) -> String {
+    let total = usage.prompt.saturating_add(usage.output.unwrap_or(0));
+    let text = compact_tokens(total);
+    if text.chars().count() <= usize::from(width) {
+        text
     } else {
-        format!("{tps:.0}↓")
-    };
-    for text in [&precise, &rounded] {
-        if text.chars().count() <= usize::from(width) {
-            return text.clone();
-        }
+        String::new()
     }
-    String::new()
 }
 
 fn is_live(entry: &Entry, sample: &Sample, now: SystemTime) -> bool {
@@ -353,16 +345,16 @@ pub(super) fn draw(
         .map(|last| last - scroll.min(last));
     let window =
         selected.map(|index| history_window(history, index, area.width.saturating_sub(2), zoom));
-    // A rate under each size, only when a visible request reports one and the
-    // panel can spare the row: the size labels outrank it.
-    let show_rates = area.height >= 8
+    // The prompt size sets the bar's height; the whole request's tokens go
+    // under it when the panel can spare the row. Size labels outrank it.
+    let show_totals = area.height >= 8
         && window.is_some_and(|(start, visible, _)| {
             history
                 .entries
                 .iter()
                 .skip(start)
                 .take(visible)
-                .any(|entry| entry.usage.output_tps.is_some())
+                .any(|entry| entry.usage.output.is_some_and(|output| output > 0))
         });
     let ceiling = chart_scale::ceiling(
         window
@@ -406,19 +398,7 @@ pub(super) fn draw(
         .border_style(Style::default().fg(DIM))
         .style(Style::default().bg(PANEL));
     if let Some(index) = selected {
-        let mut summary = size_summary(history, index, area.width.saturating_sub(2));
-        if show_rates {
-            // The summary may already end in a space that keeps wide terminals tidy.
-            let trailing = summary
-                .spans
-                .last()
-                .is_some_and(|span| span.content.ends_with(' '));
-            summary.spans.push(Span::styled(
-                if trailing { "· tok/s" } else { " · tok/s" },
-                Style::default().fg(MUTED),
-            ));
-        }
-        block = block.title_bottom(summary);
+        block = block.title_bottom(size_summary(history, index, area.width.saturating_sub(2)));
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -607,7 +587,7 @@ pub(super) fn draw(
         2
     };
     let (start, visible, slot_width) = window.unwrap();
-    let footer = 1 + u16::from(show_rates);
+    let footer = 1 + u16::from(show_totals);
     if inner.height < metadata_height + footer + 1 {
         return;
     }
@@ -656,11 +636,11 @@ pub(super) fn draw(
             }),
             Rect::new(x, plot.bottom(), slot_width, 1),
         );
-        if show_rates {
+        if show_totals {
             frame.render_widget(
-                Paragraph::new(rate_label(old.usage.output_tps, slot_width))
+                Paragraph::new(total_label(&old.usage, slot_width))
                     .alignment(Alignment::Center)
-                    .style(Style::default().fg(if selected { color } else { MUTED })),
+                    .style(Style::default().fg(MUTED)),
                 Rect::new(x, plot.bottom() + 1, slot_width, 1),
             );
         }

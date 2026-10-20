@@ -791,9 +791,10 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   are skipped). Each running request's speed is the growth of its own
   `generated_tokens`, which counts the tokens its client receives, so it can be
   compared directly with the client's own tokens/s while the generation panel reports
-  the whole server. Prompt load writes that number under each request's bar when the
-  panel has a spare row, and the queue lists every running request with its rate.
-  Decode rates carry `↓`; a session still prefilling has no rate yet. Generation rate is the delta of `mlx_serve:generation_tokens_live`, which
+  the whole server. The queue lists every running request with its rate; decode rates
+  carry `↓` and a session still prefilling has none yet. Prompt load keeps the prompt
+  size as a bar's height and writes the whole request, prompt plus generated tokens,
+  under the bar when the panel has a spare row. Generation rate is the delta of `mlx_serve:generation_tokens_live`, which
   includes tokens of requests still running. Prefill rate is the growth of
   `mlx_serve:prefill_tokens_live` since the prefill was first seen, over the time to its
   latest advance, because the gauge moves in coarse chunks; it shows nothing until the
