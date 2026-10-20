@@ -127,11 +127,11 @@ fn rate_label(tps: Option<f64>, width: u16) -> String {
     let Some(tps) = tps.filter(|tps| tps.is_finite()) else {
         return String::new();
     };
-    let precise = format!("{tps:.1}");
+    let precise = format!("{tps:.1}↓");
     let rounded = if tps >= 1000.0 {
-        format!("{:.1}k", tps / 1000.0)
+        format!("{:.1}k↓", tps / 1000.0)
     } else {
-        format!("{tps:.0}")
+        format!("{tps:.0}↓")
     };
     for text in [&precise, &rounded] {
         if text.chars().count() <= usize::from(width) {

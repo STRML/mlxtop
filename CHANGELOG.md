@@ -9,7 +9,8 @@
   running request with its own rate. Both come from the growth of that
   request's `generated_tokens` in `/metrics.json`, which is the tokens its
   client receives, so a row matches what the client reports while the
-  generation panel shows the whole server.
+  generation panel shows the whole server. The number carries `↓` because it
+  is a decode rate.
 
 ## 3.1.0 — 2026-10-19
 

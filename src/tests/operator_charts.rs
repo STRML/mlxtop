@@ -285,12 +285,12 @@ fn compact_queue_lists_each_running_request_with_its_rate() {
         roomy.contains("waiting 1"),
         "waiting moves to the border\n{roomy}"
     );
-    assert!(roomy.contains("105 1.7k · 41.0 tok/s"), "{roomy}");
-    assert!(roomy.contains("106 918 · 54.7 tok/s"), "{roomy}");
+    assert!(roomy.contains("105 1.7k · 41.0↓ tok/s"), "{roomy}");
+    assert!(roomy.contains("106 918 · 54.7↓ tok/s"), "{roomy}");
     // One row of room: the count says another request is hidden.
     let tight = render(4);
     assert!(tight.contains("active 2 · +1 more"), "{tight}");
-    assert!(tight.contains("105 1.7k · 41.0 tok/s"), "{tight}");
+    assert!(tight.contains("105 1.7k · 41.0↓ tok/s"), "{tight}");
 }
 
 #[test]

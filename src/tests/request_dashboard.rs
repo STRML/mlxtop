@@ -44,7 +44,7 @@ fn each_bar_carries_its_own_rate_under_its_size() {
     let screen = crate::tests::render_view(90, 12, |frame| {
         draw(frame, frame.area(), &history, &sample, 0, 1)
     });
-    for label in ["12.0k", "20.0k", "24.5", "38.0"] {
+    for label in ["12.0k", "20.0k", "24.5↓", "38.0↓"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
     assert!(screen.contains("tok/s"), "{screen}");
@@ -52,7 +52,7 @@ fn each_bar_carries_its_own_rate_under_its_size() {
     let short = crate::tests::render_view(90, 7, |frame| {
         draw(frame, frame.area(), &history, &sample, 0, 1)
     });
-    assert!(!short.contains("24.5"), "{short}");
+    assert!(!short.contains("24.5↓"), "{short}");
     assert!(short.contains("20.0k"), "{short}");
 }
 

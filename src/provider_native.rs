@@ -646,7 +646,9 @@ pub(super) fn apply_mlx_serve_sessions(
             // different request between samples and never carries a speed.
             let real = identifier(s, "request_id").filter(|id| id != "0");
             let id = real.clone().unwrap_or_else(|| format!("slot-{index}"));
-            let output_tps = real.as_ref().and_then(|id| {
+            // Prefill sessions move `generated_tokens` by zero; a speed there is not a decode rate.
+            let decoding = s["phase"].as_str() == Some("decode");
+            let output_tps = real.as_ref().filter(|_| decoding).and_then(|id| {
                 let (at, generated, seen_prompt) = previous.get(id)?;
                 let elapsed = now.duration_since(*at).ok()?.as_secs_f64();
                 (elapsed > 0.05 && elapsed <= 5.0 && output >= *generated && *seen_prompt == prompt)

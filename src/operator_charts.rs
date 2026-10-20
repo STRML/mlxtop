@@ -211,9 +211,9 @@ fn running_label(request: &Running, width: usize) -> Option<String> {
     };
     let output = request.output.map(compact_tokens);
     [
-        output.map(|output| format!("{id} {output} · {tps:.1} tok/s")),
-        Some(format!("{id} · {tps:.1} tok/s")),
-        Some(format!("{tps:.1} tok/s")),
+        output.map(|output| format!("{id} {output} · {tps:.1}↓ tok/s")),
+        Some(format!("{id} · {tps:.1}↓ tok/s")),
+        Some(format!("{tps:.1}↓ tok/s")),
     ]
     .into_iter()
     .flatten()
