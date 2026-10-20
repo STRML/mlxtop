@@ -11,10 +11,20 @@ pub(crate) struct Point {
     pub(crate) provider: String,
 }
 
+/// One running request as the latest sample reported it.
+#[derive(Clone)]
+pub(crate) struct Running {
+    pub(crate) id: String,
+    pub(crate) output: Option<u64>,
+    pub(crate) tps: Option<f64>,
+}
+
 #[derive(Clone, Default)]
 pub(super) struct History {
     pub(crate) points: VecDeque<Point>,
     pub(crate) timings: VecDeque<(String, Option<u64>, SystemTime)>,
+    /// The requests running now, in the order the runtime lists them.
+    pub(crate) running: Vec<Running>,
 }
 
 impl History {
@@ -34,6 +44,20 @@ impl History {
         while self.points.len() > limit {
             self.points.pop_front();
         }
+        self.running = if fresh {
+            sample
+                .llm_requests
+                .iter()
+                .filter(|request| !request.completed && !request.queued)
+                .map(|request| Running {
+                    id: request.id.clone(),
+                    output: request.output,
+                    tps: request.output_tps,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         for request in &sample.llm_requests {
             let key = format!("{}\0{}\0{}", request.provider, request.model, request.id);
             if let Some(old) = self.timings.iter_mut().find(|old| old.0 == key) {

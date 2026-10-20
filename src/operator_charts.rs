@@ -2,8 +2,8 @@
 use crate::chart_render::{bar_cells, chart_window_label};
 use crate::chart_scale;
 use crate::domain::Tone;
-use crate::formatting::{count, telemetry_age};
-use crate::operator_history::History;
+use crate::formatting::{compact_tokens, count, telemetry_age};
+use crate::operator_history::{History, Running};
 use crate::theme::{panel, BLUE, CYAN, DIM, MUTED, PANEL, YELLOW};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -202,6 +202,24 @@ fn queue_junction(active: char, waiting: char) -> char {
     }
 }
 
+/// One running request: a short id, tokens out, and its own rate.
+fn running_label(request: &Running, width: usize) -> Option<String> {
+    let tps = request.tps.filter(|tps| tps.is_finite() && *tps >= 0.0)?;
+    let id: String = {
+        let chars: Vec<char> = request.id.chars().collect();
+        chars[chars.len().saturating_sub(6)..].iter().collect()
+    };
+    let output = request.output.map(compact_tokens);
+    [
+        output.map(|output| format!("{id} {output} · {tps:.1} tok/s")),
+        Some(format!("{id} · {tps:.1} tok/s")),
+        Some(format!("{tps:.1} tok/s")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|text| text.chars().count() <= width)
+}
+
 pub(super) fn queue_plot_width(history: &History, width: u16) -> u16 {
     let inner = width.saturating_sub(2);
     let (gutter, _, _) = queue_axis(history, inner, 1, None);
@@ -249,6 +267,39 @@ pub(super) fn queue(
                 Span::styled(request_icons(value, icon, room), Style::default().fg(color)),
             ])
         };
+        // The counts say how many are running; these say what each one is doing.
+        let rates: Vec<String> = if area.height >= 4 {
+            history
+                .running
+                .iter()
+                .filter_map(|request| {
+                    running_label(request, usize::from(area.width.saturating_sub(4)))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !rates.is_empty() {
+            let room = usize::from(area.height.saturating_sub(2)).saturating_sub(1);
+            let label = if rates.len() > room {
+                format!("{active_label} · +{} more", rates.len() - room)
+            } else {
+                active_label.clone()
+            };
+            lines.push(Line::from(Span::styled(label, Style::default().fg(CYAN))));
+            for text in rates.iter().take(room) {
+                lines.push(Line::from(Span::styled(
+                    format!("  {text}"),
+                    Style::default().fg(CYAN),
+                )));
+            }
+            block = block.title_bottom(Line::from(Span::styled(
+                format!(" {waiting_label} "),
+                Style::default().fg(queued_color),
+            )));
+            frame.render_widget(Paragraph::new(lines).block(block), area);
+            return;
+        }
         if area.height >= 3 {
             lines.push(row("active", active, '●', CYAN));
         }

@@ -22,6 +22,41 @@ fn usage(id: &str, prompt: u64) -> domain::RequestUsage {
 }
 
 #[test]
+fn each_bar_carries_its_own_rate_under_its_size() {
+    let now = SystemTime::now();
+    let mut first = usage("a", 12000);
+    first.output_tps = Some(24.5);
+    first.observed_at = Some(now);
+    let mut second = usage("b", 20000);
+    second.output_tps = Some(38.0);
+    second.observed_at = Some(now);
+    let mut history = History::default();
+    history.observe(&[first.clone(), second.clone()]);
+    let sample = Sample {
+        llm_provider: "oMLX".into(),
+        llm_model: "model".into(),
+        llm_source: TelemetrySource::Live,
+        llm_status: "generating".into(),
+        llm_observed_at: Some(now),
+        llm_requests: vec![first, second],
+        ..Sample::default()
+    };
+    let screen = crate::tests::render_view(90, 12, |frame| {
+        draw(frame, frame.area(), &history, &sample, 0, 1)
+    });
+    for label in ["12.0k", "20.0k", "24.5", "38.0"] {
+        assert!(screen.contains(label), "missing {label}\n{screen}");
+    }
+    assert!(screen.contains("tok/s"), "{screen}");
+    // A short panel keeps the size labels and drops the rates.
+    let short = crate::tests::render_view(90, 7, |frame| {
+        draw(frame, frame.area(), &history, &sample, 0, 1)
+    });
+    assert!(!short.contains("24.5"), "{short}");
+    assert!(short.contains("20.0k"), "{short}");
+}
+
+#[test]
 fn polls_update_one_bar_and_absent_requests_remain() {
     let mut history = History::default();
     history.observe(&[usage("a", 12000), usage("b", 20000)]);

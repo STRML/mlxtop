@@ -236,6 +236,64 @@ fn queue_range_and_time_window_use_the_actual_graph_width_after_reserving_ticks(
 }
 
 #[test]
+fn compact_queue_lists_each_running_request_with_its_rate() {
+    let mut history = History::default();
+    let mut sample = live();
+    sample.llm_active_requests = Some(2);
+    sample.llm_waiting_requests = Some(1);
+    sample.llm_requests = [("105", 1742, 41.0), ("106", 918, 54.7)]
+        .into_iter()
+        .map(|(id, out, tps)| domain::RequestUsage {
+            provider: "mlx-serve".into(),
+            model: "test".into(),
+            id: id.into(),
+            prompt: 20,
+            cached: None,
+            output: Some(out),
+            output_tps: Some(tps),
+            completed: false,
+            queued: false,
+            prefilled: None,
+            ttft_ms: None,
+            observed_at: Some(SystemTime::now()),
+        })
+        .collect();
+    history.observe(&sample, 10);
+    let render = |height| {
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(44, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                queue(
+                    frame,
+                    frame.area(),
+                    &history,
+                    Duration::from_secs(1),
+                    1,
+                    None,
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| (0..44).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let roomy = render(5);
+    assert!(roomy.contains("active 2"), "{roomy}");
+    assert!(
+        roomy.contains("waiting 1"),
+        "waiting moves to the border\n{roomy}"
+    );
+    assert!(roomy.contains("105 1.7k · 41.0 tok/s"), "{roomy}");
+    assert!(roomy.contains("106 918 · 54.7 tok/s"), "{roomy}");
+    // One row of room: the count says another request is hidden.
+    let tight = render(4);
+    assert!(tight.contains("active 2 · +1 more"), "{tight}");
+    assert!(tight.contains("105 1.7k · 41.0 tok/s"), "{tight}");
+}
+
+#[test]
 fn compact_queue_keeps_exact_counts_when_there_is_no_room_for_a_scale() {
     let mut history = History::default();
     let mut sample = live();

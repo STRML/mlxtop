@@ -122,6 +122,25 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
     line
 }
 
+/// One bar's output rate, narrowed until it fits the slot.
+fn rate_label(tps: Option<f64>, width: u16) -> String {
+    let Some(tps) = tps.filter(|tps| tps.is_finite()) else {
+        return String::new();
+    };
+    let precise = format!("{tps:.1}");
+    let rounded = if tps >= 1000.0 {
+        format!("{:.1}k", tps / 1000.0)
+    } else {
+        format!("{tps:.0}")
+    };
+    for text in [&precise, &rounded] {
+        if text.chars().count() <= usize::from(width) {
+            return text.clone();
+        }
+    }
+    String::new()
+}
+
 fn is_live(entry: &Entry, sample: &Sample, now: SystemTime) -> bool {
     sample.llm_source == TelemetrySource::Live
         && sample.llm_status != "stale"
@@ -334,6 +353,17 @@ pub(super) fn draw(
         .map(|last| last - scroll.min(last));
     let window =
         selected.map(|index| history_window(history, index, area.width.saturating_sub(2), zoom));
+    // A rate under each size, only when a visible request reports one and the
+    // panel can spare the row: the size labels outrank it.
+    let show_rates = area.height >= 8
+        && window.is_some_and(|(start, visible, _)| {
+            history
+                .entries
+                .iter()
+                .skip(start)
+                .take(visible)
+                .any(|entry| entry.usage.output_tps.is_some())
+        });
     let ceiling = chart_scale::ceiling(
         window
             .map(|(start, visible, _)| {
@@ -376,7 +406,19 @@ pub(super) fn draw(
         .border_style(Style::default().fg(DIM))
         .style(Style::default().bg(PANEL));
     if let Some(index) = selected {
-        block = block.title_bottom(size_summary(history, index, area.width.saturating_sub(2)));
+        let mut summary = size_summary(history, index, area.width.saturating_sub(2));
+        if show_rates {
+            // The summary may already end in a space that keeps wide terminals tidy.
+            let trailing = summary
+                .spans
+                .last()
+                .is_some_and(|span| span.content.ends_with(' '));
+            summary.spans.push(Span::styled(
+                if trailing { "· tok/s" } else { " · tok/s" },
+                Style::default().fg(MUTED),
+            ));
+        }
+        block = block.title_bottom(summary);
     }
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -564,19 +606,19 @@ pub(super) fn draw(
     } else {
         2
     };
-    if inner.height < metadata_height + 2 {
+    let (start, visible, slot_width) = window.unwrap();
+    let footer = 1 + u16::from(show_rates);
+    if inner.height < metadata_height + footer + 1 {
         return;
     }
-
     // Reserve enough horizontal space for every bar's size, including the
     // selection marker. History remains ordinal, with new requests at right.
     let plot = Rect::new(
         inner.x,
         inner.y + metadata_height,
         inner.width,
-        inner.height - metadata_height - 1,
+        inner.height - metadata_height - footer,
     );
-    let (start, visible, slot_width) = window.unwrap();
     let first_x = plot.right() - visible as u16 * slot_width;
     for (offset, old) in history.entries.iter().skip(start).take(visible).enumerate() {
         let x = first_x + offset as u16 * slot_width;
@@ -614,6 +656,14 @@ pub(super) fn draw(
             }),
             Rect::new(x, plot.bottom(), slot_width, 1),
         );
+        if show_rates {
+            frame.render_widget(
+                Paragraph::new(rate_label(old.usage.output_tps, slot_width))
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(if selected { color } else { MUTED })),
+                Rect::new(x, plot.bottom() + 1, slot_width, 1),
+            );
+        }
     }
 }
 

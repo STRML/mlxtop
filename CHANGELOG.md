@@ -4,10 +4,12 @@
 
 ### Dashboards
 
-- **Each mlx-serve request shows its own speed.** Prompt load's rows now read
-  the growth of that request's `generated_tokens` in `/metrics.json`, which is
-  the tokens its client receives, so it matches what the client reports while
-  the generation panel shows the whole server.
+- **Each mlx-serve request shows its own speed.** Prompt load prints the rate
+  under each request's bar once the panel has room, and the queue lists every
+  running request with its own rate. Both come from the growth of that
+  request's `generated_tokens` in `/metrics.json`, which is the tokens its
+  client receives, so a row matches what the client reports while the
+  generation panel shows the whole server.
 
 ## 3.1.0 — 2026-10-19
 
