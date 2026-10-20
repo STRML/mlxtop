@@ -36,6 +36,7 @@ mod request_dashboard;
 mod request_history;
 mod runtime_diagnostics;
 mod sampler;
+mod settings;
 mod swap_usage;
 mod terminal;
 mod theme;

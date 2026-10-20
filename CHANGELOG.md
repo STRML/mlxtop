@@ -17,6 +17,14 @@
 
 ### Controls
 
+- **A Settings tab.** Press `4` to see every config option with its value and
+  default, and edit it in place. A change is checked, applied without a
+  restart and saved to `~/.config/mlxtop/config.json`; `x` resets an option to
+  its default. Unknown keys are kept, and a file that doesn't parse is never
+  overwritten.
+- **Double-click enlarges a chart.** A double-click on an Overview chart
+  enlarges it, and another restores it, like `Enter` and right-click.
+
 - **`Esc` no longer quits straight away.** It still closes help, diagnostics,
   a filter or an enlarged chart; with nothing open it asks before quitting,
   because quitting discards the session's charts and Journal. `q` still quits

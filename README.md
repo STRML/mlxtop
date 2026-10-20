@@ -96,11 +96,12 @@ your runtime, send it a prompt, and watch Overview while it answers.
 | **1 · Overview** | The verdict, memory, compression, paging, prompt load, generation, prefill, GPU, cache, queue and recent events |
 | **2 · Processes** | Model processes and the CPU, memory and page-ins each one uses |
 | **3 · Journal** | Requests and resource changes during the session |
+| **4 · Settings** | Every config option, edited in place and applied without a restart |
 
 | Key | Action |
 | --- | --- |
-| `1` `2` `3` / `Tab` | Switch view |
-| Arrows / click, `Enter` | Select a chart, enlarge it |
+| `1`–`4` / `Tab` | Switch view |
+| Arrows / click, `Enter` / double-click | Select a chart, enlarge or restore it |
 | `+` `-` / wheel | Zoom chart history |
 | `p` / `Space` | Pause sampling |
 | `[` `]` | Select an NVIDIA GPU |
@@ -144,7 +145,9 @@ macOS 11 or later is required. Intel Macs aren't supported.
 ## Configuration
 
 mlxtop works without configuration. To change the refresh rate, history length,
-oMLX endpoint or warning thresholds, create `~/.config/mlxtop/config.json`:
+oMLX endpoint, alarms or warning thresholds, press `4` for **Settings**: changes
+apply at once and are saved to `~/.config/mlxtop/config.json`. You can also edit
+that file by hand:
 
 ```json
 {

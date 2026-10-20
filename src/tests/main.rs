@@ -35,7 +35,7 @@ pub(super) fn defaults() -> Thresholds {
  * A config file that sets every supported field to a value that differs
  * from the built-in default and survives normalization unchanged.
  */
-const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
+pub(crate) const CONFIG_WITH_EVERY_FIELD_SET: &str = r#"{
     "interval": 7,
     "history": 1234,
     "omx": { "host": "10.1.2.3", "port": 9999 },
@@ -109,6 +109,10 @@ pub(super) fn test_app_with_sender(tab: usize) -> (App, Sender<CollectorView>) {
         critical_episode: false,
         alarms: true,
         thresholds: Thresholds::default(),
+        settings: crate::settings::Settings::new(std::path::PathBuf::from(
+            "/nonexistent/mlxtop-test/config.json",
+        )),
+        last_click: None,
     };
     (app, view_sender)
 }
@@ -1564,12 +1568,12 @@ fn tab_switches_views_and_arrows_stay_contextual() {
     assert_eq!(app.tab, 0);
     assert_eq!(app.charts.focused, Chart::Generation);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    for expected in [1, 2, 0] {
+    for expected in [1, 2, 3, 0] {
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.tab, expected);
         assert!(!app.charts.expanded);
     }
-    for expected in [2, 1, 0] {
+    for expected in [3, 2, 1, 0] {
         app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
         assert_eq!(app.tab, expected);
     }
@@ -1993,7 +1997,7 @@ fn requests_dashboard_renders_counts_history_and_empty_state() {
     assert_eq!(app.charts.focused, Chart::Prompt);
     app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
     assert_eq!(app.tab, 1);
-    app.handle_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
     assert_eq!(app.tab, 1);
     assert!(!render_app(&app, 100, 40).contains("4 REQ"));
 }

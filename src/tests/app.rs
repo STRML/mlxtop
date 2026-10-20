@@ -965,6 +965,57 @@ fn mouse_focus_expand_and_zoom_follow_the_chart_under_the_pointer() {
 }
 
 #[test]
+fn double_click_enlarges_and_restores_a_chart() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    render_app(&app, 160, 48);
+    let regions = app.charts.regions.borrow().clone();
+    let (chart, area) = regions
+        .iter()
+        .copied()
+        .find(|(chart, _)| *chart != Chart::Prompt)
+        .unwrap();
+    let (other, other_area) = regions
+        .iter()
+        .copied()
+        .find(|(c, _)| *c != chart && *c != Chart::Prompt)
+        .unwrap();
+    let click = |app: &mut App, area: Rect| {
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 1,
+            row: area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    click(&mut app, area);
+    assert!(!app.charts.expanded, "one click only selects");
+    click(&mut app, other_area);
+    assert_eq!(app.charts.focused, other);
+    assert!(
+        !app.charts.expanded,
+        "clicks on two charts are not a double click"
+    );
+    click(&mut app, area);
+    click(&mut app, area);
+    assert!(app.charts.expanded && app.charts.focused == chart);
+    render_app(&app, 160, 48);
+    let expanded = app
+        .charts
+        .regions
+        .borrow()
+        .iter()
+        .find(|(c, _)| *c == chart)
+        .unwrap()
+        .1;
+    click(&mut app, expanded);
+    click(&mut app, expanded);
+    assert!(!app.charts.expanded, "a second double click restores it");
+    click(&mut app, area);
+    assert!(!app.charts.expanded, "a third click starts a new pair");
+}
+
+#[test]
 fn help_and_controls_describe_the_active_view() {
     for (tab, text) in [
         (0, "PgUp / PgDn     move by ten requests"),

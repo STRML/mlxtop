@@ -986,3 +986,24 @@ fn omlx_serving_through_splash_hides_mlx_readings_and_flags_untracked_work() {
     assert_eq!(other.llm_engine, None);
     assert_eq!(other.mlx.version.as_deref(), Some("0.31.4"));
 }
+
+#[test]
+fn a_saved_config_changes_thresholds_and_the_endpoint_only_when_omx_changes() {
+    let mut collector = collector(macos_host(), Platform::MacOs, None);
+    let original = collector.llm_client.port;
+    let mut config = offline_config();
+    config.omx.clone_from(&collector.omx);
+    config.gpu_warn_load = Some(50);
+    collector.apply_config(&config);
+    assert_eq!(collector.thresholds.gpu_warn_load, 50);
+    assert_eq!(
+        collector.llm_client.port, original,
+        "same omx keeps the client"
+    );
+    config.omx = Some(OmxConfig {
+        host: Some("127.0.0.1".into()),
+        port: Some(original.wrapping_add(1).max(1)),
+    });
+    collector.apply_config(&config);
+    assert_eq!(collector.llm_client.port, original.wrapping_add(1).max(1));
+}
