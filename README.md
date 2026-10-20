@@ -32,10 +32,12 @@ changed when the model slowed.
 - **13 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp, Ollama,
   LM Studio, KoboldCpp and more, detected automatically.
 - **Local and read-only:** no sudo, no account, no analytics. It never sends
-  prompts or changes your settings.
+  prompts or touches your models or runtime settings.
 
-**What's new in 3.1:** a redesigned Overview, `mlxtop update`, oMLX through
-Splash, and paging detection on Macs without swap.
+**What's new in 3.1.1:** a Settings tab that edits the config in place and
+applies it without a restart, `Esc` asks before quitting, one switch to turn
+off alarms, double-click to enlarge a chart, and mlx-serve prefill progress.
+3.1 brought a redesigned Overview, `mlxtop update` and oMLX through Splash.
 [Release notes →](CHANGELOG.md)
 
 ## Install

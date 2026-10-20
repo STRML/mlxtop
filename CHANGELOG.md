@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 3.1.1 — 2026-10-20
+
+A Settings tab edits the config in place, `Esc` asks before quitting, one
+switch turns off alarms, a double-click enlarges a chart, and mlx-serve shows
+prefill progress with a steadier decode rate.
 
 ### Dashboards
 
@@ -24,7 +28,6 @@
   overwritten.
 - **Double-click enlarges a chart.** A double-click on an Overview chart
   enlarges it, and another restores it, like `Enter` and right-click.
-
 - **`Esc` no longer quits straight away.** It still closes help, diagnostics,
   a filter or an enlarged chart; with nothing open it asks before quitting,
   because quitting discards the session's charts and Journal. `q` still quits
