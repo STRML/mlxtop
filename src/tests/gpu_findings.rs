@@ -39,7 +39,7 @@ fn offload_needs_a_local_gpu_and_ignores_small_buffers() {
     let gpu = cfg!(target_os = "macos");
     assert_eq!(detect(&sample, None), gpu.then(|| expected.clone()));
     sample.gpus = vec![card(0, 50, 1_000, None)];
-    let has_gpu = gpu || sample.has_nvidia_gpus();
+    let has_gpu = gpu || sample.has_discrete_gpus();
     assert_eq!(detect(&sample, None), has_gpu.then(|| expected.clone()));
     if has_gpu {
         assert_eq!(expected.impact(), "CPU OFFLOAD");

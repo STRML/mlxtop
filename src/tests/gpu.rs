@@ -111,3 +111,44 @@ fn throttle_query_falls_back_to_the_newer_field_name_and_skips_without_cards() {
     assert!(collect(&empty, &[]).is_empty());
     assert_eq!(empty.calls().len(), 1);
 }
+
+#[test]
+fn vendor_labels_follow_each_backend_identity() {
+    let mut cards = parse(TWO);
+    assert_eq!(cards[0].vendor(), "NVIDIA");
+    assert_eq!(vendors(&cards), "NVIDIA");
+    assert_eq!(source(&cards), "nvidia-smi");
+    let mut amd = cards[0].clone();
+    amd.uuid = "AMD-5b7c23d1d3025b6c".into();
+    cards.push(amd.clone());
+    assert_eq!(amd.vendor(), "AMD");
+    assert_eq!(vendors(&cards), "NVIDIA + AMD");
+    assert_eq!(source(&cards), "nvidia-smi + amdgpu sysfs");
+    assert_eq!(vendors(&[amd.clone()]), "AMD");
+    assert_eq!(source(&[amd]), "amdgpu sysfs");
+    assert_eq!(vendors(&[]), "");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn amd_cards_follow_nvidia_cards_in_one_list() {
+    let dev = "/sys/class/drm/card1/device";
+    let host = crate::test_support::FakeHost::default()
+        .command(
+            "nvidia-smi --query-gpu=index,uuid,name,utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits",
+            TWO,
+        )
+        .dir("/sys/class/drm", &["/sys/class/drm/card1"])
+        .file(&format!("{dev}/vendor"), "0x1002\n")
+        .file(&format!("{dev}/unique_id"), "5b7c23d1d3025b6c\n")
+        .file(&format!("{dev}/product_name"), "AMD Radeon Test\n")
+        .file(&format!("{dev}/mem_info_vram_total"), "17095983104\n");
+    let cards = collect(&host, &[]);
+    assert_eq!(cards.len(), 3);
+    assert_eq!(cards[2].index, 2);
+    assert_eq!(cards[2].uuid, "AMD-5b7c23d1d3025b6c");
+    assert_eq!(cards[2].name, "AMD Radeon Test");
+    // A previous AMD reading never stands in for an NVIDIA card or the reverse.
+    let again = collect(&host, &cards);
+    assert_eq!(again, cards);
+}

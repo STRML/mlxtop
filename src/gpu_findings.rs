@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! GPU placement and NVIDIA card problems that limit local inference: a model
+//! GPU placement and discrete card problems that limit local inference: a model
 //! split onto the CPU, a card whose memory is full, and clocks held down by
 //! heat, power or hardware limits. High utilization alone is never a problem.
 use crate::domain::Sample;
@@ -163,7 +163,7 @@ pub(crate) fn detect(sample: &Sample, previous_impact: Option<&str>) -> Option<G
 fn offload(sample: &Sample) -> Option<GpuIssue> {
     // A remote runtime's placement says nothing about local cards, and a
     // CPU-only host has nowhere else to put the model.
-    let has_gpu = sample.has_nvidia_gpus() || cfg!(target_os = "macos");
+    let has_gpu = sample.has_discrete_gpus() || cfg!(target_os = "macos");
     if sample.llm_remote || !has_gpu {
         return None;
     }
@@ -174,7 +174,7 @@ fn offload(sample: &Sample) -> Option<GpuIssue> {
 }
 
 fn vram_full(sample: &Sample, was_full: bool) -> Option<GpuIssue> {
-    if !sample.has_nvidia_gpus() {
+    if !sample.has_discrete_gpus() {
         return None;
     }
     let limit = if was_full {
@@ -201,7 +201,7 @@ fn vram_full(sample: &Sample, was_full: bool) -> Option<GpuIssue> {
 }
 
 fn throttled(sample: &Sample) -> Option<GpuIssue> {
-    if !sample.has_nvidia_gpus() {
+    if !sample.has_discrete_gpus() {
         return None;
     }
     sample.gpus.iter().find_map(|gpu| {

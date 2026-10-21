@@ -409,7 +409,7 @@ impl App {
     }
 
     pub(crate) fn draw_overview(&self, frame: &mut Frame, area: Rect) {
-        if self.collector.current.has_nvidia_gpus() {
+        if self.collector.current.has_discrete_gpus() {
             self.draw_gpu_overview(frame, area);
         } else {
             self.draw_overview_layout(frame, area, false);
@@ -701,7 +701,7 @@ impl App {
     }
 
     pub(crate) fn gpu_chart_title(&self) -> &'static str {
-        if self.collector.current.has_nvidia_gpus() && self.collector.current.gpus.len() > 1 {
+        if self.collector.current.has_discrete_gpus() && self.collector.current.gpus.len() > 1 {
             "GPU max"
         } else {
             "GPU"
@@ -2131,8 +2131,8 @@ impl App {
                 Line::from("Shift-↑↓        newer / older prompt"),
                 Line::from("Home / End      newest / oldest prompt"),
                 Line::from("PgUp / PgDn     move by ten requests"),
-                Line::from(if self.collector.current.has_nvidia_gpus() {
-                    "[ / ] GPUs      select previous / next NVIDIA card"
+                Line::from(if self.collector.current.has_discrete_gpus() {
+                    "[ / ] GPUs      select previous / next GPU card"
                 } else {
                     ""
                 }),

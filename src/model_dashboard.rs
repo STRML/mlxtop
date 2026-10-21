@@ -66,11 +66,11 @@ fn prompt_panel_covers(sample: &Sample, history: &request_history::History) -> b
 }
 
 fn hardware_parts(sample: &Sample) -> Vec<String> {
-    if sample.has_nvidia_gpus() {
+    if sample.has_discrete_gpus() {
         return vec![if sample.gpus.len() == 1 {
             sample.gpus[0].name.clone()
         } else {
-            format!("{} NVIDIA GPUs", sample.gpus.len())
+            format!("{} {} GPUs", sample.gpus.len(), gpu::vendors(&sample.gpus))
         }];
     }
     let mut parts = vec![sample
@@ -85,7 +85,7 @@ fn hardware_parts(sample: &Sample) -> Vec<String> {
 }
 
 fn gpu_memory(sample: &Sample) -> Option<String> {
-    if sample.has_nvidia_gpus() {
+    if sample.has_discrete_gpus() {
         return gpu::memory_totals(&sample.gpus)
             .map(|(used, total)| format!("VRAM sum {} / {}", bytes(used), bytes(total)));
     }
@@ -190,7 +190,7 @@ fn state(sample: &Sample) -> Line<'static> {
 /// GPU memory against its limit as a small meter, graded as it nears full:
 /// the Metal working set filling up is what slows generation.
 fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
-    let (used, total) = if sample.has_nvidia_gpus() {
+    let (used, total) = if sample.has_discrete_gpus() {
         gpu::memory_totals(&sample.gpus)?
     } else {
         (sample.gpu_in_use?, sample.gpu_alloc?)
@@ -208,7 +208,7 @@ fn gpu_memory_meter(sample: &Sample) -> Option<Vec<Span<'static>>> {
     };
     Some(vec![
         Span::styled(
-            if sample.has_nvidia_gpus() {
+            if sample.has_discrete_gpus() {
                 "VRAM "
             } else {
                 "GPU mem "

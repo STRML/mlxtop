@@ -442,7 +442,7 @@ pub(crate) struct Sample {
     pub(crate) llm_model_memory_max: Option<u64>,
     pub(crate) llm_model_offloaded: Option<u64>,
     pub(crate) llm_model_size: Option<u64>,
-    /// Most severe NVIDIA or placement problem, set by `classify`.
+    /// Most severe discrete GPU or placement problem, set by `classify`.
     pub(crate) gpu_issue: Option<crate::gpu_findings::GpuIssue>,
     pub(crate) llm_details: Option<String>,
     /// The engine a runtime serves through, when not its own: oMLX's Splash.
@@ -506,7 +506,7 @@ impl Sample {
             .saturating_add(self.page_out)
     }
 
-    pub(crate) fn has_nvidia_gpus(&self) -> bool {
+    pub(crate) fn has_discrete_gpus(&self) -> bool {
         cfg!(any(target_os = "linux", target_os = "windows")) && !self.gpus.is_empty()
     }
 }
