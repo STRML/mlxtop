@@ -106,7 +106,7 @@ your runtime, send it a prompt, and watch Overview while it answers.
 | Arrows / click, `Enter` / double-click | Select a chart, enlarge or restore it |
 | `+` `-` / wheel | Zoom chart history |
 | `p` / `Space` | Pause sampling |
-| `[` `]` | Select an NVIDIA GPU |
+| `[` `]` | Select a GPU card |
 | `d` | Diagnostics and setup help for the current runtime |
 | `?` / `q` | Help / quit (`Esc` asks first) |
 
@@ -140,7 +140,7 @@ custom URLs and authentication.
 | Memory pressure | Native | `MemAvailable` and PSI | Commit charge |
 | Compression | ✓ | — | — |
 | Paging | ✓ | ✓ | Not available from Windows |
-| GPU | Apple GPU | NVIDIA via `nvidia-smi` | NVIDIA via `nvidia-smi` |
+| GPU | Apple GPU | NVIDIA via `nvidia-smi`, AMD via amdgpu sysfs | NVIDIA via `nvidia-smi` |
 
 macOS 11 or later is required. Intel Macs aren't supported.
 
