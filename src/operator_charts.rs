@@ -202,22 +202,26 @@ fn queue_junction(active: char, waiting: char) -> char {
     }
 }
 
-/// One running request: a short id, tokens out, and its own rate.
-fn running_label(request: &Running, width: usize) -> Option<String> {
-    let tps = request.tps.filter(|tps| tps.is_finite() && *tps >= 0.0)?;
+/// One running request: a short id, tokens out, and its own rate, or `—`
+/// while it has none, so the row stays put when the rate comes and goes.
+fn running_label(request: &Running, width: usize) -> String {
+    let tps = request
+        .tps
+        .filter(|tps| tps.is_finite() && *tps >= 0.0)
+        .map_or_else(|| "—".to_owned(), |tps| format!("{tps:.1} tok/s"));
     let id: String = {
         let chars: Vec<char> = request.id.chars().collect();
         chars[chars.len().saturating_sub(6)..].iter().collect()
     };
     let output = request.output.map(compact_tokens);
     [
-        output.map(|output| format!("{id} {output} · {tps:.1}↓ tok/s")),
-        Some(format!("{id} · {tps:.1}↓ tok/s")),
-        Some(format!("{tps:.1}↓ tok/s")),
+        output.map(|output| format!("{id} {output} · {tps}")),
+        Some(format!("{id} · {tps}")),
     ]
     .into_iter()
     .flatten()
     .find(|text| text.chars().count() <= width)
+    .unwrap_or(tps)
 }
 
 pub(super) fn queue_plot_width(history: &History, width: u16) -> u16 {
@@ -239,17 +243,20 @@ pub(super) fn queue(
     let waiting = last.and_then(|p| p.waiting);
     // Yellow means "worth inspecting": an empty wait queue stays neutral.
     let waiting_color = |queued: bool| if queued { YELLOW } else { MUTED };
-    // Each running request's own rate, when the runtime reports one.
+    // Each running request's own rate, when the runtime reports them. On
+    // Overview the list takes the panel's rows while requests run, because
+    // that is what the panel is read for then; the history returns when
+    // nothing runs, and an enlarged queue always shows it.
     let rates: Vec<String> = history
         .running
         .iter()
-        .filter_map(|request| running_label(request, usize::from(area.width.saturating_sub(4))))
+        // A row for the counts and at least one for a request.
+        .filter(|_| window.is_some() && area.height >= 4)
+        .map(|request| running_label(request, usize::from(area.width.saturating_sub(4))))
         .collect();
     // A short terminal still gets a separate, selectable queue panel with
-    // both exact counts. Expanding it reveals the full history. While requests
-    // report their speeds the list keeps the rows, because that is what the
-    // panel is read for; the history returns when nothing is decoding.
-    if area.height <= 5 || (!rates.is_empty() && area.height <= 8) {
+    // both exact counts. Expanding it reveals the full history.
+    if area.height <= 5 || !rates.is_empty() {
         let queued_color = waiting_color(waiting.is_some_and(|n| n > 0));
         let active_label = format!("active {}", count(active));
         let waiting_label = format!("waiting {}", count(waiting));

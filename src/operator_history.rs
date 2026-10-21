@@ -23,8 +23,13 @@ pub(crate) struct Running {
 pub(super) struct History {
     pub(crate) points: VecDeque<Point>,
     pub(crate) timings: VecDeque<(String, Option<u64>, SystemTime)>,
-    /// The requests running now, in the order the runtime lists them.
+    /// The requests running now, in the order the runtime lists them. Empty
+    /// unless the runtime reports a speed per request.
     pub(crate) running: Vec<Running>,
+    /// The runtime that has reported a request's own speed. Once it has, its
+    /// requests stay listed while one has none, as Splash does with two
+    /// running, so the queue doesn't switch views between samples.
+    speeds_from: Option<String>,
 }
 
 impl History {
@@ -44,17 +49,24 @@ impl History {
         while self.points.len() > limit {
             self.points.pop_front();
         }
-        self.running = if fresh {
-            sample
-                .llm_requests
+        let running: Vec<Running> = sample
+            .llm_requests
+            .iter()
+            .filter(|request| fresh && !request.completed && !request.queued)
+            .map(|request| Running {
+                id: request.id.clone(),
+                output: request.output,
+                tps: request.output_tps,
+            })
+            .collect();
+        if self.speeds_from.as_ref() != Some(&sample.llm_provider) {
+            self.speeds_from = running
                 .iter()
-                .filter(|request| !request.completed && !request.queued)
-                .map(|request| Running {
-                    id: request.id.clone(),
-                    output: request.output,
-                    tps: request.output_tps,
-                })
-                .collect()
+                .any(|request| request.tps.is_some())
+                .then(|| sample.llm_provider.clone());
+        }
+        self.running = if self.speeds_from.is_some() {
+            running
         } else {
             Vec::new()
         };

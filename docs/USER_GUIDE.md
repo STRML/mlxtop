@@ -593,6 +593,11 @@ in the runtime's queue reads `QUEUED` and its bar is hatched. Once absent or
 stale, an incomplete request reads `LAST SEEN`; completed request counts read
 `REPORTED`.
 
+On a panel tall enough to keep at least four rows of bars, a row under the
+size labels shows the tokens each request has generated, so the count needs
+no subtraction. The row depends on the panel's height alone, so the bars
+don't shrink when a request first generates output.
+
 While the selected live request is still prefilling, its output line becomes
 a progress bar:
 
@@ -682,7 +687,7 @@ observation, and past requests stay available. Use **Shift-↑ / Shift-↓** or
 | generation, prefill | bars from zero | live tok/s, or a labeled `LAST` reading |
 | GPU | area on 0–100% | utilization and load state |
 | cache | bars on 0–100% | interval hit %, reuse since start and prefix hit |
-| queue | two series on a shared count axis; `●`/`○` marks when compact | running and waiting counts |
+| queue | two series on a shared count axis; `●`/`○` marks when compact; a list of running requests while the runtime reports each one's speed | running and waiting counts |
 | prompt load, first token | one bar per request | the selected request |
 
 All time-series panels share a visible sample window and zoom in Overview. The
@@ -703,6 +708,18 @@ Muted `≈` marks unequal values that coincide at terminal resolution. Exact
 counts remain visible in the panel. Both series share an automatic request-count scale based on their visible
 maximum. Idle zeros are valid; stale, missing and client-reported values
 produce gaps. Queue length is a demand signal, not a latency measurement.
+
+When the runtime reports each running request's own decode speed (oMLX,
+mlx-serve, and oMLX through Splash), the Overview queue lists the running
+requests in its own rows instead, one per line: the end of the request's id,
+the tokens it has generated and its speed, such as `8f31a2 1.7k · 41.0 tok/s`.
+Compare a row with what that request's client measures; the generation panel
+reports the whole server. A request without a speed yet, or one the runtime
+can't measure on its own (Splash with two requests running), shows `—` and
+keeps its row. When the rows run out, the count reads `active 3 · +1 more`;
+the waiting count moves to the border when it has no row. The panel keeps
+its size, the history returns when nothing is running, and an enlarged queue
+always shows the history.
 
 **First token** appears only after an explicit client timing is supplied in the
 existing usage JSONL envelope:
@@ -832,7 +849,10 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
 - **mlx-serve:** polls `/metrics` (start the server with `--metrics`; set
   `MLXTOP_PROVIDER_API_KEY` if it has an API key) and `/metrics.json` for the model and
   one entry per running request (prompt, cached and output counts; cache-only sessions
-  are skipped). Generation rate keeps the points where `mlx_serve:generation_tokens_live`
+  are skipped). Each running request's own speed is read the same way from its
+  `generated_tokens`, which counts the tokens its client receives; a request
+  reused under the same id with a different prompt starts over, and a session still
+  prefilling, or one without a `request_id`, has none. Generation rate keeps the points where `mlx_serve:generation_tokens_live`
   advanced and divides across a span of at least six seconds, because the server
   refreshes that gauge once every two seconds and a one-second delta reads 0 or twice
   the true speed; the last real speed stays shown, not live, for four seconds after the

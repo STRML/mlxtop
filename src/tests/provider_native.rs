@@ -211,7 +211,8 @@ fn mlx_serve_sessions_name_the_model_and_list_only_running_requests() {
             {"model":"Qwen", "phase":"cached", "context_tokens":50000, "generated_tokens":0, "cached_tokens":50000}
         ]}),
         now,
-        &mut BTreeMap::new(),
+        Instant::now(),
+        &mut SessionSpeeds::default(),
     );
     assert_eq!(result.model.as_deref(), Some("Qwen"));
     let requests = &result.requests;
@@ -234,58 +235,115 @@ fn mlx_serve_sessions_name_the_model_and_list_only_running_requests() {
         &mut one,
         &json!({"sessions":[{"phase":"decode","context_tokens":50,"generated_tokens":20}]}),
         now,
-        &mut BTreeMap::new(),
+        Instant::now(),
+        &mut SessionSpeeds::default(),
     );
     assert_eq!((one.prompt_tokens, one.output_tokens), (Some(30), Some(20)));
     let mut none = LlmTelemetry::default();
-    apply_mlx_serve_sessions(&mut none, &json!({}), now, &mut BTreeMap::new());
+    apply_mlx_serve_sessions(
+        &mut none,
+        &json!({}),
+        now,
+        Instant::now(),
+        &mut SessionSpeeds::default(),
+    );
     assert!(none.requests.is_empty() && none.model.is_none());
+}
+
+/// One poll of `/metrics.json` at `second`, returning each request's own speed.
+fn session_speeds(
+    speeds: &mut SessionSpeeds,
+    start: Instant,
+    second: u64,
+    sessions: Value,
+) -> Vec<Option<f64>> {
+    let mut result = LlmTelemetry::default();
+    apply_mlx_serve_sessions(
+        &mut result,
+        &json!({ "sessions": sessions }),
+        SystemTime::now(),
+        start + Duration::from_secs(second),
+        speeds,
+    );
+    result
+        .requests
+        .iter()
+        .map(|request| request.output_tps)
+        .collect()
 }
 
 #[test]
 fn mlx_serve_reports_each_requests_own_decode_speed() {
-    let now = SystemTime::now();
-    let mut previous = BTreeMap::new();
-    let sample = |generated: u64| json!({"sessions":[{"model":"Qwen","phase":"decode","context_tokens":1300 + generated,"generated_tokens":generated,"cached_tokens":0,"request_id":7}]});
-    let mut first = LlmTelemetry::default();
-    apply_mlx_serve_sessions(&mut first, &sample(100), now, &mut previous);
+    let start = Instant::now();
+    let mut speeds = SessionSpeeds::default();
+    let decode = |id: u64, generated: u64| json!({"model":"Qwen","phase":"decode","context_tokens":1300 + generated,"generated_tokens":generated,"cached_tokens":0,"request_id":id});
     assert_eq!(
-        first.requests[0].output_tps, None,
+        session_speeds(&mut speeds, start, 0, json!([decode(7, 100)])),
+        [None],
         "one sample measures nothing"
     );
-    let mut second = LlmTelemetry::default();
-    apply_mlx_serve_sessions(
-        &mut second,
-        &sample(300),
-        now + Duration::from_secs(2),
-        &mut previous,
+    assert_eq!(
+        session_speeds(&mut speeds, start, 2, json!([decode(7, 300)])),
+        [Some(100.0)]
     );
-    assert_eq!(second.requests[0].output_tps, Some(100.0));
-    // The prompt is the request's identity: a reused id with a different prompt carries no speed.
-    let mut reused = LlmTelemetry::default();
-    apply_mlx_serve_sessions(
-        &mut reused,
-        &json!({"sessions":[{"phase":"decode","context_tokens":9000,"generated_tokens":10,"request_id":7}]}),
-        now + Duration::from_secs(3),
-        &mut previous,
+    // Two requests each read their own count, not the server total.
+    assert_eq!(
+        session_speeds(&mut speeds, start, 3, json!([decode(7, 350), decode(8, 0)])),
+        [Some(250.0 / 3.0), None]
     );
-    assert_eq!(reused.requests[0].output_tps, None);
+    assert_eq!(
+        session_speeds(
+            &mut speeds,
+            start,
+            4,
+            json!([decode(7, 400), decode(8, 40)])
+        ),
+        [Some(75.0), Some(40.0)]
+    );
+    // The prompt is the request's identity: a reused id with a different prompt starts over.
+    assert_eq!(
+        session_speeds(
+            &mut speeds,
+            start,
+            5,
+            json!([{"phase":"decode","context_tokens":9000,"generated_tokens":10,"request_id":7}])
+        ),
+        [None]
+    );
     // A synthetic slot id is positional, so it never carries one.
-    let mut slots = BTreeMap::new();
-    apply_mlx_serve_sessions(
-        &mut LlmTelemetry::default(),
-        &json!({"sessions":[{"phase":"decode","context_tokens":50,"generated_tokens":5}]}),
-        now,
-        &mut slots,
-    );
-    let mut slot_again = LlmTelemetry::default();
-    apply_mlx_serve_sessions(
-        &mut slot_again,
-        &json!({"sessions":[{"phase":"decode","context_tokens":150,"generated_tokens":105}]}),
-        now + Duration::from_secs(1),
-        &mut slots,
-    );
-    assert_eq!(slot_again.requests[0].output_tps, None);
+    let mut slots = SessionSpeeds::default();
+    let slot = |generated: u64| json!([{"phase":"decode","context_tokens":50 + generated,"generated_tokens":generated}]);
+    session_speeds(&mut slots, start, 0, slot(5));
+    assert_eq!(session_speeds(&mut slots, start, 1, slot(105)), [None]);
+    // A prefilling session has no decode speed, even once it has been seen before.
+    let mut prefill = SessionSpeeds::default();
+    let prefilling =
+        json!([{"phase":"prefill","context_tokens":900,"generated_tokens":0,"request_id":9}]);
+    session_speeds(&mut prefill, start, 0, prefilling.clone());
+    assert_eq!(session_speeds(&mut prefill, start, 1, prefilling), [None]);
+}
+
+#[test]
+fn a_session_count_that_moves_every_two_seconds_reads_steadily() {
+    // The same refresh as the server gauge: 210 tokens at 2, 4 and 6 seconds, polled every second.
+    let start = Instant::now();
+    let mut speeds = SessionSpeeds::default();
+    let rates: Vec<_> = [0_u64, 0, 210, 210, 420, 420, 630]
+        .into_iter()
+        .enumerate()
+        .map(|(second, generated)| {
+            session_speeds(
+                &mut speeds,
+                start,
+                second as u64,
+                json!([{"phase":"decode","context_tokens":1000 + generated,"generated_tokens":generated,"request_id":3}]),
+            )[0]
+        })
+        .collect();
+    assert_eq!(rates[..2], [None, None]);
+    for rate in &rates[2..] {
+        assert_eq!(*rate, Some(105.0), "{rates:?}");
+    }
 }
 
 #[test]
@@ -644,7 +702,8 @@ fn mlx_serve_fallback_ids_follow_the_running_request() {
             &mut r,
             &json!({ "sessions": sessions }),
             now,
-            &mut BTreeMap::new(),
+            Instant::now(),
+            &mut SessionSpeeds::default(),
         );
         r.requests.iter().map(|q| q.id.clone()).collect::<Vec<_>>()
     };

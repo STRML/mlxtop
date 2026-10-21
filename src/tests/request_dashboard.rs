@@ -41,13 +41,21 @@ fn each_bar_shows_the_tokens_it_generated_under_its_prompt_size() {
         llm_requests: vec![first, second],
         ..Sample::default()
     };
-    let screen = crate::tests::render_view(90, 12, |frame| {
+    let screen = crate::tests::render_view(90, 13, |frame| {
         draw(frame, frame.area(), &history, &sample, 0, 1)
     });
     // The bar's own size, then the tokens it generated: no subtraction needed.
     for label in ["12.0k", "20.0k", "160", "300"] {
         assert!(screen.contains(label), "missing {label}\n{screen}");
     }
+    // The row is there before any output arrives, so the bars keep their height.
+    let mut quiet = History::default();
+    quiet.observe(&[usage("a", 12000), usage("b", 20000)]);
+    let before = crate::tests::render_view(90, 13, |frame| {
+        draw(frame, frame.area(), &quiet, &sample, 0, 1)
+    });
+    let size_row = |screen: &str| screen.lines().position(|line| line.contains("20.0k"));
+    assert_eq!(size_row(&before), size_row(&screen), "{before}\n{screen}");
     assert!(
         !screen.contains("tok/s"),
         "rates live in the queue\n{screen}"
@@ -558,14 +566,17 @@ fn sparse_requests_stay_at_the_right_edge_with_fixed_spacing() {
                     .draw(|frame| draw(frame, frame.area(), &history, &Sample::default(), 0, zoom))
                     .unwrap();
                 let buffer = terminal.backend().buffer();
-                let labels: String = (1..width - 1).map(|x| buffer[(x, 10)].symbol()).collect();
+                // Sizes sit above the row kept for generated tokens, which
+                // stays blank while no request has generated any.
+                let labels: String = (1..width - 1).map(|x| buffer[(x, 9)].symbol()).collect();
                 assert!(labels.trim_end().ends_with("2.9k▲"));
+                assert!((1..width - 1).all(|x| buffer[(x, 10)].symbol() == " "));
                 // The newest body and label stay in the last slot even
                 // with a single request, at every supported zoom/width.
                 let last_bar = (1..width - 1)
                     .rev()
                     .find(|x| {
-                        (4..10).any(|y| {
+                        (4..9).any(|y| {
                             buffer[(*x, y)].fg == BLUE
                                 && matches!(
                                     buffer[(*x, y)].symbol(),
@@ -577,7 +588,7 @@ fn sparse_requests_stay_at_the_right_edge_with_fixed_spacing() {
                 assert!(last_bar >= width - 3, "bar floats away from latest edge");
                 if zoom == 1 {
                     let occupied_start = width - 1 - (index + 1) * 6;
-                    assert!((1..occupied_start).all(|x| buffer[(x, 9)].symbol() == " "));
+                    assert!((1..occupied_start).all(|x| buffer[(x, 8)].symbol() == " "));
                 }
             }
         }

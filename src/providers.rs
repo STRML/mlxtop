@@ -512,7 +512,7 @@ impl Adapter {
         });
         if let Some(value) = value {
             self.metrics
-                .apply_sessions(&mut result, &value, SystemTime::now());
+                .apply_sessions(&mut result, &value, SystemTime::now(), Instant::now());
         }
         Some(result)
     }

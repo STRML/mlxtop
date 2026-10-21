@@ -4,13 +4,20 @@
 
 ### Dashboards
 
-- **Each mlx-serve request shows its own speed.** The queue lists every
-  running request with its own decode rate (`↓`), taken from the growth of
-  that request's `generated_tokens` in `/metrics.json`, which is the tokens its
-  client receives. Prompt load keeps the prompt size as each bar's height and
-  writes the tokens that request has generated under it when the panel has a
-  spare row, so the count needs no subtraction. The queue takes the rows its
-  list needs while anything is decoding.
+- **Each running request shows its own speed.** While the runtime reports a
+  decode speed per request, the Overview queue lists its running requests in
+  its own rows, each with the tokens it has generated and its speed, such as
+  `8f31a2 1.7k · 41.0 tok/s`, so a client's own tokens/s can be checked
+  against it while the generation panel reports the whole server. oMLX
+  reports these for every generating request; mlx-serve now does too, from
+  each session's `generated_tokens`, read through the same stepping window as
+  the server's decode speed; Splash has one while a request runs alone. A
+  request without one shows `—` and keeps its row. The panel keeps its size,
+  and the history returns when nothing is running.
+- **Prompt load shows the tokens each request generated.** On a panel tall
+  enough to keep four rows of bars, a row under the size labels shows each
+  request's generated tokens. Whether the row is there depends on the panel's
+  height alone, so the bars never shrink partway through a session.
 
 ## 3.1.1 — 2026-10-20
 

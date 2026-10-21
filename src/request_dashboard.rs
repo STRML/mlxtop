@@ -122,6 +122,9 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
     line
 }
 
+/// Plot rows the bars keep before a row of generated tokens goes under them.
+const OUTPUT_ROW_MIN_PLOT: u16 = 4;
+
 /// The tokens a bar's request has generated, so the size above needs no subtraction.
 fn output_label(usage: &domain::RequestUsage, width: u16) -> String {
     let Some(output) = usage.output.filter(|output| *output > 0) else {
@@ -347,17 +350,6 @@ pub(super) fn draw(
         .map(|last| last - scroll.min(last));
     let window =
         selected.map(|index| history_window(history, index, area.width.saturating_sub(2), zoom));
-    // The prompt size sets the bar's height; the tokens generated so far go
-    // under it when the panel can spare the row. Size labels outrank it.
-    let show_outputs = area.height >= 8
-        && window.is_some_and(|(start, visible, _)| {
-            history
-                .entries
-                .iter()
-                .skip(start)
-                .take(visible)
-                .any(|entry| entry.usage.output.is_some_and(|output| output > 0))
-        });
     let ceiling = chart_scale::ceiling(
         window
             .map(|(start, visible, _)| {
@@ -589,6 +581,11 @@ pub(super) fn draw(
         2
     };
     let (start, visible, slot_width) = window.unwrap();
+    // The prompt size sets the bar's height; the tokens generated so far go
+    // under it when the plot keeps enough rows without it. That depends on the
+    // panel's height alone, so the bars never shrink when output first
+    // arrives. Size labels outrank it.
+    let show_outputs = inner.height >= metadata_height + 2 + OUTPUT_ROW_MIN_PLOT;
     let footer = 1 + u16::from(show_outputs);
     if inner.height < metadata_height + footer + 1 {
         return;
