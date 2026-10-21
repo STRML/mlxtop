@@ -121,7 +121,7 @@ where each reading comes from.
 | [Splash](https://github.com/incoai/splash) | ✓ | Running and waiting requests, prefill progress, decode and prefill speed, prefix-cache reuse, Metal memory, DFlash acceptance, TTFT |
 | [mlx-serve](https://github.com/ddalcu/mlx-serve) | ✓ | Generation and prefill rates, running requests, prefix-cache reuse, MLX memory (start it with `--metrics`) |
 | vLLM, SGLang | ✓ | Active and waiting queues, server token rates, KV-cache occupancy, mean first-token time |
-| llama.cpp | with `/metrics` | Active slots and output counts; average rates and queues when `/metrics` is enabled |
+| llama.cpp | ✓ | Active slots, output counts and live generation speed; average rates and queues when `/metrics` is enabled |
 | KoboldCpp | last request | Input and output counts and rates |
 | Ollama | after completion | Loaded models, VRAM, context size, CPU/GPU placement |
 | LM Studio | after completion | Loaded instances and context size |
