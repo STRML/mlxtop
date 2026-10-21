@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
-//! Per-device NVIDIA counters. Device memory is separate from Apple Metal accounting.
-//! Collected on Linux and Windows, where `nvidia-smi` ships with the driver.
+//! Per-device discrete GPU counters. Device memory is separate from Apple Metal accounting.
+//! NVIDIA cards are collected on Linux and Windows, where `nvidia-smi` ships with the
+//! driver; AMD cards on Linux from the amdgpu driver's sysfs files (`gpu_amd`).
 
 use crate::domain::MIB;
 use std::collections::HashSet;
@@ -66,6 +67,16 @@ const HW_THERMAL_SLOWDOWN: u64 = 0x40;
 const HW_POWER_BRAKE_SLOWDOWN: u64 = 0x80;
 
 impl Device {
+    /// The vendor, from the identity each backend assigns: NVIDIA UUIDs start
+    /// with `GPU-`, AMD identities with `AMD-`.
+    pub fn vendor(&self) -> &'static str {
+        if self.uuid.starts_with("AMD-") {
+            "AMD"
+        } else {
+            "NVIDIA"
+        }
+    }
+
     pub fn memory_percent(&self) -> Option<u16> {
         let (used, total) = self.used.zip(self.total)?;
         (total > 0).then(|| ((u128::from(used) * 100 / u128::from(total)).min(100)) as u16)
@@ -103,9 +114,28 @@ const THROTTLE_FIELDS: [&str; 2] = [
     "--query-gpu=uuid,clocks_event_reasons.active",
 ];
 
+/// NVIDIA cards first, then AMD cards, numbered in that order.
+pub(crate) fn collect(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
+    let (amd_before, nvidia_before): (Vec<Device>, Vec<Device>) = previous
+        .iter()
+        .cloned()
+        .partition(|gpu| gpu.vendor() == "AMD");
+    let mut devices = collect_nvidia(host, &nvidia_before);
+    let offset = devices.len() as u32;
+    devices.extend(
+        crate::gpu_amd::collect(host, &amd_before)
+            .into_iter()
+            .map(|gpu| Device {
+                index: gpu.index + offset,
+                ..gpu
+            }),
+    );
+    devices
+}
+
 /// Query all physical devices in one invocation. UUIDs distinguish identical
 /// models and survive driver enumeration changes; indices remain familiar labels.
-pub(crate) fn collect(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
+fn collect_nvidia(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
     if !cfg!(any(target_os = "linux", target_os = "windows")) {
         return Vec::new();
     }
@@ -219,6 +249,33 @@ pub(crate) fn peak_utilization(devices: &[Device]) -> Option<u8> {
     devices
         .iter()
         .try_fold(0, |peak, gpu| Some(peak.max(gpu.utilization?)))
+}
+
+/// The vendors present, for panel titles: `NVIDIA`, `AMD` or `NVIDIA + AMD`.
+pub(crate) fn vendors(devices: &[Device]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for gpu in devices {
+        if !names.contains(&gpu.vendor()) {
+            names.push(gpu.vendor());
+        }
+    }
+    names.join(" + ")
+}
+
+/// Where the counters come from, for the panel footer.
+pub(crate) fn source(devices: &[Device]) -> String {
+    let mut sources: Vec<&str> = Vec::new();
+    for gpu in devices {
+        let source = if gpu.vendor() == "AMD" {
+            "amdgpu sysfs"
+        } else {
+            "nvidia-smi"
+        };
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    sources.join(" + ")
 }
 
 pub(crate) fn memory_totals(devices: &[Device]) -> Option<(u64, u64)> {

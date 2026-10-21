@@ -380,7 +380,7 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
     assert!(text.contains("DIAGNOSIS    "));
 
     let linux = report(&sample, Platform::Linux);
-    assert!(linux.contains("GPU          NVIDIA counters unavailable"));
+    assert!(linux.contains("GPU          GPU counters unavailable"));
     assert!(!linux.contains("METAL"));
 }
 

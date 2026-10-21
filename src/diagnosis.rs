@@ -36,7 +36,7 @@ fn assess_observation(sample: &Sample) -> Finding {
     } else {
         "—".into()
     };
-    let gpu = if sample.has_nvidia_gpus() {
+    let gpu = if sample.has_discrete_gpus() {
         "GPU max"
     } else {
         "GPU"

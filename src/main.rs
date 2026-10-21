@@ -15,6 +15,7 @@ mod diagnostics_view;
 mod domain;
 mod formatting;
 mod gpu;
+mod gpu_amd;
 mod gpu_dashboard;
 mod gpu_findings;
 mod history;

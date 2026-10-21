@@ -224,15 +224,29 @@ not require provider changes, restarts or administrator access for accessible
 processes. Failed OS reads omit the process summary. This collector is macOS
 only; Linux retains its existing metrics.
 
-The NVIDIA dashboard is enabled only on Linux after `nvidia-smi` detects at
-least one NVIDIA GPU. macOS and Linux systems without detected NVIDIA cards
-use the standard Overview. Overview's **GPU
-DEVICES** panel lists every detected NVIDIA card with its driver index, name,
+The GPU dashboard is enabled on Linux when `nvidia-smi` detects at least one
+NVIDIA GPU or the amdgpu driver exposes at least one AMD card, and on Windows
+when `nvidia-smi` detects an NVIDIA GPU. macOS and systems without detected
+cards use the standard Overview. Overview's **GPU
+DEVICES** panel lists every detected card with its index, name,
 utilization, VRAM used/total and temperature. Wide terminals add a VRAM bar
 and a textual load state. Use `[` / `]` to select a card; when the list is
 taller than the panel, the selected card scrolls into view and the footer
 shows the visible range. At 80×24, status, throughput, prompt sizes, GPU readings
 and prompt history remain visible; historical charts return with more space.
+
+AMD cards are read on Linux from the amdgpu driver's sysfs files under
+`/sys/class/drm/card*/device`, with no ROCm install or extra tool:
+`mem_info_vram_used` and `mem_info_vram_total`, `gpu_busy_percent`, and the
+`edge` temperature from the card's hwmon sensors (the junction sensor runs
+hotter; edge is the closest match to the core temperature NVIDIA reports).
+Names come from the driver's `product_name` when present, otherwise from the
+system's `pci.ids` (`AMD Radeon RX 9070/9070 XT/9070 GRE`). AMD cards follow
+NVIDIA cards in the list and are identified as `AMD-` plus the driver's
+`unique_id`, or the PCI slot when the card has none. Integrated GPUs whose
+reported VRAM is under 1 GiB are skipped: that is the BIOS carve-out, and it
+would read as a full card on an idle desktop. Clock-limit reasons are not read
+on AMD, so the STATE column shows load only.
 
 Cards are tracked by UUID, following [NVIDIA's guidance on stable device
 identity](https://docs.nvidia.com/deploy/nvidia-smi/), so identical model names remain distinct and a
@@ -253,7 +267,7 @@ inventory total, not a shared allocation pool. `--once` lists all cards and
 their UUIDs without pagination. These are physical-device readings, not
 per-process measurements or a breakdown of MIG instances. Renderer/tiler splits
 and core counts are Apple-only and stay unavailable. Thermals come from
-`/sys/class/thermal` (plus the NVIDIA temperature when available).
+`/sys/class/thermal` (plus the NVIDIA or AMD card temperature when available).
 
 ## Controls
 
@@ -332,7 +346,7 @@ space. The complete Journal remains accessible with `3`.
 | `Shift-↑` / `Shift-↓` | Inspect newer / older prompt observations |
 | `Home` / `End` | Select newest / oldest prompt |
 | `PgUp` / `PgDn` | Move through prompt history by ten requests |
-| `[` / `]` | Select an NVIDIA card on Linux |
+| `[` / `]` | Select a GPU card on Linux |
 
 Time-series charts share zoom. Prompt and latency bars retain their own zoom. Zoom widens captured observations and shows a
 shorter history range; it does not change the sampling interval or the values.
@@ -358,9 +372,10 @@ a busy GPU alone never becomes the finding. A measured drop shows the rate
 change, an associated signal with confidence, and a short suggested check.
 Linux temperature readings are shown as measurements, not inferred throttling.
 
-### NVIDIA findings
+### GPU findings
 
-On Linux and Windows with NVIDIA cards, the assessment names three GPU
+On Linux and Windows with NVIDIA cards, and on Linux with AMD cards, the
+assessment names three GPU
 problems that limit local inference. They rank below critical host memory,
 swap thrashing, heavy paging and page-in recovery, and above memory stress
 and host thermal limits:
@@ -377,7 +392,8 @@ running at its configured limit: the GPU panel's STATE column shows
 `power cap`, but it is not a finding. Clock-limit reasons come from a separate
 `nvidia-smi` query (`clocks_throttle_reasons.active`, then
 `clocks_event_reasons.active` on newer drivers), so a driver without them
-still shows utilization, VRAM and temperature. On Windows a full card may
+still shows utilization, VRAM and temperature. AMD cards report no
+clock-limit reasons, so on AMD the findings are placement and VRAM only. On Windows a full card may
 spill into shared system memory, which the driver does not report; the
 finding says so. Offload is not reported for a remote runtime, whose
 placement says nothing about local cards.
@@ -966,7 +982,8 @@ llama-server router mode and authenticated monitoring endpoints are not supporte
 
 mlxtop reads macOS counters from `sysctl`, `memory_pressure`, `vm_stat`,
 `ioreg`, `pmset` and `ps`. On Linux it reads `/proc/meminfo`, `/proc/vmstat`,
-`/proc/pressure/memory`, `/sys/class/thermal`, `nvidia-smi` (when present)
+`/proc/pressure/memory`, `/sys/class/thermal`, `nvidia-smi` (when present),
+the amdgpu files under `/sys/class/drm` and the system `pci.ids` (when present)
 and `ps`. On Windows it reads memory, commit charge and the process list
 through the Windows APIs (the `sysinfo` crate) and `nvidia-smi` when present. It reads configured provider endpoints and local logs only for
 supported adapters. The application does not contain analytics, upload

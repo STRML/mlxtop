@@ -81,7 +81,7 @@ pub(crate) fn write_static(
     } else {
         writeln!(out, "PAGING       —")?;
     }
-    if sample.has_nvidia_gpus() {
+    if sample.has_discrete_gpus() {
         for line in gpu_dashboard::static_lines(&sample.gpus, thresholds) {
             writeln!(out, "{line}")?;
         }
@@ -103,7 +103,7 @@ pub(crate) fn write_static(
             percent_u8(sample.metal.tiler_util)
         )?;
     } else {
-        writeln!(out, "GPU          NVIDIA counters unavailable")?;
+        writeln!(out, "GPU          GPU counters unavailable")?;
     }
     writeln!(
         out,
