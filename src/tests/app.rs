@@ -380,8 +380,36 @@ fn static_report_lists_memory_paging_runtime_and_diagnosis() {
     assert!(text.contains("DIAGNOSIS    "));
 
     let linux = report(&sample, Platform::Linux);
-    assert!(linux.contains("GPU          NVIDIA counters unavailable"));
+    assert!(linux.contains("GPU          GPU counters unavailable"));
     assert!(!linux.contains("METAL"));
+}
+
+#[test]
+fn the_static_report_carries_the_prefill_progress() {
+    let sample = Sample {
+        llm_generation_tps: Some(105.0),
+        llm_generation_tps_live: true,
+        llm_prefill_tps: Some(4100.0),
+        llm_prefill_tps_live: true,
+        llm_prefill_tokens_done: Some(40960),
+        llm_prefill_tokens_expected: Some(61455),
+        ..Sample::default()
+    };
+    let text = report(&sample, Platform::MacOs);
+    assert!(
+        text.contains("PREFILL 4100.0 tok/s · 41.0k / 61.5k · 67%"),
+        "{text}"
+    );
+    // An idle prefill gauge is not progress.
+    let idle = Sample {
+        llm_prefill_tokens_done: Some(0),
+        llm_prefill_tokens_expected: Some(0),
+        ..Sample::default()
+    };
+    assert!(
+        report(&idle, Platform::MacOs).contains("SERVING      GEN — · PREFILL — · active —"),
+        "progress needs a target, and an idle gauge has none"
+    );
 }
 
 #[test]
@@ -779,6 +807,39 @@ fn global_keys_pause_resize_interval_switch_tabs_and_reset() {
     ));
     press(&mut app, &[KeyCode::Char('a')]);
     press(&mut app, &[KeyCode::Esc]);
+    assert!(
+        app.quit_prompt && !app.quit,
+        "Esc asks before discarding history"
+    );
+    press(&mut app, &[KeyCode::Char('y')]);
+    assert!(app.quit);
+}
+
+#[test]
+fn esc_asks_before_quitting_and_any_other_key_stays() {
+    let mut app = test_app(0);
+    press(&mut app, &[KeyCode::Esc]);
+    assert!(app.quit_prompt && !app.quit);
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let screen = format!("{:?}", terminal.backend().buffer());
+    assert!(screen.contains("QUIT MLXTOP?"), "the prompt is drawn");
+    // Esc again, or any other key, cancels and is not acted on.
+    press(&mut app, &[KeyCode::Esc]);
+    assert!(!app.quit_prompt && !app.quit);
+    press(&mut app, &[KeyCode::Esc, KeyCode::Char('2')]);
+    assert!(
+        !app.quit && app.tab == 0,
+        "the cancelling key does nothing else"
+    );
+    for confirm in [KeyCode::Char('q'), KeyCode::Char('y'), KeyCode::Enter] {
+        let mut app = test_app(0);
+        press(&mut app, &[KeyCode::Esc, confirm]);
+        assert!(app.quit, "{confirm:?} confirms");
+    }
+    // q alone still quits straight away, as in htop.
+    let mut app = test_app(2);
+    press(&mut app, &[KeyCode::Char('q')]);
     assert!(app.quit);
 }
 
@@ -901,6 +962,57 @@ fn mouse_focus_expand_and_zoom_follow_the_chart_under_the_pointer() {
     app.tab = 1;
     app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Right)));
     assert!(!app.charts.expanded, "only the overview has charts");
+}
+
+#[test]
+fn double_click_enlarges_and_restores_a_chart() {
+    let mut app = test_app(0);
+    populate_dashboard_fixture(&mut app);
+    render_app(&app, 160, 48);
+    let regions = app.charts.regions.borrow().clone();
+    let (chart, area) = regions
+        .iter()
+        .copied()
+        .find(|(chart, _)| *chart != Chart::Prompt)
+        .unwrap();
+    let (other, other_area) = regions
+        .iter()
+        .copied()
+        .find(|(c, _)| *c != chart && *c != Chart::Prompt)
+        .unwrap();
+    let click = |app: &mut App, area: Rect| {
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: area.x + 1,
+            row: area.y + 1,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    click(&mut app, area);
+    assert!(!app.charts.expanded, "one click only selects");
+    click(&mut app, other_area);
+    assert_eq!(app.charts.focused, other);
+    assert!(
+        !app.charts.expanded,
+        "clicks on two charts are not a double click"
+    );
+    click(&mut app, area);
+    click(&mut app, area);
+    assert!(app.charts.expanded && app.charts.focused == chart);
+    render_app(&app, 160, 48);
+    let expanded = app
+        .charts
+        .regions
+        .borrow()
+        .iter()
+        .find(|(c, _)| *c == chart)
+        .unwrap()
+        .1;
+    click(&mut app, expanded);
+    click(&mut app, expanded);
+    assert!(!app.charts.expanded, "a second double click restores it");
+    click(&mut app, area);
+    assert!(!app.charts.expanded, "a third click starts a new pair");
 }
 
 #[test]

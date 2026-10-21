@@ -32,10 +32,12 @@ changed when the model slowed.
 - **13 runtimes:** oMLX, Splash, mlx-serve, vLLM, SGLang, llama.cpp, Ollama,
   LM Studio, KoboldCpp and more, detected automatically.
 - **Local and read-only:** no sudo, no account, no analytics. It never sends
-  prompts or changes your settings.
+  prompts or touches your models or runtime settings.
 
-**What's new in 3.1:** a redesigned Overview, `mlxtop update`, oMLX through
-Splash, and paging detection on Macs without swap.
+**What's new in 3.1.1:** a Settings tab that edits the config in place and
+applies it without a restart, `Esc` asks before quitting, one switch to turn
+off alarms, double-click to enlarge a chart, and mlx-serve prefill progress.
+3.1 brought a redesigned Overview, `mlxtop update` and oMLX through Splash.
 [Release notes →](CHANGELOG.md)
 
 ## Install
@@ -96,16 +98,17 @@ your runtime, send it a prompt, and watch Overview while it answers.
 | **1 · Overview** | The verdict, memory, compression, paging, prompt load, generation, prefill, GPU, cache, queue and recent events |
 | **2 · Processes** | Model processes and the CPU, memory and page-ins each one uses |
 | **3 · Journal** | Requests and resource changes during the session |
+| **4 · Settings** | Every config option, edited in place and applied without a restart |
 
 | Key | Action |
 | --- | --- |
-| `1` `2` `3` / `Tab` | Switch view |
-| Arrows / click, `Enter` | Select a chart, enlarge it |
+| `1`–`4` / `Tab` | Switch view |
+| Arrows / click, `Enter` / double-click | Select a chart, enlarge or restore it |
 | `+` `-` / wheel | Zoom chart history |
 | `p` / `Space` | Pause sampling |
-| `[` `]` | Select an NVIDIA GPU |
+| `[` `]` | Select a GPU card |
 | `d` | Diagnostics and setup help for the current runtime |
-| `?` / `q` | Help / quit |
+| `?` / `q` | Help / quit (`Esc` asks first) |
 
 The [user guide](docs/USER_GUIDE.md) explains every chart, its thresholds and
 where each reading comes from.
@@ -137,14 +140,16 @@ custom URLs and authentication.
 | Memory pressure | Native | `MemAvailable` and PSI | Commit charge |
 | Compression | ✓ | — | — |
 | Paging | ✓ | ✓ | Not available from Windows |
-| GPU | Apple GPU | NVIDIA via `nvidia-smi` | NVIDIA via `nvidia-smi` |
+| GPU | Apple GPU | NVIDIA via `nvidia-smi`, AMD via amdgpu sysfs | NVIDIA via `nvidia-smi` |
 
 macOS 11 or later is required. Intel Macs aren't supported.
 
 ## Configuration
 
 mlxtop works without configuration. To change the refresh rate, history length,
-oMLX endpoint or warning thresholds, create `~/.config/mlxtop/config.json`:
+oMLX endpoint, alarms or warning thresholds, press `4` for **Settings**: changes
+apply at once and are saved to `~/.config/mlxtop/config.json`. You can also edit
+that file by hand:
 
 ```json
 {

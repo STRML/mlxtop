@@ -101,6 +101,11 @@ fn mlx_serve_rates_come_from_the_live_series() {
         .as_deref()
         .unwrap()
         .contains("prefill 100 / 1000 tokens (10%)"));
+    assert_eq!(
+        (first.prefill_tokens_done, first.prefill_tokens_expected),
+        (Some(100), Some(1000)),
+        "the panel needs the numbers, not only the sentence"
+    );
     let second = history
         .observe(
             "mlx-serve",
@@ -659,4 +664,95 @@ fn mlx_serve_fallback_ids_follow_the_running_request() {
         {"phase":"decode","context_tokens":900,"generated_tokens":5,"request_id":0}
     ]));
     assert_ne!(zero[0], zero[1]);
+}
+
+/// Only the decode gauge and its running count: the server refreshes the gauge once every two seconds.
+fn mlx_serve_decode(live: u64, running: u64) -> String {
+    format!("vllm:num_requests_running {running}\nmlx_serve:generation_tokens_live {live}\nmlx_serve:prefill_tokens_live 0\nmlx_serve:requests_prefilling 0\n")
+}
+
+#[test]
+fn decode_reads_the_gauge_step_not_the_poll_interval() {
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    // 210 tokens per server refresh at 2, 4 and 6 seconds, polled every second.
+    let mut rates = Vec::new();
+    for (second, live) in [0_u64, 0, 210, 210, 420, 420, 630].into_iter().enumerate() {
+        rates.push(
+            history
+                .observe(
+                    "mlx-serve",
+                    &mlx_serve_decode(live, 1),
+                    now + Duration::from_secs(second as u64),
+                )
+                .unwrap()
+                .generation_tps,
+        );
+    }
+    assert_eq!(
+        (rates[0], rates[1]),
+        (None, None),
+        "nothing before the first step"
+    );
+    // A delta over one poll read 0 or 210 depending on where it landed; the step reads 105 either way.
+    assert!(
+        rates[2..].iter().all(|rate| *rate == Some(105.0)),
+        "{rates:?}"
+    );
+}
+
+#[test]
+fn decode_speed_holds_across_poll_gaps_and_reads_zero_when_the_gauge_stops() {
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let mut poll = |second: u64, live: u64, running: u64| {
+        let result = history
+            .observe(
+                "mlx-serve",
+                &mlx_serve_decode(live, running),
+                now + Duration::from_secs(second),
+            )
+            .unwrap();
+        (result.generation_tps, result.generation_tps_live)
+    };
+    assert_eq!(poll(0, 0, 1), (None, false));
+    assert_eq!(poll(2, 210, 1), (Some(105.0), true));
+    assert_eq!(
+        poll(3, 210, 1),
+        (Some(105.0), true),
+        "a poll that catches no step keeps the speed"
+    );
+    // The request ends between refreshes: the gauge stops, and the reading follows it down.
+    assert_eq!(poll(4, 210, 0), (Some(105.0), true));
+    assert_eq!(poll(7, 210, 0), (Some(0.0), true));
+    assert_eq!(
+        poll(10, 210, 1),
+        (None, false),
+        "a new request has not been measured yet"
+    );
+    assert_eq!(poll(12, 420, 1), (Some(105.0), true));
+}
+
+#[test]
+fn a_gauge_drop_restarts_the_decode_window() {
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let mut poll = |second: u64, live: u64| {
+        history
+            .observe(
+                "mlx-serve",
+                &mlx_serve_decode(live, 1),
+                now + Duration::from_secs(second),
+            )
+            .unwrap()
+            .generation_tps
+    };
+    assert_eq!(poll(0, 0), None);
+    assert_eq!(poll(2, 210), Some(105.0));
+    assert_eq!(
+        poll(4, 5),
+        None,
+        "a restarted server's gauge carries no speed"
+    );
+    assert_eq!(poll(6, 215), Some(105.0));
 }

@@ -95,7 +95,7 @@ pub(crate) fn sample_macos_gpu_thermal(host: &dyn Host, sample: &mut Sample) {
 // Linux has no vm_stat / ioreg / pmset. Memory and swap come from
 // /proc/meminfo, paging rates from /proc/vmstat (pswpin/pswpout), pressure
 // level from the MemAvailable ratio blended with /proc/pressure/memory
-// stalls, GPUs from nvidia-smi when present, and thermals from
+// stalls, GPUs from nvidia-smi and amdgpu sysfs when present, and thermals from
 // /sys/class/thermal. Anything without a source stays `None`/unavailable
 // and the UI already renders that as a dash.
 
@@ -220,8 +220,8 @@ pub(crate) fn linux_metal_init(host: &dyn Host) -> MetalTelemetry {
     }
 }
 
-pub(crate) fn linux_thermal_celsius(host: &dyn Host, nvidia_temp: Option<u64>) -> Option<u64> {
-    let mut hottest = nvidia_temp.unwrap_or(0);
+pub(crate) fn linux_thermal_celsius(host: &dyn Host, gpu_temp: Option<u64>) -> Option<u64> {
+    let mut hottest = gpu_temp.unwrap_or(0);
     for entry in host.read_dir(Path::new("/sys/class/thermal")) {
         if let Some(text) = host.read_file(&entry.join("temp")) {
             // Values are millidegrees Celsius on most drivers.
@@ -314,7 +314,7 @@ pub(crate) fn sample_linux_gpu_thermal(
     sample.gpus = gpu::collect(host, previous);
     sample.gpu_util = gpu::peak_utilization(&sample.gpus);
     // VRAM remains per-card. A sum would falsely suggest a single allocation
-    // pool and feed NVIDIA memory into the Apple Metal correlation rules.
+    // pool and feed discrete GPU memory into the Apple Metal correlation rules.
     sample.gpu_in_use = None;
     sample.gpu_alloc = None;
     sample.metal.renderer_util = None;

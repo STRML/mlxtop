@@ -141,7 +141,7 @@ pub(crate) fn draw(
     } else if devices.len() > 1 {
         " device-wide · VRAM belongs to each card · [ / ] select GPU ".into()
     } else {
-        " device-wide · nvidia-smi ".into()
+        format!(" device-wide · {} ", gpu::source(devices))
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -154,7 +154,8 @@ pub(crate) fn draw(
             ),
             Span::styled(
                 format!(
-                    "NVIDIA · {} {} ",
+                    "{} · {} {} ",
+                    gpu::vendors(devices),
                     devices.len(),
                     if devices.len() == 1 { "card" } else { "cards" }
                 ),

@@ -3,11 +3,12 @@
 use crate::analysis::signal_summary;
 use crate::chart_navigation::Chart;
 use crate::collector::CollectorView;
-use crate::config::{Config, Thresholds};
+use crate::config::{config_history, config_interval, config_path, Config, Thresholds};
 use crate::domain::{EventKind, LlmProcess, Sample, SignalEvent};
 use crate::formatting::bytes;
 use crate::logging::{diagnostics_log, log_field};
 use crate::sampler::{Sampler, SamplerCommand};
+use crate::settings::Settings;
 use crate::{chart_navigation, operator_history, request_history};
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -15,7 +16,11 @@ use crossterm::event::{
 use std::collections::VecDeque;
 use std::io::{stdout, Write};
 use std::sync::mpsc::TryRecvError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Two left clicks on one chart within this time enlarge or restore it.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum JournalFilter {
     All,
@@ -177,13 +182,20 @@ pub(crate) struct App {
     pub(crate) diagnostics_scroll: u16,
     pub(crate) diagnostics_max_scroll: std::cell::Cell<u16>,
     pub(crate) quit: bool,
+    /// Esc at the top level asks before quitting, because quitting discards the session's history.
+    pub(crate) quit_prompt: bool,
     pub(crate) sampler_disconnected: bool,
     pub(crate) alert: Option<ActiveAlert>,
     pub(crate) alert_bells: usize,
     /// Rings the terminal bell; replaced in tests so no BEL reaches stdout.
     pub(crate) bell: fn(),
     pub(crate) critical_episode: bool,
+    /// Whether critical conditions ring the bell and raise the banner (`alarms` in the config).
+    pub(crate) alarms: bool,
     pub(crate) thresholds: Thresholds,
+    pub(crate) settings: Settings,
+    /// The last left click on a chart, to recognise a double click.
+    pub(crate) last_click: Option<(Instant, Chart)>,
 }
 
 impl App {
@@ -234,12 +246,16 @@ impl App {
             diagnostics_scroll: 0,
             diagnostics_max_scroll: Default::default(),
             quit: false,
+            quit_prompt: false,
             sampler_disconnected: false,
             alert: None,
             alert_bells: 0,
             bell: ring_terminal_bell,
             critical_episode: false,
+            alarms: config.alarms.unwrap_or(true),
             thresholds,
+            settings: Settings::new(config_path()),
+            last_click: None,
         }
     }
 
@@ -285,6 +301,9 @@ impl App {
     /// Ring once per critical episode. Acknowledgment silences the episode;
     /// recovery re-arms it. Escalation refreshes the banner without repeating.
     pub(crate) fn track_critical_alert(&mut self, view: &CollectorView) {
+        if !self.alarms {
+            return;
+        }
         let state = critical_state(&view.current);
         if state.is_none() && matches!(view.current.impact.as_str(), "SAMPLING" | "DATA LIMITED") {
             return;
@@ -329,6 +348,15 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        if self.quit_prompt {
+            self.quit_prompt = false;
+            let ctrl_c =
+                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+            if ctrl_c || matches!(key.code, KeyCode::Char('y' | 'Y' | 'q') | KeyCode::Enter) {
+                self.quit = true;
+            }
+            return;
+        }
         if self.diagnostics_open {
             let scroll = self
                 .diagnostics_scroll
@@ -352,7 +380,7 @@ impl App {
                 }
                 KeyCode::Home => self.diagnostics_scroll = 0,
                 KeyCode::End => self.diagnostics_scroll = self.diagnostics_max_scroll.get(),
-                KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1' | '2' | '3') => {
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1' | '2' | '3' | '4') => {
                     self.diagnostics_open = false;
                     self.charts.expanded = false;
                     self.handle_global_key(key);
@@ -382,8 +410,12 @@ impl App {
         // View navigation stays global, including while editing a process filter.
         if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
             self.top_filtering = false;
+            self.settings.editing = None;
             self.charts.expanded = false;
             self.handle_global_key(key);
+            return;
+        }
+        if self.tab == 3 && self.handle_settings_key(key.code) {
             return;
         }
         if self.top_filtering {
@@ -552,7 +584,19 @@ impl App {
             return;
         };
         match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => self.charts.focused = chart,
+            MouseEventKind::Down(MouseButton::Left) => {
+                let now = Instant::now();
+                let double = self.last_click.is_some_and(|(at, clicked)| {
+                    clicked == chart && now.saturating_duration_since(at) <= DOUBLE_CLICK
+                });
+                self.charts.focused = chart;
+                if double {
+                    self.charts.expanded = !self.charts.expanded;
+                    self.last_click = None;
+                } else {
+                    self.last_click = Some((now, chart));
+                }
+            }
             MouseEventKind::Down(MouseButton::Right) => {
                 self.charts.focused = chart;
                 self.charts.expanded = !self.charts.expanded;
@@ -567,12 +611,49 @@ impl App {
     }
 
     pub(crate) fn handle_global_key(&mut self, key: KeyEvent) {
+        let previous_tab = self.tab;
+        self.handle_global_action(key);
+        if self.tab == 3 && previous_tab != 3 {
+            self.settings.reload();
+        }
+    }
+
+    /// A config saved from Settings takes effect now. Interval and history
+    /// change only when they are the edited key, so a value given on the
+    /// command line stays until that setting itself is changed.
+    pub(crate) fn apply_setting(&mut self, key: &str, config: &Config) {
+        match key {
+            "interval" => {
+                self.interval = Duration::from_secs(config_interval(config).0);
+                self.sampler
+                    .send(SamplerCommand::SetInterval(self.interval));
+            }
+            "history" => self
+                .sampler
+                .send(SamplerCommand::SetHistory(config_history(config).0)),
+            "alarms" => {
+                self.alarms = config.alarms.unwrap_or(true);
+                if !self.alarms {
+                    self.alert = None;
+                    self.critical_episode = false;
+                }
+            }
+            _ => {}
+        }
+        self.thresholds = Thresholds::from_config(config);
+        self.sampler
+            .send(SamplerCommand::SetConfig(Box::new(config.clone())));
+    }
+
+    fn handle_global_action(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Char('d') => {
                 self.diagnostics_open = true;
                 self.diagnostics_scroll = 0;
             }
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') => self.quit = true,
+            // Esc backs out of whatever is open; with nothing open it asks first.
+            KeyCode::Esc => self.quit_prompt = true,
             KeyCode::Char('a') => {
                 if let Some(alert) = self.alert.take() {
                     diagnostics_log(
@@ -605,8 +686,9 @@ impl App {
                 self.journal_scroll = 0;
             }
             KeyCode::Char('o') | KeyCode::Char('1') => self.tab = 0,
-            KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % 3,
-            KeyCode::BackTab | KeyCode::Left => self.tab = (self.tab + 2) % 3,
+            KeyCode::Char('4') => self.tab = 3,
+            KeyCode::Tab | KeyCode::Right => self.tab = (self.tab + 1) % 4,
+            KeyCode::BackTab | KeyCode::Left => self.tab = (self.tab + 3) % 4,
             KeyCode::Char('?') | KeyCode::Char('h') => self.help = true,
             KeyCode::Char('}') => {
                 let seconds = self.interval.as_secs().saturating_add(1).min(60);

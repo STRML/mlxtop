@@ -11,6 +11,10 @@ use std::{panic, thread};
 pub(crate) enum SamplerCommand {
     SetPaused(bool),
     SetInterval(Duration),
+    /// A shorter history drops the oldest samples on the next sample.
+    SetHistory(usize),
+    /// Settings saved a new config: new thresholds, and a new endpoint if `omx` changed.
+    SetConfig(Box<Config>),
     Reset,
     Stop,
 }
@@ -91,6 +95,18 @@ impl Sampler {
                             format!("interval_seconds={}", interval.as_secs()),
                         );
                         next_sample = Instant::now() + interval;
+                    }
+                    Ok(SamplerCommand::SetHistory(limit)) => {
+                        collector.history_limit = limit;
+                        diagnostics_log(
+                            "INFO",
+                            "sampler_history_changed",
+                            format!("history_limit={limit}"),
+                        );
+                    }
+                    Ok(SamplerCommand::SetConfig(config)) => {
+                        collector.apply_config(&config);
+                        diagnostics_log("INFO", "sampler_config_changed", "source=settings");
                     }
                     Ok(SamplerCommand::Reset) => {
                         collector.reset();

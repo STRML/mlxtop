@@ -11,6 +11,7 @@ Detailed controls, runtime setup, and explanations of the dashboard readings.
 | Overview | Is memory or paging limiting inference? | Memory pressure and composition, compression, paging, prompt history, throughput, GPU, cache, queue and recent events |
 | Processes | Which process owns the workload? | PID, command, CPU, memory %, RSS, page-ins, OS state and selected runtime details |
 | Journal | What changed during this session? | Request lifecycle, provider/model changes, paging, pressure, compression, GPU, thermal and recovery events |
+| Settings | How is mlxtop configured? | Every `config.json` option with its current value and default, editable in place |
 
 The **top bar** holds the views, a heartbeat spinner that turns with every
 sample (a frozen spinner means sampling stopped or is paused), the refresh
@@ -223,15 +224,29 @@ not require provider changes, restarts or administrator access for accessible
 processes. Failed OS reads omit the process summary. This collector is macOS
 only; Linux retains its existing metrics.
 
-The NVIDIA dashboard is enabled only on Linux after `nvidia-smi` detects at
-least one NVIDIA GPU. macOS and Linux systems without detected NVIDIA cards
-use the standard Overview. Overview's **GPU
-DEVICES** panel lists every detected NVIDIA card with its driver index, name,
+The GPU dashboard is enabled on Linux when `nvidia-smi` detects at least one
+NVIDIA GPU or the amdgpu driver exposes at least one AMD card, and on Windows
+when `nvidia-smi` detects an NVIDIA GPU. macOS and systems without detected
+cards use the standard Overview. Overview's **GPU
+DEVICES** panel lists every detected card with its index, name,
 utilization, VRAM used/total and temperature. Wide terminals add a VRAM bar
 and a textual load state. Use `[` / `]` to select a card; when the list is
 taller than the panel, the selected card scrolls into view and the footer
 shows the visible range. At 80×24, status, throughput, prompt sizes, GPU readings
 and prompt history remain visible; historical charts return with more space.
+
+AMD cards are read on Linux from the amdgpu driver's sysfs files under
+`/sys/class/drm/card*/device`, with no ROCm install or extra tool:
+`mem_info_vram_used` and `mem_info_vram_total`, `gpu_busy_percent`, and the
+`edge` temperature from the card's hwmon sensors (the junction sensor runs
+hotter; edge is the closest match to the core temperature NVIDIA reports).
+Names come from the driver's `product_name` when present, otherwise from the
+system's `pci.ids` (`AMD Radeon RX 9070/9070 XT/9070 GRE`). AMD cards follow
+NVIDIA cards in the list and are identified as `AMD-` plus the driver's
+`unique_id`, or the PCI slot when the card has none. Integrated GPUs whose
+reported VRAM is under 1 GiB are skipped: that is the BIOS carve-out, and it
+would read as a full card on an idle desktop. Clock-limit reasons are not read
+on AMD, so the STATE column shows load only.
 
 Cards are tracked by UUID, following [NVIDIA's guidance on stable device
 identity](https://docs.nvidia.com/deploy/nvidia-smi/), so identical model names remain distinct and a
@@ -252,7 +267,7 @@ inventory total, not a shared allocation pool. `--once` lists all cards and
 their UUIDs without pagination. These are physical-device readings, not
 per-process measurements or a breakdown of MIG instances. Renderer/tiler splits
 and core counts are Apple-only and stay unavailable. Thermals come from
-`/sys/class/thermal` (plus the NVIDIA temperature when available).
+`/sys/class/thermal` (plus the NVIDIA or AMD card temperature when available).
 
 ## Controls
 
@@ -263,13 +278,15 @@ and core counts are Apple-only and stay unavailable. Thermals come from
 | `1` / `o` | Overview |
 | `2` / `t` | Processes |
 | `3` / `j` | Journal |
+| `4` | Settings |
 | `Tab` / `Shift-Tab` | Next / previous view, including while filtering processes |
 | `p` / `Space` | Pause or resume sampling |
 | `r` | Reset rates, charts and journal |
 | `{` / `}` | Change refresh interval (1–60 seconds) |
 | `a` | Acknowledge the current critical system alarm |
 | `?` / `h` | Help |
-| `q` / `Ctrl-C` | Quit (`Esc` restores an enlarged chart before quitting) |
+| `q` / `Ctrl-C` | Quit |
+| `Esc` | Close help, diagnostics, a filter or an enlarged chart; with nothing open, ask before quitting (`y`, `q` or `Enter` quits, any other key stays) |
 
 ### Diagnostics and runtime setup
 
@@ -325,11 +342,11 @@ space. The complete Journal remains accessible with `3`.
 | `+` / `-` or mouse wheel | Zoom time series together, or selected request bars, from 1× to 8× |
 | `0` | Reset time-series zoom, or selected request bars, to 1× |
 | `Enter` / `Esc` | Enlarge / restore the selected chart |
-| Right-click | Toggle enlarged view |
+| Double-click / right-click | Toggle enlarged view |
 | `Shift-↑` / `Shift-↓` | Inspect newer / older prompt observations |
 | `Home` / `End` | Select newest / oldest prompt |
 | `PgUp` / `PgDn` | Move through prompt history by ten requests |
-| `[` / `]` | Select an NVIDIA card on Linux |
+| `[` / `]` | Select a GPU card on Linux |
 
 Time-series charts share zoom. Prompt and latency bars retain their own zoom. Zoom widens captured observations and shows a
 shorter history range; it does not change the sampling interval or the values.
@@ -345,7 +362,8 @@ stay visible. Enable the audible bell in
 your terminal settings to hear it. `a` dismisses the banner for the rest of
 that episode; a confirmed recovery re-arms the alarm. Missing system counters
 do not count as recovery. High GPU utilization is normal workload activity
-and never triggers this alarm by itself.
+and never triggers this alarm by itself. Set `"alarms": false` in the
+[configuration](#configuration) to turn the bell and banner off.
 
 Diagnostics distinguish measured throughput drops from resource usage. When
 nothing needs action and memory pressure is normal, the assessment reads
@@ -354,9 +372,10 @@ a busy GPU alone never becomes the finding. A measured drop shows the rate
 change, an associated signal with confidence, and a short suggested check.
 Linux temperature readings are shown as measurements, not inferred throttling.
 
-### NVIDIA findings
+### GPU findings
 
-On Linux and Windows with NVIDIA cards, the assessment names three GPU
+On Linux and Windows with NVIDIA cards, and on Linux with AMD cards, the
+assessment names three GPU
 problems that limit local inference. They rank below critical host memory,
 swap thrashing, heavy paging and page-in recovery, and above memory stress
 and host thermal limits:
@@ -373,7 +392,8 @@ running at its configured limit: the GPU panel's STATE column shows
 `power cap`, but it is not a finding. Clock-limit reasons come from a separate
 `nvidia-smi` query (`clocks_throttle_reasons.active`, then
 `clocks_event_reasons.active` on newer drivers), so a driver without them
-still shows utilization, VRAM and temperature. On Windows a full card may
+still shows utilization, VRAM and temperature. AMD cards report no
+clock-limit reasons, so on AMD the findings are placement and VRAM only. On Windows a full card may
 spill into shared system memory, which the driver does not report; the
 finding says so. Offload is not reported for a remote runtime, whose
 placement says nothing about local cards.
@@ -406,6 +426,28 @@ that a corresponding process exists on the machine running mlxtop.
 | `f` / `]` | Next event filter |
 | `[` | Previous event filter |
 
+### Settings
+
+Settings lists every [configuration](#configuration) option, grouped into
+General, oMLX server and Thresholds. A value set in `config.json` is shown in
+white beside its default; an unset one shows the default in grey. Rates are
+entered in MiB/s and stored in bytes per second.
+
+| Key | Action |
+| --- | --- |
+| `↑` / `↓` / `Home` / `End` | Select a setting |
+| `Enter` | Edit the value, or toggle an on/off setting (`Space` toggles too) |
+| `Enter` while editing | Check and save; an invalid value is refused with the reason |
+| `Esc` while editing | Cancel the edit |
+| `x` / `Delete` | Reset to the default by removing the key |
+
+A saved change takes effect at once and is written to `config.json`, so the
+next start uses it too. Keys the view doesn't know are kept. A file that
+doesn't parse is shown with the error and never overwritten; fix it by hand.
+Changing the refresh interval or history here replaces a value given with
+`--interval` or `--history` for the rest of the session. The file is read
+again each time Settings opens, so edits made by hand show up.
+
 ## Command-line options
 
 ```text
@@ -430,8 +472,9 @@ sessions afterwards.
 
 ## Configuration
 
-Create `~/.config/mlxtop/config.json` to customize mlxtop. All fields are optional,
-and anything you leave out keeps its built-in default.
+Press `4` to edit these options in [Settings](#settings), or create
+`~/.config/mlxtop/config.json` by hand. All fields are optional, and anything
+you leave out keeps its built-in default.
 
 ```json
 {
@@ -470,6 +513,7 @@ and anything you leave out keeps its built-in default.
 | `swap_warn_exit` | integer | 2 MiB/s | Swap churn below which "PAGING ACTIVE" clears |
 | `compression_warn_rate` | integer | 64 MiB/s | Compression churn that raises "COMPRESSION ACTIVE" |
 | `compression_warn_exit` | integer | 32 MiB/s | Compression churn below which it clears |
+| `alarms` | boolean | true | `false` turns off the critical-condition bell and banner; charts, the assessment and the Journal still show the condition |
 
 Rates are bytes per second; loads are percentages.
 
@@ -788,18 +832,16 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
 - **mlx-serve:** polls `/metrics` (start the server with `--metrics`; set
   `MLXTOP_PROVIDER_API_KEY` if it has an API key) and `/metrics.json` for the model and
   one entry per running request (prompt, cached and output counts; cache-only sessions
-  are skipped). Each running request's speed is the growth of its own
-  `generated_tokens`, which counts the tokens its client receives, so it can be
-  compared directly with the client's own tokens/s while the generation panel reports
-  the whole server. The queue lists every running request with its rate; decode rates
-  carry `↓` and a session still prefilling has none yet. The queue takes the rows its
-  list needs while anything is decoding. Prompt load keeps the prompt size as a bar's
-  height and writes that request's generated tokens under the bar when the panel has a
-  spare row. Generation rate is the delta of `mlx_serve:generation_tokens_live`, which
-  includes tokens of requests still running. Prefill rate is the growth of
+  are skipped). Generation rate keeps the points where `mlx_serve:generation_tokens_live`
+  advanced and divides across a span of at least six seconds, because the server
+  refreshes that gauge once every two seconds and a one-second delta reads 0 or twice
+  the true speed; the last real speed stays shown, not live, for four seconds after the
+  gauge stops, then the rate reads a live zero. Prefill rate is the growth of
   `mlx_serve:prefill_tokens_live` since the prefill was first seen, over the time to its
   latest advance, because the gauge moves in coarse chunks; it shows nothing until the
-  first chunk lands and is live only while a prefill is running. The last speed stays
+  first chunk lands and is live only while a prefill is running. While it runs, the
+  prefill panel's footer shows `prefill_tokens_live / prefill_tokens_expected` with the
+  percentage. The last speed stays
   shown, not live, for three seconds, replaced by the finished request's own speed when
   it ends inside that time. A server without `/metrics.json` is asked once per restart. Cache reuse is tokens
   restored from the prefix cache over all prompt tokens. Sampling follows the vLLM rules.
@@ -940,7 +982,8 @@ llama-server router mode and authenticated monitoring endpoints are not supporte
 
 mlxtop reads macOS counters from `sysctl`, `memory_pressure`, `vm_stat`,
 `ioreg`, `pmset` and `ps`. On Linux it reads `/proc/meminfo`, `/proc/vmstat`,
-`/proc/pressure/memory`, `/sys/class/thermal`, `nvidia-smi` (when present)
+`/proc/pressure/memory`, `/sys/class/thermal`, `nvidia-smi` (when present),
+the amdgpu files under `/sys/class/drm` and the system `pci.ids` (when present)
 and `ps`. On Windows it reads memory, commit charge and the process list
 through the Windows APIs (the `sysinfo` crate) and `nvidia-smi` when present. It reads configured provider endpoints and local logs only for
 supported adapters. The application does not contain analytics, upload
