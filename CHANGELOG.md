@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 3.1.2 — 2026-10-22
+
+Running requests now show their own generation speeds, llama.cpp reports a live
+generation rate, and Linux detects AMD GPUs without extra tools.
+
 ### Dashboards
 
 - **Each running request shows its own speed.** While the runtime reports a
@@ -18,6 +23,14 @@
   enough to keep four rows of bars, a row under the size labels shows each
   request's generated tokens. Whether the row is there depends on the panel's
   height alone, so the bars never shrink partway through a session.
+- **llama.cpp reports a live generation rate.** Active decoding slots supply
+  the current output rate, while slots still prefilling do not count toward it.
+  The adapter accepts both object- and list-shaped `/slots` responses.
+- **Linux reads AMD GPU counters from amdgpu sysfs.** Overview shows utilization,
+  VRAM and temperature without a ROCm install. A runtime-suspended card stays
+  listed without polling counters that could wake it on older kernels.
+- **mlx-serve session rates reset after a server restart.** Reused request IDs
+  cannot inherit a previous process's per-request speed.
 
 ## 3.1.1 — 2026-10-20
 
