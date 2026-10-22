@@ -603,6 +603,9 @@ fn llama_progress(slots: &Value) -> Option<Vec<SlotProgress>> {
 /// requests. The live rate is the growth of each running request's output
 /// between two samples; a request counts only when the same slot runs the same
 /// task in both, so a finished or newly started request never reads as speed.
+/// It must also have decoded tokens already in the earlier sample: a slot
+/// still prefilling stays at zero output and is not stalled, and the first
+/// sample after prefill spans prompt time as well.
 #[derive(Default)]
 pub(super) struct LlamaRate {
     previous: Option<(Vec<SlotProgress>, Instant)>,
@@ -633,7 +636,7 @@ impl LlamaRate {
                     .iter()
                     .find(|(s, t, _)| s == slot && t == task)
                     .map(|(_, _, n)| *n);
-                if let Some(before) = before.filter(|before| before <= decoded) {
+                if let Some(before) = before.filter(|before| *before > 0 && before <= decoded) {
                     grown = grown.saturating_add(decoded - before);
                     matched = true;
                 }

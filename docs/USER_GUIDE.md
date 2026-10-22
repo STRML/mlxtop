@@ -796,7 +796,8 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   builds return. While requests run, the generation rate is live: the growth of
   each running request's output between samples, counted only when the same
   slot runs the same task in both, so a finished or newly started request never
-  reads as speed. It needs only `/slots`. The server's `/metrics` rates average
+  reads as speed. A request also counts only once it has started decoding, so a
+  prompt still being processed never reads as 0 tok/s. It needs only `/slots`. The server's `/metrics` rates average
   finished requests, read zero through a long first answer, and return when the
   server is idle.
   Slot capacity, processed prefill

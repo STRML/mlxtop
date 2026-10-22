@@ -1042,7 +1042,7 @@ fn llama_live_rate_follows_the_same_request_between_samples() {
     let mut rate = LlamaRate::default();
     assert_eq!(rate.observe(Some(vec![(0, 7, 100)]), at(0)), None);
     assert_eq!(rate.observe(Some(vec![(0, 7, 127)]), at(1000)), Some(27.0));
-    // A stalled request reads as zero, not as missing.
+    // A stalled request reads as zero, not as missing, once it was decoding.
     assert_eq!(rate.observe(Some(vec![(0, 7, 127)]), at(2000)), Some(0.0));
     // A new task in the same slot starts over instead of reading as speed.
     assert_eq!(rate.observe(Some(vec![(0, 8, 400)]), at(3000)), None);
@@ -1055,6 +1055,28 @@ fn llama_live_rate_follows_the_same_request_between_samples() {
     assert_eq!(
         rate.observe(Some(vec![(0, 8, 447), (1, 9, 15)]), at(5500)),
         Some(40.0)
+    );
+}
+
+#[test]
+fn llama_live_rate_waits_for_decoding_to_start() {
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let mut rate = LlamaRate::default();
+    // Prefill: the request runs but has no output yet, which is not a stall.
+    assert_eq!(rate.observe(Some(vec![(0, 7, 0)]), at(0)), None);
+    assert_eq!(rate.observe(Some(vec![(0, 7, 0)]), at(1000)), None);
+    // The first sample after prefill also covers prompt time.
+    assert_eq!(rate.observe(Some(vec![(0, 7, 12)]), at(2000)), None);
+    assert_eq!(rate.observe(Some(vec![(0, 7, 39)]), at(3000)), Some(27.0));
+    // A prefilling request beside a decoding one adds nothing.
+    assert_eq!(
+        rate.observe(Some(vec![(0, 7, 66), (1, 8, 0)]), at(4000)),
+        Some(27.0)
+    );
+    assert_eq!(
+        rate.observe(Some(vec![(0, 7, 93), (1, 8, 0)]), at(5000)),
+        Some(27.0)
     );
 }
 
