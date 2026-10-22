@@ -115,13 +115,13 @@ fn throttle_query_falls_back_to_the_newer_field_name_and_skips_without_cards() {
 #[test]
 fn vendor_labels_follow_each_backend_identity() {
     let mut cards = parse(TWO);
-    assert_eq!(cards[0].vendor(), "NVIDIA");
+    assert_eq!(cards[0].vendor, Vendor::Nvidia);
     assert_eq!(vendors(&cards), "NVIDIA");
     assert_eq!(source(&cards), "nvidia-smi");
     let mut amd = cards[0].clone();
     amd.uuid = "AMD-5b7c23d1d3025b6c".into();
+    amd.vendor = Vendor::Amd;
     cards.push(amd.clone());
-    assert_eq!(amd.vendor(), "AMD");
     assert_eq!(vendors(&cards), "NVIDIA + AMD");
     assert_eq!(source(&cards), "nvidia-smi + amdgpu sysfs");
     assert_eq!(vendors(&[amd.clone()]), "AMD");

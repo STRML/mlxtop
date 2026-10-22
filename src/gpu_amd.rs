@@ -3,7 +3,7 @@
 //! Collected on Linux only, without extra tools: the driver publishes VRAM,
 //! utilization and temperatures under `/sys/class/drm/card*/device`.
 
-use crate::gpu::Device;
+use crate::gpu::{Device, Vendor};
 use crate::host::Host;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +41,7 @@ pub(crate) fn collect(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
             continue;
         }
         let used = number(host, &dev.join("mem_info_vram_used"));
+        let awake = awake(host, &dev);
         let name = previous
             .iter()
             .find(|gpu| gpu.uuid == uuid)
@@ -49,17 +50,30 @@ pub(crate) fn collect(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
         devices.push(Device {
             index: devices.len() as u32,
             uuid,
+            vendor: Vendor::Amd,
             name,
-            utilization: number(host, &dev.join("gpu_busy_percent"))
+            utilization: awake
+                .then(|| number(host, &dev.join("gpu_busy_percent")))
+                .flatten()
                 .filter(|n| *n <= 100)
                 .map(|n| n as u8),
             used: used.filter(|used| total.is_none_or(|total| *used <= total)),
             total,
-            temperature: temperature(host, &dev),
+            temperature: awake.then(|| temperature(host, &dev)).flatten(),
             throttle_reasons: None,
         });
     }
     devices
+}
+
+/// Whether the card is powered up for counter reads. Before Linux 6.13 the
+/// busy and temperature files call `pm_runtime_get_sync`, which resumes a
+/// runtime-suspended card, so polling would keep a laptop's dGPU awake.
+/// `unsupported` means runtime PM is off and the card stays powered. VRAM
+/// counters never wake the card and are read either way.
+fn awake(host: &dyn Host, dev: &Path) -> bool {
+    read(host, &dev.join("power/runtime_status"))
+        .is_none_or(|status| status == "active" || status == "unsupported")
 }
 
 fn card_number(path: &Path) -> Option<u32> {

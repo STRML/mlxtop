@@ -12,6 +12,7 @@ use crate::host::Host;
 pub(crate) struct Device {
     pub index: u32,
     pub uuid: String,
+    pub vendor: Vendor,
     pub name: String,
     pub utilization: Option<u8>,
     pub used: Option<u64>,
@@ -20,6 +21,30 @@ pub(crate) struct Device {
     /// Active clock-limit reasons as the NVML bitmask; `None` when the driver
     /// does not report them.
     pub throttle_reasons: Option<u64>,
+}
+
+/// The backend that reported a card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Vendor {
+    Nvidia,
+    Amd,
+}
+
+impl Vendor {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Nvidia => "NVIDIA",
+            Self::Amd => "AMD",
+        }
+    }
+
+    /// Where the counters come from, for the panel footer.
+    pub fn source(self) -> &'static str {
+        match self {
+            Self::Nvidia => "nvidia-smi",
+            Self::Amd => "amdgpu sysfs",
+        }
+    }
 }
 
 /// Why the driver is holding clocks below their maximum, most severe first.
@@ -67,16 +92,6 @@ const HW_THERMAL_SLOWDOWN: u64 = 0x40;
 const HW_POWER_BRAKE_SLOWDOWN: u64 = 0x80;
 
 impl Device {
-    /// The vendor, from the identity each backend assigns: NVIDIA UUIDs start
-    /// with `GPU-`, AMD identities with `AMD-`.
-    pub fn vendor(&self) -> &'static str {
-        if self.uuid.starts_with("AMD-") {
-            "AMD"
-        } else {
-            "NVIDIA"
-        }
-    }
-
     pub fn memory_percent(&self) -> Option<u16> {
         let (used, total) = self.used.zip(self.total)?;
         (total > 0).then(|| ((u128::from(used) * 100 / u128::from(total)).min(100)) as u16)
@@ -119,7 +134,7 @@ pub(crate) fn collect(host: &dyn Host, previous: &[Device]) -> Vec<Device> {
     let (amd_before, nvidia_before): (Vec<Device>, Vec<Device>) = previous
         .iter()
         .cloned()
-        .partition(|gpu| gpu.vendor() == "AMD");
+        .partition(|gpu| gpu.vendor == Vendor::Amd);
     let mut devices = collect_nvidia(host, &nvidia_before);
     let offset = devices.len() as u32;
     devices.extend(
@@ -223,6 +238,7 @@ pub(crate) fn parse(text: &str) -> Vec<Device> {
             Some(Device {
                 index,
                 uuid: uuid.into(),
+                vendor: Vendor::Nvidia,
                 name,
                 utilization,
                 used,
@@ -255,8 +271,8 @@ pub(crate) fn peak_utilization(devices: &[Device]) -> Option<u8> {
 pub(crate) fn vendors(devices: &[Device]) -> String {
     let mut names: Vec<&str> = Vec::new();
     for gpu in devices {
-        if !names.contains(&gpu.vendor()) {
-            names.push(gpu.vendor());
+        if !names.contains(&gpu.vendor.label()) {
+            names.push(gpu.vendor.label());
         }
     }
     names.join(" + ")
@@ -266,13 +282,8 @@ pub(crate) fn vendors(devices: &[Device]) -> String {
 pub(crate) fn source(devices: &[Device]) -> String {
     let mut sources: Vec<&str> = Vec::new();
     for gpu in devices {
-        let source = if gpu.vendor() == "AMD" {
-            "amdgpu sysfs"
-        } else {
-            "nvidia-smi"
-        };
-        if !sources.contains(&source) {
-            sources.push(source);
+        if !sources.contains(&gpu.vendor.source()) {
+            sources.push(gpu.vendor.source());
         }
     }
     sources.join(" + ")

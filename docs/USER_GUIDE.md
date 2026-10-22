@@ -248,6 +248,16 @@ reported VRAM is under 1 GiB are skipped: that is the BIOS carve-out, and it
 would read as a full card on an idle desktop. Clock-limit reasons are not read
 on AMD, so the STATE column shows load only.
 
+A card the kernel has put to sleep (`power/runtime_status` other than
+`active`), such as a hybrid laptop's idle dGPU, stays listed with its VRAM
+but without utilization or temperature readings. On kernels before 6.13 those
+two files wake the card when read, so polling them once a second would keep it
+powered and drain the battery; VRAM counters never wake it.
+
+APUs with a large carve-out, such as Strix Halo, are listed as cards. A model
+on such a machine may live in GTT (system memory the GPU maps) rather than in
+the carve-out, so VRAM can read low while the model is loaded.
+
 Cards are tracked by UUID, following [NVIDIA's guidance on stable device
 identity](https://docs.nvidia.com/deploy/nvidia-smi/), so identical model names remain distinct and a
 selection follows the same device if driver indices change. The **GPU max**
