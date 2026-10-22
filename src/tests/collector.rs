@@ -586,6 +586,7 @@ fn app_applies_new_views_and_keeps_the_selected_gpu_by_uuid() {
     let device = |index: u32, uuid: &str| gpu::Device {
         index,
         uuid: uuid.into(),
+        vendor: gpu::Vendor::Nvidia,
         name: "card".into(),
         utilization: Some(1),
         used: None,

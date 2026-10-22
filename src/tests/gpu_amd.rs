@@ -78,7 +78,7 @@ fn reads_a_discrete_card_from_sysfs() {
     let card = &cards[0];
     assert_eq!(card.index, 0);
     assert_eq!(card.uuid, "AMD-5b7c23d1d3025b6c");
-    assert_eq!(card.vendor(), "AMD");
+    assert_eq!(card.vendor, Vendor::Amd);
     assert_eq!(card.name, "AMD Radeon RX 9070/9070 XT/9070 GRE");
     assert_eq!(card.utilization, Some(5));
     assert_eq!(card.used, Some(2323398656));
@@ -87,6 +87,47 @@ fn reads_a_discrete_card_from_sysfs() {
     // The edge sensor, not the hotter junction.
     assert_eq!(card.temperature, Some(43));
     assert_eq!(card.throttle_reasons, None);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_sleeping_card_is_listed_without_waking_it() {
+    let dev = "/sys/class/drm/card1/device";
+    let host = |status: &str| {
+        rx9070(
+            FakeHost::default().dir("/sys/class/drm", &["/sys/class/drm/card1"]),
+            "card1",
+            "5b7c23d1d3025b6c\n",
+        )
+        .file(
+            &format!("{dev}/power/runtime_status"),
+            &format!("{status}\n"),
+        )
+    };
+    for status in ["suspended", "suspending", "resuming", "error"] {
+        let host = host(status);
+        let card = &collect(&host, &[])[0];
+        assert_eq!(card.uuid, "AMD-5b7c23d1d3025b6c");
+        // VRAM counters never resume the card; busy and temperature reads
+        // do on kernels before 6.13, so they are not touched at all.
+        assert_eq!(card.used, Some(2323398656));
+        assert_eq!(card.utilization, None);
+        assert_eq!(card.temperature, None);
+        assert!(
+            !host
+                .calls()
+                .iter()
+                .any(|call| call.contains("gpu_busy_percent") || call.contains("hwmon")),
+            "{status}"
+        );
+    }
+    // Runtime PM switched off keeps the card powered, so it is read.
+    for status in ["active", "unsupported"] {
+        let host = host(status);
+        let card = &collect(&host, &[])[0];
+        assert_eq!(card.utilization, Some(5));
+        assert_eq!(card.temperature, Some(43));
+    }
 }
 
 #[cfg(target_os = "linux")]

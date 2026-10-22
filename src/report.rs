@@ -103,7 +103,7 @@ pub(crate) fn write_static(
             percent_u8(sample.metal.tiler_util)
         )?;
     } else {
-        writeln!(out, "GPU          GPU counters unavailable")?;
+        writeln!(out, "GPU          no NVIDIA or AMD counters")?;
     }
     writeln!(
         out,

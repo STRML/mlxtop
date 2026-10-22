@@ -7,6 +7,7 @@ fn card(index: u32, utilization: u8, used_mib: u64, reasons: Option<u64>) -> Dev
     Device {
         index,
         uuid: format!("GPU-{index}"),
+        vendor: crate::gpu::Vendor::Nvidia,
         name: "NVIDIA RTX 4090".into(),
         utilization: Some(utilization),
         used: Some(used_mib * MIB),
