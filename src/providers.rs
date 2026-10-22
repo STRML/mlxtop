@@ -282,6 +282,7 @@ pub(super) struct Adapter {
     backoff: Duration,
     kobold_uptime: Option<f64>,
     kobold_session: u64,
+    llama: LlamaRate,
     endpoint: native::Endpoint,
     metrics: native::MetricsHistory,
     splash: splash::SplashHistory,
@@ -304,6 +305,7 @@ impl Adapter {
             backoff: Duration::from_secs(1),
             kobold_uptime: None,
             kobold_session: 0,
+            llama: LlamaRate::default(),
             endpoint: native::Endpoint::from_env(),
             metrics: native::MetricsHistory::default(),
             splash: splash::SplashHistory::default(),
@@ -331,6 +333,7 @@ impl Adapter {
             self.next_poll = Instant::now();
             self.backoff = Duration::from_secs(1);
             self.kobold_uptime = None;
+            self.llama = LlamaRate::default();
             self.metrics = native::MetricsHistory::default();
             self.splash = splash::SplashHistory::default();
             self.kobold_session = self.kobold_session.saturating_add(1);
@@ -396,7 +399,7 @@ impl Adapter {
         } else {
             match self.selected.as_deref() {
                 Some("KoboldCpp") => self.poll_kobold(),
-                Some("llama.cpp") => self.poll_llama(),
+                Some("llama.cpp") => self.poll_llama(now),
                 Some("vLLM" | "SGLang") => {
                     let provider = self.selected.as_deref().unwrap();
                     let port = if provider == "vLLM" { 8000 } else { 30000 };
@@ -544,14 +547,104 @@ impl Adapter {
         Some(result)
     }
 
-    fn poll_llama(&self) -> Option<LlmTelemetry> {
+    fn poll_llama(&mut self, now: Instant) -> Option<LlmTelemetry> {
         // Either monitoring endpoint may be disabled independently.
         let slots = self
             .get(8080, "/slots")
-            .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-            .and_then(|slots| parse_llama_slots(&slots));
+            .and_then(|body| serde_json::from_str::<Value>(&body).ok());
+        let live = self
+            .llama
+            .observe(slots.as_ref().and_then(llama_progress), now);
+        let slots = slots.and_then(|slots| parse_llama_slots(&slots));
         let metrics = self.get(8080, "/metrics");
-        merge_llama_metrics(slots, metrics.as_deref())
+        let mut result = merge_llama_metrics(slots, metrics.as_deref());
+        // The server's own rates average finished requests and stay at zero
+        // through a long first answer; a live rate replaces them while requests run.
+        if let (Some(result), Some(rate)) = (result.as_mut(), live) {
+            result.generation_tps = Some(rate);
+            result.generation_tps_live = true;
+        }
+        result
+    }
+}
+
+/// A slot's output tokens. Newer llama-server builds report `next_token` as a
+/// list with one entry per sequence; older ones as a single object.
+fn slot_decoded(slot: &Value) -> Option<u64> {
+    match slot.get("next_token")? {
+        Value::Array(entries) => entries.iter().try_fold(0_u64, |sum, entry| {
+            sum.checked_add(counter(entry, &["n_decoded"])?)
+        }),
+        _ => counter(slot, &["next_token", "n_decoded"]),
+    }
+}
+
+/// One running request: its slot, its task and its output tokens so far.
+type SlotProgress = (u64, u64, u64);
+
+/// Output tokens of every running request by slot and task, from `/slots`.
+/// `None` when the reply does not have that shape.
+fn llama_progress(slots: &Value) -> Option<Vec<SlotProgress>> {
+    slots
+        .as_array()?
+        .iter()
+        .filter(|slot| slot["is_processing"] == true)
+        .map(|slot| {
+            Some((
+                counter(slot, &["id"])?,
+                counter(slot, &["id_task"])?,
+                slot_decoded(slot)?,
+            ))
+        })
+        .collect()
+}
+
+/// llama-server publishes generation speed only as an average over finished
+/// requests. The live rate is the growth of each running request's output
+/// between two samples; a request counts only when the same slot runs the same
+/// task in both, so a finished or newly started request never reads as speed.
+/// It must also have decoded tokens already in the earlier sample: a slot
+/// still prefilling stays at zero output and is not stalled, and the first
+/// sample after prefill spans prompt time as well.
+#[derive(Default)]
+pub(super) struct LlamaRate {
+    previous: Option<(Vec<SlotProgress>, Instant)>,
+}
+
+/// Samples further apart than this measure an average, not the current speed.
+const LLAMA_RATE_SPAN: Duration = Duration::from_secs(30);
+
+impl LlamaRate {
+    pub(super) fn observe(
+        &mut self,
+        current: Option<Vec<SlotProgress>>,
+        now: Instant,
+    ) -> Option<f64> {
+        let Some(current) = current else {
+            self.previous = None;
+            return None;
+        };
+        let rate = self.previous.as_ref().and_then(|(old, at)| {
+            let span = now.checked_duration_since(*at)?;
+            if span.is_zero() || span > LLAMA_RATE_SPAN {
+                return None;
+            }
+            let mut grown = 0_u64;
+            let mut matched = false;
+            for (slot, task, decoded) in &current {
+                let before = old
+                    .iter()
+                    .find(|(s, t, _)| s == slot && t == task)
+                    .map(|(_, _, n)| *n);
+                if let Some(before) = before.filter(|before| *before > 0 && before <= decoded) {
+                    grown = grown.saturating_add(decoded - before);
+                    matched = true;
+                }
+            }
+            matched.then(|| grown as f64 / span.as_secs_f64())
+        });
+        self.previous = Some((current, now));
+        rate
     }
 }
 
@@ -625,9 +718,9 @@ fn parse_llama_slots(slots: &Value) -> Option<LlmTelemetry> {
         // Sum every active slot, but never present a partial sum as complete.
         output_tokens: (!active.is_empty())
             .then(|| {
-                active.iter().try_fold(0_u64, |sum, slot| {
-                    sum.checked_add(counter(slot, &["next_token", "n_decoded"])?)
-                })
+                active
+                    .iter()
+                    .try_fold(0_u64, |sum, slot| sum.checked_add(slot_decoded(slot)?))
             })
             .flatten(),
         // n_ctx is capacity, n_decoded is output, and prompt_n is fresh prefill

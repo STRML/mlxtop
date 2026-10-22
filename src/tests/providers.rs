@@ -83,6 +83,7 @@ fn usage_file_supplements_live_slots_and_filters_other_providers() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
@@ -145,6 +146,7 @@ fn llama_http_polls_metrics_even_when_slots_are_disabled() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
@@ -463,6 +465,7 @@ fn kobold_restart_does_not_reuse_request_identity() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
@@ -542,6 +545,7 @@ fn provider_switch_drops_cached_counts() {
         backoff: Duration::from_secs(30),
         kobold_uptime: None,
         kobold_session: 0,
+        llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
@@ -590,6 +594,7 @@ fn native_poll_uses_get_and_preserves_last_result_age() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
@@ -790,6 +795,7 @@ fn every_new_adapter_polls_its_native_read_only_endpoint() {
             backoff: Duration::from_secs(1),
             kobold_uptime: None,
             kobold_session: 0,
+            llama: LlamaRate::default(),
             endpoint: native::Endpoint::default(),
             metrics: native::MetricsHistory::default(),
             splash: splash::SplashHistory::default(),
@@ -843,6 +849,7 @@ fn diagnostic_adapter(provider: &str, port: u16) -> Adapter {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
@@ -981,6 +988,7 @@ fn mlx_serve_stops_asking_for_metrics_json_after_a_404_until_restart() {
         backoff: Duration::from_secs(1),
         kobold_uptime: None,
         kobold_session: 0,
+        llama: LlamaRate::default(),
         endpoint: native::Endpoint::default(),
         metrics: native::MetricsHistory::default(),
         splash: splash::SplashHistory::default(),
@@ -1007,5 +1015,97 @@ fn mlx_serve_stops_asking_for_metrics_json_after_a_404_until_restart() {
         2,
         "one probe, then one more after the restart: {:?}",
         paths.lock().unwrap()
+    );
+}
+
+#[test]
+fn llama_slots_read_next_token_as_an_object_or_a_list() {
+    let object = json!([{"id":0,"id_task":7,"is_processing":true,"next_token":{"n_decoded":40}}]);
+    let list = json!([{"id":0,"id_task":7,"is_processing":true,"next_token":[{"n_decoded":40}]}]);
+    for slots in [&object, &list] {
+        assert_eq!(parse_llama_slots(slots).unwrap().output_tokens, Some(40));
+        assert_eq!(llama_progress(slots), Some(vec![(0, 7, 40)]));
+    }
+    // Idle slots are not running requests; a running slot without a task id
+    // cannot be followed between samples.
+    let idle = json!([{"id":0,"id_task":7,"is_processing":false,"next_token":[{"n_decoded":40}]}]);
+    assert_eq!(llama_progress(&idle), Some(vec![]));
+    let untracked = json!([{"id":0,"is_processing":true,"next_token":[{"n_decoded":40}]}]);
+    assert_eq!(llama_progress(&untracked), None);
+    assert_eq!(llama_progress(&json!({"error":"disabled"})), None);
+}
+
+#[test]
+fn llama_live_rate_follows_the_same_request_between_samples() {
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let mut rate = LlamaRate::default();
+    assert_eq!(rate.observe(Some(vec![(0, 7, 100)]), at(0)), None);
+    assert_eq!(rate.observe(Some(vec![(0, 7, 127)]), at(1000)), Some(27.0));
+    // A stalled request reads as zero, not as missing, once it was decoding.
+    assert_eq!(rate.observe(Some(vec![(0, 7, 127)]), at(2000)), Some(0.0));
+    // A new task in the same slot starts over instead of reading as speed.
+    assert_eq!(rate.observe(Some(vec![(0, 8, 400)]), at(3000)), None);
+    assert_eq!(rate.observe(Some(vec![(0, 8, 427)]), at(4000)), Some(27.0));
+    // Two slots add up; only requests seen in both samples count.
+    assert_eq!(
+        rate.observe(Some(vec![(0, 8, 437), (1, 9, 5)]), at(5000)),
+        Some(10.0)
+    );
+    assert_eq!(
+        rate.observe(Some(vec![(0, 8, 447), (1, 9, 15)]), at(5500)),
+        Some(40.0)
+    );
+}
+
+#[test]
+fn llama_live_rate_waits_for_decoding_to_start() {
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let mut rate = LlamaRate::default();
+    // Prefill: the request runs but has no output yet, which is not a stall.
+    assert_eq!(rate.observe(Some(vec![(0, 7, 0)]), at(0)), None);
+    assert_eq!(rate.observe(Some(vec![(0, 7, 0)]), at(1000)), None);
+    // The first sample after prefill also covers prompt time.
+    assert_eq!(rate.observe(Some(vec![(0, 7, 12)]), at(2000)), None);
+    assert_eq!(rate.observe(Some(vec![(0, 7, 39)]), at(3000)), Some(27.0));
+    // A prefilling request beside a decoding one adds nothing.
+    assert_eq!(
+        rate.observe(Some(vec![(0, 7, 66), (1, 8, 0)]), at(4000)),
+        Some(27.0)
+    );
+    assert_eq!(
+        rate.observe(Some(vec![(0, 7, 93), (1, 8, 0)]), at(5000)),
+        Some(27.0)
+    );
+}
+
+#[test]
+fn llama_live_rate_resets_on_gaps_and_failed_reads() {
+    let start = Instant::now();
+    let mut rate = LlamaRate::default();
+    rate.observe(Some(vec![(0, 7, 100)]), start);
+    // Too far apart to be the current speed.
+    assert_eq!(
+        rate.observe(Some(vec![(0, 7, 200)]), start + Duration::from_secs(60)),
+        None
+    );
+    // A failed read forgets the baseline.
+    assert_eq!(rate.observe(None, start + Duration::from_secs(61)), None);
+    assert_eq!(
+        rate.observe(Some(vec![(0, 7, 300)]), start + Duration::from_secs(62)),
+        None
+    );
+    // The same instant twice and a counter that went backwards give nothing.
+    let same = start + Duration::from_secs(62);
+    assert_eq!(rate.observe(Some(vec![(0, 7, 300)]), same), None);
+    assert_eq!(
+        rate.observe(Some(vec![(0, 7, 10)]), start + Duration::from_secs(63)),
+        None
+    );
+    // Nothing running.
+    assert_eq!(
+        rate.observe(Some(vec![]), start + Duration::from_secs(64)),
+        None
     );
 }

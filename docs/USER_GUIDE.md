@@ -808,6 +808,14 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   rates and active/deferred queue counts when the server starts with `--metrics`.
   Either endpoint can work independently. Output counts sum all active slots;
   if any active slot omits its output count, the total stays unavailable.
+  `next_token` is read both as an object and as the per-sequence list newer
+  builds return. While requests run, the generation rate is live: the growth of
+  each running request's output between samples, counted only when the same
+  slot runs the same task in both, so a finished or newly started request never
+  reads as speed. A request also counts only once it has started decoding, so a
+  prompt still being processed never reads as 0 tok/s. It needs only `/slots`. The server's `/metrics` rates average
+  finished requests, read zero through a long first answer, and return when the
+  server is idle.
   Slot capacity, processed prefill
   work and retained context are not treated as full request prompt counts. Use
   the usage-file integration below for exact completion usage.
