@@ -347,6 +347,32 @@ fn a_session_count_that_moves_every_two_seconds_reads_steadily() {
 }
 
 #[test]
+fn mlx_serve_restart_drops_per_session_rate_history() {
+    let start = Instant::now();
+    let mut history = MetricsHistory::default();
+    let metrics = |started: u64| {
+        format!(
+            "{}process_start_time_seconds {started}\n",
+            mlx_serve_decode(100, 1)
+        )
+    };
+    let session = |generated: u64| {
+        json!({"sessions":[{"phase":"decode","context_tokens":1000 + generated,
+            "generated_tokens":generated,"request_id":7}]})
+    };
+    let mut poll = |second: u64, started: u64, generated: u64| {
+        let at = start + Duration::from_secs(second);
+        let mut result = history.observe("mlx-serve", &metrics(started), at).unwrap();
+        history.apply_sessions(&mut result, &session(generated), SystemTime::now(), at);
+        result.requests[0].output_tps
+    };
+    assert_eq!(poll(0, 1, 10), None);
+    assert_eq!(poll(1, 1, 20), Some(10.0));
+    // A new process may reuse the id and prompt length between two polls.
+    assert_eq!(poll(2, 2, 30), None);
+}
+
+#[test]
 fn prometheus_rates_need_two_fresh_matching_counter_sets() {
     let now = Instant::now();
     let mut history = MetricsHistory::default();

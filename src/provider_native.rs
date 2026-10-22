@@ -694,6 +694,7 @@ impl MetricsHistory {
             if !same_start {
                 // A restarted server's gauges start over, so no earlier speed applies to them.
                 self.generation.reset();
+                self.sessions = SessionSpeeds::default();
             }
             if old_provider == provider && elapsed > 0.0 && elapsed <= 5.0 && same_start {
                 result.generation_tps = metrics.delta(previous, &generation).map(|n| n / elapsed);
