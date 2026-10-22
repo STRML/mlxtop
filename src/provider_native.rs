@@ -440,7 +440,12 @@ impl GenerationWindow {
     /// every hand-off. Nothing is reported until the first gauge step lands: before that there is no
     /// measurement, and a zero would claim a stalled server.
     fn rate(&mut self, now: Instant, metrics: &Metrics) -> Option<(f64, bool)> {
-        let live = metrics.sum("mlx_serve:generation_tokens_live")?;
+        self.observe(now, metrics.sum("mlx_serve:generation_tokens_live")?)
+    }
+
+    /// The same reading for any count of generated tokens: the server-wide gauge, or one session's
+    /// `generated_tokens`, which may step on the same refresh.
+    fn observe(&mut self, now: Instant, live: f64) -> Option<(f64, bool)> {
         // The gauge falling means a restart or a fresh window; its speed cannot be carried over.
         if self.advances.back().is_some_and(|(_, seen)| *seen > live) {
             self.advances.clear();
@@ -499,10 +504,16 @@ impl GenerationWindow {
     }
 }
 
+/// Each running mlx-serve request's own decode speed, by request id: the prompt it was first seen with,
+/// and a stepping window over its `generated_tokens`.
+#[derive(Default)]
+pub(super) struct SessionSpeeds(BTreeMap<String, (u64, GenerationWindow)>);
+
 #[derive(Default)]
 pub(super) struct MetricsHistory {
     previous: Option<(String, Instant, Metrics)>,
     prefill: PrefillWindow,
+    sessions: SessionSpeeds,
     generation: GenerationWindow,
     /// Start time of the mlx-serve process that answered `/metrics.json` with a 404.
     no_sessions: Option<f64>,
@@ -572,6 +583,17 @@ impl MetricsHistory {
 
     pub fn note_sessions_missing(&mut self) {
         self.no_sessions = self.start_time();
+    }
+
+    /// Fill in mlx-serve's running requests and each request's own decode speed.
+    pub(super) fn apply_sessions(
+        &mut self,
+        result: &mut LlmTelemetry,
+        value: &Value,
+        now: SystemTime,
+        at: Instant,
+    ) {
+        apply_mlx_serve_sessions(result, value, now, at, &mut self.sessions);
     }
 
     /// What mlx-serve adds to the shared vLLM-shaped result: MLX memory, the prefill rate, and the
@@ -672,6 +694,7 @@ impl MetricsHistory {
             if !same_start {
                 // A restarted server's gauges start over, so no earlier speed applies to them.
                 self.generation.reset();
+                self.sessions = SessionSpeeds::default();
             }
             if old_provider == provider && elapsed > 0.0 && elapsed <= 5.0 && same_start {
                 result.generation_tps = metrics.delta(previous, &generation).map(|n| n / elapsed);
@@ -729,13 +752,25 @@ impl MetricsHistory {
 
 /// Fill in the model and the live requests from mlx-serve's `/metrics.json` sessions. Sessions that
 /// only hold a prefix cache are not requests and are skipped.
-pub(super) fn apply_mlx_serve_sessions(result: &mut LlmTelemetry, value: &Value, now: SystemTime) {
+///
+/// A session's `generated_tokens` is the tokens its client receives, so its growth is that request's
+/// own speed, not the server total the generation panel shows. It is read through the same stepping
+/// window as the server gauge, so it holds steady whether the count moves every decode tick or only
+/// when the server refreshes its gauges.
+pub(super) fn apply_mlx_serve_sessions(
+    result: &mut LlmTelemetry,
+    value: &Value,
+    now: SystemTime,
+    at: Instant,
+    speeds: &mut SessionSpeeds,
+) {
     let Some(sessions) = value.get("sessions").and_then(Value::as_array) else {
         return;
     };
     if let Some(model) = sessions.iter().find_map(|s| identifier(s, "model")) {
         result.model = Some(model);
     }
+    let mut seen = BTreeMap::new();
     result.requests = sessions
         .iter()
         .filter(|s| matches!(s["phase"].as_str(), Some("prefill" | "decode")))
@@ -743,17 +778,34 @@ pub(super) fn apply_mlx_serve_sessions(result: &mut LlmTelemetry, value: &Value,
         .filter_map(|(index, s)| {
             let context = counter(s, &["context_tokens"])?;
             let output = counter(s, &["generated_tokens"])?;
+            let prompt = context.saturating_sub(output);
+            // The server's id 0 means none. A synthetic slot name is positional, so it may move to a
+            // different request between samples and never carries a speed.
+            let real = identifier(s, "request_id").filter(|id| id != "0");
+            let id = real.clone().unwrap_or_else(|| format!("slot-{index}"));
+            let output_tps = real.and_then(|real| {
+                // The prompt is the request's identity: an id reused with another prompt starts over.
+                let (_, mut window) = speeds
+                    .0
+                    .remove(&real)
+                    .filter(|(seen, _)| *seen == prompt)
+                    .unwrap_or_default();
+                // Prefill sessions move `generated_tokens` by zero; a speed there is not a decode rate.
+                let tps = (s["phase"].as_str() == Some("decode"))
+                    .then(|| window.observe(at, output as f64))
+                    .flatten()
+                    .map(|(tps, _)| tps);
+                seen.insert(real, (prompt, window));
+                tps
+            });
             Some(RequestUsage {
                 provider: "mlx-serve".into(),
                 model: identifier(s, "model").unwrap_or_default(),
-                // The server's id 0 means none.
-                id: identifier(s, "request_id")
-                    .filter(|id| id != "0")
-                    .unwrap_or_else(|| format!("slot-{index}")),
-                prompt: context.saturating_sub(output),
+                id,
+                prompt,
                 cached: counter(s, &["cached_tokens"]),
                 output: Some(output),
-                output_tps: None,
+                output_tps,
                 completed: false,
                 queued: false,
                 prefilled: None,
@@ -762,6 +814,9 @@ pub(super) fn apply_mlx_serve_sessions(result: &mut LlmTelemetry, value: &Value,
             })
         })
         .collect();
+    // Only the requests still running are kept, so an id the server reuses after a restart never
+    // inherits an old count.
+    speeds.0 = seen;
     if let [only] = result.requests.as_slice() {
         result.prompt_tokens = Some(only.prompt);
         result.output_tokens = only.output;

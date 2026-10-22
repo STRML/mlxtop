@@ -514,7 +514,8 @@ impl Adapter {
             )
         });
         if let Some(value) = value {
-            native::apply_mlx_serve_sessions(&mut result, &value, SystemTime::now());
+            self.metrics
+                .apply_sessions(&mut result, &value, SystemTime::now(), Instant::now());
         }
         Some(result)
     }

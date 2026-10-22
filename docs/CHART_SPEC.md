@@ -40,13 +40,13 @@ NVIDIA identity and per-device readings retain a selectable table budget.
 | --- | --- |
 | runtime card | Provider, engine and model; status badge (spinner while working, prefill %); source age once 3 s old; on the bottom edge device, GPU cores, GPU memory meter (yellow from 90%, red from 97%), runtime memory and CPU; thermal only when not normal |
 | generation / prefill | Separate tok/s bar histories with independent axes; no outer throughput box |
-| prompt load | One labeled bar per observed request, cache split when reported, queued requests hatched; prefill progress for a live request still prefilling |
+| prompt load | One labeled bar per observed request, cache split when reported, queued requests hatched; prefill progress for a live request still prefilling; generated tokens under the sizes when the panel keeps four bar rows |
 | memory | PRESSURE in the reading slot; bytes and resident %; a composition bar of wired, app, compressed, cache and free RAM with the GPU wired limit (`iogpu.wired_limit_mb` or the runtime's Metal working set) marked, yellow with a legend reason when wired memory exceeds it; composition history over a pressure ribbon |
 | compression | macOS compress + decompress traffic bars (B/s, axis at least `compression_warn_rate`), stored/compressor bytes and ratio, compressing/decompressing rates and the compressor's share of RAM; yellow from `compression_warn_rate`, never red |
 | GPU | Utilization area and load state; hardware belongs in the runtime card |
 | paging / I/O | Paging-rate bars (axis at least `swap_warn_rate`), page-in/page-out rates and a horizontal swap used/total capacity bar, `swap off` without swap |
 | cache | Interval hit % bars with reuse since start and prefix hit kept in fixed text positions |
-| queue | Independent active/waiting request history and counts; request marks when compact |
+| queue | Independent active/waiting request history and counts; request marks when compact; on Overview, while the runtime reports per-request speeds, a list of running requests with their own speeds in the panel's own rows |
 
 Cache and Queue must remain separate, independently selectable panels; never
 merge them under a shared card. Consolidate cache readings only with Cache.

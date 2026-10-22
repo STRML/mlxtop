@@ -122,6 +122,22 @@ fn size_summary(history: &History, index: usize, width: u16) -> Line<'static> {
     line
 }
 
+/// Plot rows the bars keep before a row of generated tokens goes under them.
+const OUTPUT_ROW_MIN_PLOT: u16 = 4;
+
+/// The tokens a bar's request has generated, so the size above needs no subtraction.
+fn output_label(usage: &domain::RequestUsage, width: u16) -> String {
+    let Some(output) = usage.output.filter(|output| *output > 0) else {
+        return String::new();
+    };
+    let text = compact_tokens(output);
+    if text.chars().count() <= usize::from(width) {
+        text
+    } else {
+        String::new()
+    }
+}
+
 fn is_live(entry: &Entry, sample: &Sample, now: SystemTime) -> bool {
     sample.llm_source == TelemetrySource::Live
         && sample.llm_status != "stale"
@@ -564,19 +580,24 @@ pub(super) fn draw(
     } else {
         2
     };
-    if inner.height < metadata_height + 2 {
+    let (start, visible, slot_width) = window.unwrap();
+    // The prompt size sets the bar's height; the tokens generated so far go
+    // under it when the plot keeps enough rows without it. That depends on the
+    // panel's height alone, so the bars never shrink when output first
+    // arrives. Size labels outrank it.
+    let show_outputs = inner.height >= metadata_height + 2 + OUTPUT_ROW_MIN_PLOT;
+    let footer = 1 + u16::from(show_outputs);
+    if inner.height < metadata_height + footer + 1 {
         return;
     }
-
     // Reserve enough horizontal space for every bar's size, including the
     // selection marker. History remains ordinal, with new requests at right.
     let plot = Rect::new(
         inner.x,
         inner.y + metadata_height,
         inner.width,
-        inner.height - metadata_height - 1,
+        inner.height - metadata_height - footer,
     );
-    let (start, visible, slot_width) = window.unwrap();
     let first_x = plot.right() - visible as u16 * slot_width;
     for (offset, old) in history.entries.iter().skip(start).take(visible).enumerate() {
         let x = first_x + offset as u16 * slot_width;
@@ -614,6 +635,14 @@ pub(super) fn draw(
             }),
             Rect::new(x, plot.bottom(), slot_width, 1),
         );
+        if show_outputs {
+            frame.render_widget(
+                Paragraph::new(output_label(&old.usage, slot_width))
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(MUTED)),
+                Rect::new(x, plot.bottom() + 1, slot_width, 1),
+            );
+        }
     }
 }
 

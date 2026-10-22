@@ -235,6 +235,123 @@ fn queue_range_and_time_window_use_the_actual_graph_width_after_reserving_ticks(
     }
 }
 
+/// A live sample from `provider` with these running requests: id, tokens out, own speed.
+fn running(provider: &str, waiting: u64, requests: &[(&str, u64, Option<f64>)]) -> Sample {
+    let mut sample = live();
+    sample.llm_provider = provider.into();
+    sample.llm_active_requests = Some(requests.len() as u64);
+    sample.llm_waiting_requests = Some(waiting);
+    sample.llm_requests = requests
+        .iter()
+        .map(|(id, out, tps)| domain::RequestUsage {
+            provider: provider.into(),
+            model: "test".into(),
+            id: (*id).into(),
+            prompt: 20,
+            cached: None,
+            output: Some(*out),
+            output_tps: *tps,
+            completed: false,
+            queued: false,
+            prefilled: None,
+            ttft_ms: None,
+            observed_at: Some(SystemTime::now()),
+        })
+        .collect();
+    sample
+}
+
+/// The queue panel as text, on Overview (`Some` window) or enlarged (`None`).
+fn queue_text(history: &History, height: u16, window: Option<usize>) -> String {
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(44, height)).unwrap();
+    terminal
+        .draw(|frame| {
+            queue(
+                frame,
+                frame.area(),
+                history,
+                Duration::from_secs(1),
+                1,
+                window,
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| (0..44).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn overview_queue_lists_each_running_request_with_its_own_rate() {
+    // oMLX reports a speed for every generating request; mlx-serve does the same.
+    for provider in ["oMLX", "mlx-serve"] {
+        let mut history = History::default();
+        history.observe(
+            &running(
+                provider,
+                1,
+                &[("105", 1742, Some(41.0)), ("106", 918, Some(54.7))],
+            ),
+            10,
+        );
+        let roomy = queue_text(&history, 5, Some(60));
+        for label in [
+            "active 2",
+            "waiting 1",
+            "105 1.7k · 41.0 tok/s",
+            "106 918 · 54.7 tok/s",
+        ] {
+            assert!(
+                roomy.contains(label),
+                "{provider}: missing {label}\n{roomy}"
+            );
+        }
+        // One row of room: the count says another request is hidden.
+        let tight = queue_text(&history, 4, Some(60));
+        assert!(tight.contains("active 2 · +1 more"), "{tight}");
+        assert!(tight.contains("105 1.7k · 41.0 tok/s"), "{tight}");
+        // A taller panel keeps its size and fits the list in its own rows.
+        let tall = queue_text(&history, 10, Some(60));
+        assert!(tall.contains("106 918 · 54.7 tok/s"), "{tall}");
+        assert!(
+            tall.contains("waiting 1") && !tall.contains("more"),
+            "{tall}"
+        );
+        // Enlarged, the queue shows its history.
+        let enlarged = queue_text(&history, 10, None);
+        assert!(
+            !enlarged.contains("tok/s") && enlarged.contains("active"),
+            "{enlarged}"
+        );
+    }
+}
+
+#[test]
+fn a_request_without_its_own_rate_keeps_its_row() {
+    // Splash measures a request's speed only while it runs alone.
+    let mut history = History::default();
+    history.observe(&running("oMLX", 0, &[("a1", 300, Some(38.2))]), 10);
+    assert!(queue_text(&history, 8, Some(60)).contains("a1 300 · 38.2 tok/s"));
+    history.observe(
+        &running("oMLX", 0, &[("a1", 340, None), ("b2", 4, None)]),
+        10,
+    );
+    let both = queue_text(&history, 8, Some(60));
+    for label in ["a1 340 · —", "b2 4 · —"] {
+        assert!(both.contains(label), "missing {label}\n{both}");
+    }
+    // A runtime that never reports one keeps the usual queue.
+    let mut vllm = History::default();
+    vllm.observe(&running("vLLM", 0, &[("x", 30, None), ("y", 40, None)]), 10);
+    let usual = queue_text(&vllm, 8, Some(60));
+    assert!(
+        !usual.contains("—") && usual.contains("━ active"),
+        "{usual}"
+    );
+}
+
 #[test]
 fn compact_queue_keeps_exact_counts_when_there_is_no_room_for_a_scale() {
     let mut history = History::default();
