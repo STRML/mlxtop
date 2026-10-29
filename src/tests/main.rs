@@ -788,6 +788,31 @@ fn the_prefill_chart_shows_how_far_the_prefill_has_got() {
 }
 
 #[test]
+fn native_last_prefill_fills_the_chart_after_the_prefill_ends() {
+    let mut app = test_app(0);
+    app.collector.current = Sample {
+        llm_provider: "mlx-serve".into(),
+        llm_prefill_tps: Some(2134.4),
+        ..Sample::default()
+    };
+    let history = VecDeque::from([ChartPoint::new(Some(21344), Tone::Cyan)]);
+    let screen = render_view(90, 8, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "prefill",
+            &history,
+            ChartMetric::Prefill,
+        )
+    });
+    assert!(
+        !screen.contains("No rate samples yet"),
+        "the held reading must fill the chart\n{screen}"
+    );
+    assert!(screen.contains("tok/s"), "{screen}");
+}
+
+#[test]
 fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
