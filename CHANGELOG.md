@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Journal
+
+- **GPU rows mark real load changes.** GPU load wobbling around a line during
+  processing, such as 84% → 79% → 81% or 99% → 94%, no longer writes a row
+  each sample. The busy band turns on at `gpu_warn_load` and holds until load
+  drops below `gpu_warn_exit`, and saturation clears 10 points below
+  `gpu_critical_load`. A `GPU BUSY` assessment row now files under the GPU
+  filter and replaces the duplicate "busy burst started" row.
+- **"GPU busy" in Settings now sets GPU BUSY.** The assessment used a fixed
+  80%; it now reads `gpu_warn_load` (default 75%), so the Settings value and
+  the state agree.
+- **Telemetry online is recorded once.** An idle server whose rate comes and
+  goes between polls no longer logs "live API telemetry online" every few
+  seconds. It logs again only for a new provider or source.
+- **Choose what the Journal records.** `journal.prompts`, `journal.llm`,
+  `journal.queue`, `journal.memory`, `journal.paging`, `journal.gpu` and
+  `journal.thermal` turn each kind of row off, from `config.json` or the new
+  Journal section in Settings. System rows and critical conditions are always
+  recorded.
+
 ## 3.1.2 — 2026-10-22
 
 Running requests now show their own generation speeds, llama.cpp reports a live
