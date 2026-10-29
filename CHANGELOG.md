@@ -15,12 +15,14 @@
   the state agree.
 - **Telemetry online is recorded once.** An idle server whose rate comes and
   goes between polls no longer logs "live API telemetry online" every few
-  seconds. It logs again only for a new provider or source.
+  seconds. It logs again for a new provider or source, or after the server
+  went away and came back.
 - **Choose what the Journal records.** `journal.prompts`, `journal.llm`,
   `journal.queue`, `journal.memory`, `journal.paging`, `journal.gpu` and
   `journal.thermal` turn each kind of row off, from `config.json` or the new
-  Journal section in Settings. System rows and critical conditions are always
-  recorded.
+  Journal section in Settings. System rows, assessment findings such as
+  HEAVY PAGING or GPU THROTTLED, and a move to critical memory pressure are
+  always recorded.
 
 ## 3.1.2 — 2026-10-22
 

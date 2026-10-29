@@ -3956,7 +3956,7 @@ fn every_config_field_reaches_the_resolved_settings() {
     ] {
         assert_eq!(toggle, Some(false));
         assert!(
-            !journal_records(&journal, state, EventKind::from_state(state)),
+            !journal_records(&journal, state, false),
             "journal toggle for {state} was parsed but never filters"
         );
     }

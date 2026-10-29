@@ -1174,3 +1174,82 @@ fn telemetry_online_is_logged_once_while_the_rate_flickers() {
     collector.record_journal_events(Some(&serving(None)), &other);
     assert_eq!(online(&collector), 2);
 }
+
+#[test]
+fn journal_toggles_keep_findings_and_critical_pressure() {
+    let config = Config {
+        journal: Some(JournalConfig {
+            gpu: Some(false),
+            memory: Some(false),
+            paging: Some(false),
+            ..JournalConfig::default()
+        }),
+        ..offline_config()
+    };
+    let mut collector = Collector::with_host(
+        60,
+        config,
+        Box::new(FakeHost::default()),
+        Platform::Linux,
+        None,
+    );
+    let mut previous = Sample {
+        impact: "HEALTHY".into(),
+        pressure: "YELLOW".into(),
+        ..Sample::default()
+    };
+    collector.record_journal_events(None, &previous);
+    for (impact, pressure) in [
+        ("GPU THROTTLED", "YELLOW"),
+        ("PAGING ACTIVE", "YELLOW"),
+        ("GPU BUSY", "YELLOW"),
+        // Counters missing: no MEMORY BOTTLENECK, only the pressure row.
+        ("DATA LIMITED", "RED"),
+    ] {
+        let next = Sample {
+            impact: impact.into(),
+            pressure: pressure.into(),
+            ..Sample::default()
+        };
+        collector.record_journal_events(Some(&previous), &next);
+        previous = next;
+    }
+    let states: Vec<_> = journal(&collector).into_iter().map(|(s, _)| s).collect();
+    assert_eq!(
+        states,
+        [
+            "SYSTEM",
+            "GPU THROTTLED",
+            "PAGING ACTIVE",
+            "DATA LIMITED",
+            "PRESSURE"
+        ]
+    );
+}
+
+#[test]
+fn telemetry_online_is_logged_again_after_the_server_returns() {
+    let mut collector = collector(FakeHost::default(), Platform::Linux, None);
+    let serving = |source, tps: Option<f64>| Sample {
+        llm_provider: "mlx-serve".into(),
+        llm_source: source,
+        llm_generation_tps: tps,
+        ..Sample::default()
+    };
+    let steps = [
+        serving(TelemetrySource::Live, None),
+        serving(TelemetrySource::Live, Some(0.0)),
+        serving(TelemetrySource::None, None),
+        serving(TelemetrySource::Live, Some(0.0)),
+    ];
+    collector.record_journal_events(None, &steps[0]);
+    for pair in steps.windows(2) {
+        collector.record_journal_events(Some(&pair[0]), &pair[1]);
+    }
+    let online = collector
+        .signals
+        .iter()
+        .filter(|event| event.summary.contains("telemetry online"))
+        .count();
+    assert_eq!(online, 2);
+}

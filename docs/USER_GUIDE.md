@@ -530,15 +530,15 @@ you leave out keeps its built-in default.
 | `journal.prompts` | boolean | true | Record a row for each new request |
 | `journal.llm` | boolean | true | Record model, status, telemetry and request start/finish changes |
 | `journal.queue` | boolean | true | Record requests starting to wait and the queue clearing |
-| `journal.memory` | boolean | true | Record memory pressure changes |
-| `journal.paging` | boolean | true | Record paging starting and clearing |
-| `journal.gpu` | boolean | true | Record GPU busy, saturated and eased changes |
+| `journal.memory` | boolean | true | Record memory pressure changes; a move to critical pressure is always recorded |
+| `journal.paging` | boolean | true | Record light paging starting and clearing |
+| `journal.gpu` | boolean | true | Record GPU BUSY, saturated and eased changes |
 | `journal.thermal` | boolean | true | Record thermal warning changes |
 
 Rates are bytes per second; loads are percentages. A `journal` toggle set to
-`false` stops new rows of that kind; system rows and critical conditions
-(critical memory pressure, heavy paging, thrashing, page-in recovery) are
-always recorded.
+`false` stops new rows of that kind. System rows, assessment findings
+(such as HEAVY PAGING, GPU THROTTLED or VRAM FULL) and a move to critical
+memory pressure are always recorded.
 
 ### Precedence
 

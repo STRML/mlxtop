@@ -2,7 +2,6 @@
 //! Combine host and provider observations into bounded histories and snapshots.
 use crate::analysis::threshold_with_hysteresis;
 use crate::analysis::{classify, signal_summary, CorrelationEngine};
-use crate::app::is_critical_state;
 use crate::completion_log::read_llm_stats;
 use crate::config::{Config, JournalConfig, OmxConfig, Thresholds};
 use crate::domain::{
@@ -673,7 +672,8 @@ impl Collector {
 
         let gpu_transition =
             gpu_journal_transition(&mut self.gpu_band, sample.gpu_util, self.thresholds);
-        if sample.llm_provider == "none" {
+        // A server that went away and came back is online again.
+        if sample.llm_provider == "none" || sample.llm_source == TelemetrySource::None {
             self.telemetry_online = None;
         }
         if let Some(previous) = previous {
@@ -874,10 +874,10 @@ impl Collector {
         }
 
         for (state, summary, tone) in events {
-            let kind = EventKind::from_state(&state);
-            if !journal_records(&self.journal, &state, kind) {
+            if !journal_records(&self.journal, &state, sample.pressure == "RED") {
                 continue;
             }
+            let kind = EventKind::from_state(&state);
             self.signals.push_back(SignalEvent {
                 time: sample.updated.clone(),
                 recorded_at: SystemTime::now(),
@@ -1001,21 +1001,23 @@ pub(crate) fn cache_interval_efficiency(
     Some(cached_delta as f64 / prompt_delta as f64 * 100.0)
 }
 
-/// Whether the Journal settings keep this event. System rows and critical
-/// states are always kept: a toggle quiets routine changes, not faults.
-pub(crate) fn journal_records(journal: &JournalConfig, state: &str, kind: EventKind) -> bool {
-    if is_critical_state(state) {
-        return true;
-    }
-    let toggle = match kind {
-        EventKind::System => return true,
-        EventKind::Llm if state == "PROMPT" => journal.prompts,
-        EventKind::Llm => journal.llm,
-        EventKind::Queue => journal.queue,
-        EventKind::Pressure => journal.memory,
-        EventKind::Paging => journal.paging,
-        EventKind::Gpu => journal.gpu,
-        EventKind::Thermal => journal.thermal,
+/// Whether the Journal settings keep this event. A toggle mutes only its
+/// routine rows; assessment changes such as GPU THROTTLED or HEAVY PAGING,
+/// and a move to critical memory pressure, are always kept.
+pub(crate) fn journal_records(
+    journal: &JournalConfig,
+    state: &str,
+    critical_pressure: bool,
+) -> bool {
+    let toggle = match state {
+        "PROMPT" => journal.prompts,
+        "LLM" => journal.llm,
+        "QUEUE" => journal.queue,
+        "PRESSURE" if !critical_pressure => journal.memory,
+        "PAGING" => journal.paging,
+        "GPU" | "GPU BUSY" => journal.gpu,
+        "THERMAL" => journal.thermal,
+        _ => None,
     };
     toggle.unwrap_or(true)
 }
