@@ -16,7 +16,8 @@
   `PREFILL 0.0` for the rest of its run. The last measured speed now stays,
   labeled `LAST PREFILL`, until a newer prefill replaces it. A fresh
   dashboard seeds its first reading from the server's cumulative finished
-  prefill counters instead of showing nothing.
+  prefill counters instead of showing nothing, and the chart plots that
+  reading instead of `No rate samples yet`.
 - **The cache panel keeps a reading through a long decode.** Prefix-cache
   counters only move when a request completes, so the interval rate went
   blank while a request decoded. When no completed request supplied an

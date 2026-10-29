@@ -3104,6 +3104,17 @@ fn rate_charts_skip_aggregate_and_log_fallbacks() {
         ..Sample::default()
     };
     assert_eq!(chart_rate_value(&log_sample, ChartMetric::Generation), None);
+
+    let native = Sample {
+        llm_provider: "mlx-serve".into(),
+        llm_prefill_tps: Some(2134.4),
+        ..Sample::default()
+    };
+    assert_eq!(
+        chart_rate_value(&native, ChartMetric::Prefill),
+        Some(21344),
+        "the native last prefill stays on the chart after the prefill ends"
+    );
 }
 
 #[test]

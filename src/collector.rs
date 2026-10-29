@@ -907,12 +907,17 @@ pub(crate) fn apply_hosted_splash(sample: &mut Sample) {
 /// completion-log values are deliberately excluded because they are not
 /// measurements of the current sample.
 pub(crate) fn chart_rate_value(sample: &Sample, metric: ChartMetric) -> Option<u64> {
-    let (value, live) = match metric {
+    let (value, plottable) = match metric {
         ChartMetric::Generation => (sample.llm_generation_tps, sample.llm_generation_tps_live),
-        ChartMetric::Prefill => (sample.llm_prefill_tps, sample.llm_prefill_tps_live),
+        // The native adapter keeps the last finished request's prefill speed, so it stays a
+        // measurement after the prefill ends; other providers only chart live readings.
+        ChartMetric::Prefill => (
+            sample.llm_prefill_tps,
+            sample.llm_prefill_tps_live || sample.llm_provider == "mlx-serve",
+        ),
         _ => return None,
     };
-    if !live {
+    if !plottable {
         return None;
     }
     value
