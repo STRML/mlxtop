@@ -62,12 +62,13 @@ pub(crate) fn llm_generation_rate_label(sample: &Sample) -> String {
 }
 
 pub(crate) fn llm_prefill_rate_label(sample: &Sample) -> String {
-    let label = if sample.llm_prefill_tps_live {
+    let label = if sample.llm_prefill_tps_live || sample.llm_prefill_tps.is_none() {
         "PREFILL"
-    } else if sample.llm_prefill_tps.is_some() {
+    } else if sample.llm_provider == "mlx-serve" {
+        // The native runtime keeps the last finished request's prefill speed.
         "LAST PREFILL"
     } else {
-        "PREFILL"
+        "AVG PREFILL"
     };
     format!("{label} {}", tokens_per_second(sample.llm_prefill_tps))
 }
