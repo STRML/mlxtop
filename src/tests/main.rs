@@ -788,14 +788,14 @@ fn the_prefill_chart_shows_how_far_the_prefill_has_got() {
 }
 
 #[test]
-fn native_last_prefill_fills_the_chart_after_the_prefill_ends() {
+fn native_last_prefill_labels_itself_last_instead_of_live() {
     let mut app = test_app(0);
     app.collector.current = Sample {
         llm_provider: "mlx-serve".into(),
         llm_prefill_tps: Some(2134.4),
         ..Sample::default()
     };
-    let history = VecDeque::from([ChartPoint::new(Some(21344), Tone::Cyan)]);
+    let history = VecDeque::new();
     let screen = render_view(90, 8, |frame| {
         app.render_indicator_chart(
             frame,
@@ -806,10 +806,10 @@ fn native_last_prefill_fills_the_chart_after_the_prefill_ends() {
         )
     });
     assert!(
-        !screen.contains("No rate samples yet"),
-        "the held reading must fill the chart\n{screen}"
+        screen.contains("LAST PREFILL 2134.4 tok/s"),
+        "the held reading is labeled last, not live\n{screen}"
     );
-    assert!(screen.contains("tok/s"), "{screen}");
+    assert!(!screen.contains("LIVE"), "{screen}");
 }
 
 #[test]
@@ -3129,17 +3129,6 @@ fn rate_charts_skip_aggregate_and_log_fallbacks() {
         ..Sample::default()
     };
     assert_eq!(chart_rate_value(&log_sample, ChartMetric::Generation), None);
-
-    let native = Sample {
-        llm_provider: "mlx-serve".into(),
-        llm_prefill_tps: Some(2134.4),
-        ..Sample::default()
-    };
-    assert_eq!(
-        chart_rate_value(&native, ChartMetric::Prefill),
-        Some(21344),
-        "the native last prefill stays on the chart after the prefill ends"
-    );
 }
 
 #[test]
