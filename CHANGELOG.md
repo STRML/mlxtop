@@ -14,7 +14,9 @@
   request's prefill speed was held for three seconds and then replaced by a
   live zero, so a request that decoded for longer than that showed
   `PREFILL 0.0` for the rest of its run. The last measured speed now stays,
-  labeled `LAST PREFILL`, until a newer prefill replaces it.
+  labeled `LAST PREFILL`, until a newer prefill replaces it. A fresh
+  dashboard seeds its first reading from the server's cumulative finished
+  prefill counters instead of showing nothing.
 - **The cache panel keeps a reading through a long decode.** Prefix-cache
   counters only move when a request completes, so the interval rate went
   blank while a request decoded. When no completed request supplied an

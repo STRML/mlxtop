@@ -254,7 +254,7 @@ fn a_finished_prefill_stays_as_the_last_sample_through_a_long_decode() {
 }
 
 #[test]
-fn an_idle_server_reads_a_live_zero_after_a_long_gap_too() {
+fn an_idle_server_shows_its_cumulative_prefill_speed_after_a_long_gap() {
     let now = Instant::now();
     let mut history = MetricsHistory::default();
     for second in 0..3_u64 {
@@ -262,12 +262,11 @@ fn an_idle_server_reads_a_live_zero_after_a_long_gap_too() {
         let result = history
             .observe("mlx-serve", &text, now + Duration::from_secs(second))
             .unwrap();
-        let expected = if second == 0 {
-            (None, false)
-        } else {
-            (Some(0.0), true)
-        };
-        assert_eq!((result.prefill_tps, result.prefill_tps_live), expected);
+        assert_eq!(
+            (result.prefill_tps, result.prefill_tps_live),
+            (Some(100.0), false),
+            "second {second}: the cumulative speed is shown, not live"
+        );
     }
     let text = mlx_serve_prefill(0, false, 100, 1.0);
     let later = history
@@ -275,7 +274,7 @@ fn an_idle_server_reads_a_live_zero_after_a_long_gap_too() {
         .unwrap();
     assert_eq!(
         (later.prefill_tps, later.prefill_tps_live),
-        (Some(0.0), true)
+        (Some(100.0), false)
     );
 }
 

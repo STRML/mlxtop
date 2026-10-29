@@ -354,6 +354,15 @@ impl PrefillWindow {
             return self.in_flight(now, live);
         }
         self.run = None;
+        // A fresh dashboard has no earlier sample to subtract. Show the server's cumulative
+        // finished-request prefill speed instead of a blank until the next request ends.
+        if !polled {
+            if let Some((tokens, seconds)) = finished {
+                if tokens > 0.0 && seconds > 0.0 {
+                    self.last = Some((tokens / seconds, now));
+                }
+            }
+        }
         if let Some(((tokens, seconds), (old_tokens, old_seconds))) = finished.zip(counters) {
             if tokens > old_tokens && seconds > old_seconds {
                 self.last = Some(((tokens - old_tokens) / (seconds - old_seconds), now));
