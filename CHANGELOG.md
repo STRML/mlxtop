@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Dashboards
+
+- **Sushi servers report their own generation and prefill rates.** The
+  `mlx-serve` adapter now reads the `sushi:` gauge names when a server
+  publishes them instead of `mlx_serve:` (`sushi serve` does), beside the
+  shared vLLM-shaped queues. Decode, prefill, per-request speeds and prefill
+  progress work unchanged; `MLXTOP_PROVIDER=mlx-serve` stays the selection,
+  and a running `sushi` process is detected as mlx-serve.
+
 ## 3.1.2 — 2026-10-22
 
 Running requests now show their own generation speeds, llama.cpp reports a live

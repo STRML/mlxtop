@@ -81,6 +81,11 @@ fn mlx_serve_prefill(live: u64, prefilling: bool, tokens: u64, seconds: f64) -> 
     format!("vllm:num_requests_running 1\nmlx_serve:generation_tokens_live 0\nmlx_serve:prefill_tokens_live {live}\nmlx_serve:requests_prefilling {}\nmlx_serve:prefill_tokens_total {tokens}\nvllm:request_prefill_time_seconds_sum {seconds}\n", u8::from(prefilling))
 }
 
+/// sushi publishes the same vLLM-shaped queues and its own gauges under `sushi:`.
+fn sushi_metrics(text: &str) -> String {
+    text.replace("mlx_serve:", "sushi:")
+}
+
 #[test]
 fn mlx_serve_rates_come_from_the_live_series() {
     let now = Instant::now();
@@ -125,6 +130,77 @@ fn mlx_serve_rates_come_from_the_live_series() {
         .unwrap();
     assert_eq!(restart.generation_tps, None);
     assert_eq!(restart.prefill_tps, None, "a restart clears the window");
+}
+
+#[test]
+fn mlx_serve_reads_sushi_gauge_names_too() {
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let first = history
+        .observe(
+            "mlx-serve",
+            &sushi_metrics(&mlx_serve(1000, 400, 1600, 100)),
+            now,
+        )
+        .unwrap();
+    assert_eq!(first.provider.as_deref(), Some("mlx-serve"));
+    assert_eq!(
+        (first.active_requests, first.waiting_requests),
+        (Some(2), Some(1))
+    );
+    assert_eq!((first.generation_tps, first.prefill_tps), (None, None));
+    assert_eq!(first.prefix_hit_rate, Some(80.0));
+    assert_eq!(first.model_memory, Some(4096));
+    assert!(first
+        .details
+        .as_deref()
+        .unwrap()
+        .contains("prefill 100 / 1000 tokens (10%)"));
+    let second = history
+        .observe(
+            "mlx-serve",
+            &sushi_metrics(&mlx_serve(1300, 400, 1600, 300)),
+            now + Duration::from_secs(2),
+        )
+        .unwrap();
+    assert_eq!(second.generation_tps, Some(150.0));
+    assert_eq!(second.prefill_tps, Some(100.0));
+    assert!(second.generation_tps_live && second.prefill_tps_live);
+    let mut sessions = LlmTelemetry::default();
+    apply_mlx_serve_sessions(
+        &mut sessions,
+        &json!({"sessions":[{"model":"DeepSeek Sushi", "phase":"decode",
+            "context_tokens":50, "generated_tokens":20, "request_id":4}]}),
+        SystemTime::now(),
+        Instant::now(),
+        &mut SessionSpeeds::default(),
+    );
+    assert_eq!(sessions.model.as_deref(), Some("DeepSeek Sushi"));
+    assert_eq!(sessions.requests[0].provider, "mlx-serve");
+}
+
+#[test]
+fn sushi_prefill_reads_its_average_speed_not_the_chunk_size() {
+    let now = Instant::now();
+    let mut history = MetricsHistory::default();
+    let mut live = 0;
+    let mut rate = None;
+    for second in 0..12_u64 {
+        // The gauge gains one 8192-token chunk every other second, like the server's.
+        if second % 2 == 1 {
+            live += 8192;
+        }
+        let text = sushi_metrics(&mlx_serve_prefill(live, true, 100, 1.0));
+        rate = history
+            .observe("mlx-serve", &text, now + Duration::from_secs(second))
+            .unwrap()
+            .prefill_tps;
+    }
+    let rate = rate.unwrap();
+    assert!(
+        (3500.0..4700.0).contains(&rate),
+        "{rate}: one second would read 0, 8192 or 16384"
+    );
 }
 
 #[test]

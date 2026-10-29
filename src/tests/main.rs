@@ -2316,6 +2316,11 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
             "mlx-serve",
         ),
         (
+            "sushi",
+            "/Users/samuelreed/opt/sushi-release/v1.4.0/sushi-macos-arm64/sushi serve",
+            "mlx-serve",
+        ),
+        (
             "splash",
             "/opt/homebrew/Cellar/splash/1.0.0/libexec/engine/splash",
             "Splash",
