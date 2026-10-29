@@ -227,7 +227,7 @@ fn a_long_prefill_reads_its_average_speed_not_the_chunk_size() {
 }
 
 #[test]
-fn a_prefill_that_ends_between_polls_shows_briefly_as_a_last_sample_and_then_reads_zero() {
+fn a_finished_prefill_stays_as_the_last_sample_through_a_long_decode() {
     let now = Instant::now();
     let mut history = MetricsHistory::default();
     let mut poll = |second: u64, tokens: u64, seconds: f64| {
@@ -246,7 +246,11 @@ fn a_prefill_that_ends_between_polls_shows_briefly_as_a_last_sample_and_then_rea
     );
     let (rate, live) = poll(4, 500, 0.15);
     assert!(rate.unwrap() > 3000.0 && !live, "still held two seconds on");
-    assert_eq!(poll(7, 500, 0.15), (Some(0.0), true), "gone after the hold");
+    let (rate, live) = poll(7, 500, 0.15);
+    assert!(
+        rate.unwrap() > 3000.0 && !live,
+        "a decode running past the old hold keeps the last prefill"
+    );
 }
 
 #[test]
@@ -302,6 +306,11 @@ fn mlx_serve_sessions_name_the_model_and_list_only_running_requests() {
     assert!(requests
         .iter()
         .all(|r| !r.completed && r.provider == "mlx-serve"));
+    let cache = result.cache_interval_efficiency.unwrap();
+    assert!(
+        (cache - 1000.0 / 2100.0 * 100.0).abs() < 1e-9,
+        "{cache}: live sessions carry the prefix reuse while no request completes"
+    );
     assert_eq!(
         result.prompt_tokens, None,
         "two requests: no single-request totals"
@@ -748,18 +757,22 @@ fn mlx_serve_slow_chunked_prefill_reads_its_true_speed() {
 }
 
 #[test]
-fn mlx_serve_prefill_reading_does_not_reappear_when_a_long_decode_ends() {
+fn mlx_serve_prefill_reading_survives_a_long_decode_and_stays_at_its_end() {
     let (now, mut h) = (Instant::now(), MetricsHistory::default());
     for (t, live) in [(0, 0), (1, 8192), (2, 16384)] {
         poll_at(&mut h, now, t, &mlx_serve_prefill(live, true, 0, 0.0));
     }
     for t in 3..60 {
-        poll_at(&mut h, now, t, &mlx_serve_prefill(0, false, 0, 0.0));
+        let (rate, live) = poll_at(&mut h, now, t, &mlx_serve_prefill(0, false, 0, 0.0));
+        assert!(
+            !live && rate.is_some_and(|rate| (rate - 8192.0).abs() < 1.0),
+            "t={t}: a decode running for a minute still shows the last prefill: {rate:?}"
+        );
     }
     let (rate, live) = poll_at(&mut h, now, 60, &mlx_serve_prefill(0, false, 16384, 2.0));
     assert!(
-        live || rate.is_none(),
-        "a stale prefill speed shows at decode end: {rate:?}"
+        !live && rate.is_some_and(|rate| (rate - 8192.0).abs() < 1.0),
+        "the finished request replaces it: {rate:?}"
     );
 }
 

@@ -10,6 +10,16 @@
   shared vLLM-shaped queues. Decode, prefill, per-request speeds and prefill
   progress work unchanged; `MLXTOP_PROVIDER=mlx-serve` stays the selection,
   and a running `sushi` process is detected as mlx-serve.
+- **The prefill rate stays after the prefill finishes.** A finished
+  request's prefill speed was held for three seconds and then replaced by a
+  live zero, so a request that decoded for longer than that showed
+  `PREFILL 0.0` for the rest of its run. The last measured speed now stays,
+  labeled `LAST PREFILL`, until a newer prefill replaces it.
+- **The cache panel keeps a reading through a long decode.** Prefix-cache
+  counters only move when a request completes, so the interval rate went
+  blank while a request decoded. When no completed request supplied an
+  interval rate, mlxtop now uses the prefix reuse of the requests still
+  running.
 
 ## 3.1.2 — 2026-10-22
 

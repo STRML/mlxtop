@@ -3424,7 +3424,7 @@ fn retained_omlx_rates_are_not_marked_live_when_idle() {
         ..Sample::default()
     };
     assert_eq!(llm_generation_rate_label(&sample), "AVG GEN 31.6 tok/s");
-    assert_eq!(llm_prefill_rate_label(&sample), "AVG PREFILL 133.2 tok/s");
+    assert_eq!(llm_prefill_rate_label(&sample), "LAST PREFILL 133.2 tok/s");
 }
 
 #[test]

@@ -62,12 +62,14 @@ pub(crate) fn llm_generation_rate_label(sample: &Sample) -> String {
 }
 
 pub(crate) fn llm_prefill_rate_label(sample: &Sample) -> String {
-    llm_rate_label(
-        sample,
-        "PREFILL",
-        sample.llm_prefill_tps,
-        sample.llm_prefill_tps_live,
-    )
+    let label = if sample.llm_prefill_tps_live {
+        "PREFILL"
+    } else if sample.llm_prefill_tps.is_some() {
+        "LAST PREFILL"
+    } else {
+        "PREFILL"
+    };
+    format!("{label} {}", tokens_per_second(sample.llm_prefill_tps))
 }
 
 /// The prefill in flight as tokens forwarded over the tokens it will forward, with its percentage.

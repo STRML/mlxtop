@@ -311,9 +311,6 @@ pub(super) fn metric_sum(text: &str, name: &str) -> Option<f64> {
     Metrics::parse(text).sum(name)
 }
 
-/// How long the speed of a request that just finished stays shown once nothing is prefilling.
-const PREFILL_HOLD: Duration = Duration::from_secs(3);
-
 /// The prefill in flight: where its gauge started, where it last advanced, and where it is now.
 struct PrefillRun {
     start: (Instant, f64),
@@ -328,10 +325,6 @@ struct PrefillWindow {
     polled: bool,
     /// Prompt tokens and prefill seconds of finished requests. Both move only when a request ends.
     finished: Option<(f64, f64)>,
-    /// When a prefill was last seen in flight.
-    last_prefilling: Option<Instant>,
-    /// Whether the previous poll saw nothing running.
-    was_idle: bool,
     /// The latest measured speed and when it was taken.
     last: Option<(f64, Instant)>,
 }
@@ -342,10 +335,10 @@ impl PrefillWindow {
     /// The live gauge advances in chunks of thousands of tokens, so a fixed window reads 0 or twice the
     /// true speed. Instead, while a prefill is in flight, divide its growth since the prefill was first
     /// seen by the time from then to the gauge's latest advance: that reads the true speed between
-    /// chunks, and nothing until the first chunk lands. Once nothing is prefilling the last speed stays
-    /// shown, not live, for `PREFILL_HOLD`. A request that ends right after a prefill, or after an idle
-    /// poll, replaces it with its own speed from the finished-request counters; one that ends after a
-    /// long decode is not a prefill reading. Otherwise report a live 0.
+    /// chunks, and nothing until the first chunk lands. Once nothing is prefilling, the speed of the
+    /// requests that finished since the last poll is shown, not live, and it stays until a newer prefill
+    /// replaces it; a decode running for minutes does not erase it. Otherwise, before any request has
+    /// finished, report a live 0.
     fn rate(&mut self, now: Instant, metrics: &Metrics, series: &Series) -> Option<(f64, bool)> {
         let live = metrics.sum(&series.prompt)?;
         // A server without the flag is prefilling whenever the gauge is above 0.
@@ -355,32 +348,24 @@ impl PrefillWindow {
         let finished = metrics
             .sum(&series.prefill_total)
             .zip(metrics.sum("vllm:request_prefill_time_seconds_sum"));
-        let idle = !prefilling
-            && metrics
-                .sum(&format!("{}:{}", series.prefix, series.active))
-                .is_some_and(|n| n == 0.0);
-        let was_idle = std::mem::replace(&mut self.was_idle, idle);
         let polled = std::mem::replace(&mut self.polled, true);
         let counters = std::mem::replace(&mut self.finished, finished);
         if prefilling {
             return self.in_flight(now, live);
         }
         self.run = None;
-        let held = |at: Instant| now.saturating_duration_since(at) <= PREFILL_HOLD;
         if let Some(((tokens, seconds), (old_tokens, old_seconds))) = finished.zip(counters) {
-            let fresh = was_idle || self.last_prefilling.is_some_and(held);
-            if fresh && tokens > old_tokens && seconds > old_seconds {
+            if tokens > old_tokens && seconds > old_seconds {
                 self.last = Some(((tokens - old_tokens) / (seconds - old_seconds), now));
             }
         }
-        if let Some((rate, _)) = self.last.filter(|(_, at)| held(*at)) {
+        if let Some((rate, _)) = self.last {
             return Some((rate, false));
         }
         polled.then_some((0.0, true))
     }
 
     fn in_flight(&mut self, now: Instant, live: f64) -> Option<(f64, bool)> {
-        self.last_prefilling = Some(now);
         // The gauge falling means that prefill ended and another began.
         let mut run = self
             .run
@@ -722,6 +707,7 @@ impl MetricsHistory {
                 // A restarted server's gauges start over, so no earlier speed applies to them.
                 self.generation.reset();
                 self.sessions = SessionSpeeds::default();
+                self.prefill = PrefillWindow::default();
             }
             if old_provider == provider && elapsed > 0.0 && elapsed <= 5.0 && same_start {
                 result.generation_tps = metrics
@@ -846,6 +832,24 @@ pub(super) fn apply_mlx_serve_sessions(
     // Only the requests still running are kept, so an id the server reuses after a restart never
     // inherits an old count.
     speeds.0 = seen;
+    // vLLM's cache counters only move when a request completes, so a decode can leave the interval
+    // rate blank for minutes. The sessions carry the prefix reuse of the requests still running;
+    // use it when no completed request supplied an interval rate.
+    if result.cache_interval_efficiency.is_none() {
+        let (cached, prompt) =
+            result
+                .requests
+                .iter()
+                .fold((0_u64, 0_u64), |(cached, prompt), r| {
+                    (
+                        cached.saturating_add(r.cached.unwrap_or(0)),
+                        prompt.saturating_add(r.prompt),
+                    )
+                });
+        if prompt > 0 && cached <= prompt {
+            result.cache_interval_efficiency = Some(cached as f64 / prompt as f64 * 100.0);
+        }
+    }
     if let [only] = result.requests.as_slice() {
         result.prompt_tokens = Some(only.prompt);
         result.output_tokens = only.output;
