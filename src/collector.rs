@@ -670,6 +670,7 @@ impl Collector {
             }
         }
 
+        let previous_gpu_band = self.gpu_band;
         let gpu_transition =
             gpu_journal_transition(&mut self.gpu_band, sample.gpu_util, self.thresholds);
         // A server that went away and came back is online again.
@@ -826,10 +827,15 @@ impl Collector {
                 );
             }
 
-            // The GPU BUSY row already says the GPU got busy or eased.
+            // GPU BUSY replaces the busy transition, but saturation is a separate change.
+            let saturation_changed = previous_gpu_band
+                .zip(self.gpu_band)
+                .is_some_and(|(previous, current)| previous.saturated != current.saturated);
             let gpu_busy_reported =
                 impact_changed && (previous.impact == "GPU BUSY" || sample.impact == "GPU BUSY");
-            if let Some((summary, tone)) = gpu_transition.filter(|_| !gpu_busy_reported) {
+            if let Some((summary, tone)) =
+                gpu_transition.filter(|_| !gpu_busy_reported || saturation_changed)
+            {
                 add("GPU", summary, tone);
             }
 

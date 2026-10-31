@@ -1253,3 +1253,26 @@ fn telemetry_online_is_logged_again_after_the_server_returns() {
         .count();
     assert_eq!(online, 2);
 }
+
+#[test]
+fn saturation_survives_gpu_busy_impact_deduplication() {
+    let mut c = collector(FakeHost::default(), Platform::Linux, None);
+    let before = Sample {
+        impact: "LLM READY".into(),
+        ..gpu_sample(20)
+    };
+    let after = Sample {
+        impact: "GPU BUSY".into(),
+        ..gpu_sample(99)
+    };
+    c.record_journal_events(None, &before);
+    c.record_journal_events(Some(&before), &after);
+    c.record_journal_events(Some(&after), &after);
+    assert!(
+        c.signals
+            .iter()
+            .any(|e| e.summary.contains("GPU load saturated")),
+        "{:?}",
+        journal(&c)
+    );
+}
