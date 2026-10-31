@@ -4913,3 +4913,14 @@ fn memory_history_stacks_what_ram_holds_over_a_pressure_ribbon() {
     let buffer = terminal.backend().buffer();
     assert!((0..20).any(|y| buffer[(57, y)].symbol() == "━"));
 }
+
+#[test]
+fn reported_prefill_keeps_its_last_result_label() {
+    let sample = Sample {
+        llm_provider: "KoboldCpp".into(),
+        llm_source: TelemetrySource::Report,
+        llm_prefill_tps: Some(133.2),
+        ..Sample::default()
+    };
+    assert_eq!(llm_prefill_rate_label(&sample), "LAST PREFILL 133.2 tok/s");
+}

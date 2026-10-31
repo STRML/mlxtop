@@ -929,3 +929,26 @@ fn a_gauge_drop_restarts_the_decode_window() {
     );
     assert_eq!(poll(6, 215), Some(105.0));
 }
+
+#[test]
+fn mlx_serve_session_cache_reuse_requires_complete_counts() {
+    let known = json!({"phase":"decode", "context_tokens":120,
+        "generated_tokens":20, "request_id":1, "cached_tokens":80});
+    let unknown = json!({"phase":"decode", "context_tokens":120,
+        "generated_tokens":20, "request_id":2});
+    for (sessions, expected) in [
+        (vec![unknown.clone()], None),
+        (vec![known.clone(), unknown], None),
+        (vec![known], Some(80.0)),
+    ] {
+        let mut result = LlmTelemetry::default();
+        apply_mlx_serve_sessions(
+            &mut result,
+            &json!({"sessions": sessions}),
+            SystemTime::now(),
+            Instant::now(),
+            &mut SessionSpeeds::default(),
+        );
+        assert_eq!(result.cache_interval_efficiency, expected);
+    }
+}

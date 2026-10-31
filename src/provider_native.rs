@@ -845,17 +845,18 @@ pub(super) fn apply_mlx_serve_sessions(
     // rate blank for minutes. The sessions carry the prefix reuse of the requests still running;
     // use it when no completed request supplied an interval rate.
     if result.cache_interval_efficiency.is_none() {
-        let (cached, prompt) =
-            result
-                .requests
-                .iter()
-                .fold((0_u64, 0_u64), |(cached, prompt), r| {
-                    (
-                        cached.saturating_add(r.cached.unwrap_or(0)),
-                        prompt.saturating_add(r.prompt),
-                    )
-                });
-        if prompt > 0 && cached <= prompt {
+        let totals = result
+            .requests
+            .iter()
+            .try_fold((0_u64, 0_u64), |(cached, prompt), r| {
+                Some((
+                    cached.checked_add(r.cached?)?,
+                    prompt.checked_add(r.prompt)?,
+                ))
+            });
+        if let Some((cached, prompt)) =
+            totals.filter(|(cached, prompt)| *prompt > 0 && cached <= prompt)
+        {
             result.cache_interval_efficiency = Some(cached as f64 / prompt as f64 * 100.0);
         }
     }
