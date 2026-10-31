@@ -493,7 +493,8 @@ impl Adapter {
 
     /// mlx-serve: Prometheus counters for rates and queues, and `/metrics.json`
     /// for the model and the live requests. Both need `--metrics`; the second is
-    /// optional so an older server still reports rates.
+    /// optional so an older server still reports rates. Sushi serves the same
+    /// endpoints and gauges under `sushi:` names, so it is read the same way.
     fn poll_mlx_serve(&mut self, now: Instant) -> Option<LlmTelemetry> {
         let body = self.get(MLX_SERVE_PORT, "/metrics")?;
         let mut result = self.metrics.observe("mlx-serve", &body, now)?;

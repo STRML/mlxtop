@@ -877,18 +877,20 @@ hardware slowdown correlation. Run mlxtop over SSH for matching remote OS data.
   Processes shows maximum reported KV occupancy across engines and cumulative mean
   TTFT. Aggregate latency is never inserted into individual request history.
   No per-request prompt counts or IDs are inferred from aggregate counters.
-- **mlx-serve:** polls `/metrics` (start the server with `--metrics`; set
+- **mlx-serve / sushi:** polls `/metrics` (start mlx-serve with `--metrics`; sushi
+  serves it by default; set
   `MLXTOP_PROVIDER_API_KEY` if it has an API key) and `/metrics.json` for the model and
   one entry per running request (prompt, cached and output counts; cache-only sessions
   are skipped). Each running request's own speed is read the same way from its
   `generated_tokens`, which counts the tokens its client receives; a request
   reused under the same id with a different prompt starts over, and a session still
-  prefilling, or one without a `request_id`, has none. Generation rate keeps the points where `mlx_serve:generation_tokens_live`
+  prefilling, or one without a `request_id`, has none. Generation rate keeps the points where the runtime's
+  `mlx_serve:generation_tokens_live` (or `sushi:generation_tokens_live`)
   advanced and divides across a span of at least six seconds, because the server
   refreshes that gauge once every two seconds and a one-second delta reads 0 or twice
   the true speed; the last real speed stays shown, not live, for four seconds after the
   gauge stops, then the rate reads a live zero. Prefill rate is the growth of
-  `mlx_serve:prefill_tokens_live` since the prefill was first seen, over the time to its
+  the runtime's `mlx_serve:prefill_tokens_live` (or `sushi:prefill_tokens_live`) since the prefill was first seen, over the time to its
   latest advance, because the gauge moves in coarse chunks; it shows nothing until the
   first chunk lands and is live only while a prefill is running. While it runs, the
   prefill panel's footer shows `prefill_tokens_live / prefill_tokens_expected` with the

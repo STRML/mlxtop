@@ -235,6 +235,9 @@ pub(crate) fn process_provider(name: &str, command: &str) -> Option<String> {
         "llama.cpp"
     } else if candidates.iter().any(|token| token == "mlxserve") {
         "mlx-serve"
+    } else if has("sushi") {
+        // sushi serves mlx-serve's monitoring API and gauges under `sushi:` names.
+        "mlx-serve"
     } else if std::iter::once(name)
         .chain(command_tokens.first().copied())
         .any(|token| normalize_process_token(token) == "splash")

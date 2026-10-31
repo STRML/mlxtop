@@ -62,12 +62,20 @@ pub(crate) fn llm_generation_rate_label(sample: &Sample) -> String {
 }
 
 pub(crate) fn llm_prefill_rate_label(sample: &Sample) -> String {
-    llm_rate_label(
-        sample,
-        "PREFILL",
-        sample.llm_prefill_tps,
-        sample.llm_prefill_tps_live,
-    )
+    if sample.llm_provider == "mlx-serve"
+        && sample.llm_prefill_tps.is_some()
+        && !sample.llm_prefill_tps_live
+    {
+        // The native runtime keeps the last finished request's prefill speed.
+        format!("LAST PREFILL {}", tokens_per_second(sample.llm_prefill_tps))
+    } else {
+        llm_rate_label(
+            sample,
+            "PREFILL",
+            sample.llm_prefill_tps,
+            sample.llm_prefill_tps_live,
+        )
+    }
 }
 
 /// The prefill in flight as tokens forwarded over the tokens it will forward, with its percentage.
