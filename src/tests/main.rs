@@ -788,6 +788,31 @@ fn the_prefill_chart_shows_how_far_the_prefill_has_got() {
 }
 
 #[test]
+fn native_last_prefill_labels_itself_last_instead_of_live() {
+    let mut app = test_app(0);
+    app.collector.current = Sample {
+        llm_provider: "mlx-serve".into(),
+        llm_prefill_tps: Some(2134.4),
+        ..Sample::default()
+    };
+    let history = VecDeque::new();
+    let screen = render_view(90, 8, |frame| {
+        app.render_indicator_chart(
+            frame,
+            frame.area(),
+            "prefill",
+            &history,
+            ChartMetric::Prefill,
+        )
+    });
+    assert!(
+        screen.contains("LAST PREFILL 2134.4 tok/s"),
+        "the held reading is labeled last, not live\n{screen}"
+    );
+    assert!(!screen.contains("LIVE"), "{screen}");
+}
+
+#[test]
 fn consolidated_dashboard_keeps_metrics_once_and_gpu_bands_visible() {
     let mut app = test_app(0);
     populate_dashboard_fixture(&mut app);
@@ -2316,6 +2341,11 @@ fn detects_runtime_entrypoints_with_consistent_provider_names() {
             "mlx-serve",
         ),
         (
+            "sushi",
+            "/Users/samuelreed/opt/sushi-release/v1.4.0/sushi-macos-arm64/sushi serve",
+            "mlx-serve",
+        ),
+        (
             "splash",
             "/opt/homebrew/Cellar/splash/1.0.0/libexec/engine/splash",
             "Splash",
@@ -3420,6 +3450,11 @@ fn retained_omlx_rates_are_not_marked_live_when_idle() {
     };
     assert_eq!(llm_generation_rate_label(&sample), "AVG GEN 31.6 tok/s");
     assert_eq!(llm_prefill_rate_label(&sample), "AVG PREFILL 133.2 tok/s");
+    let native = Sample {
+        llm_provider: "mlx-serve".into(),
+        ..sample
+    };
+    assert_eq!(llm_prefill_rate_label(&native), "LAST PREFILL 133.2 tok/s");
 }
 
 #[test]
@@ -4877,4 +4912,15 @@ fn memory_history_stacks_what_ram_holds_over_a_pressure_ribbon() {
         .unwrap();
     let buffer = terminal.backend().buffer();
     assert!((0..20).any(|y| buffer[(57, y)].symbol() == "━"));
+}
+
+#[test]
+fn reported_prefill_keeps_its_last_result_label() {
+    let sample = Sample {
+        llm_provider: "KoboldCpp".into(),
+        llm_source: TelemetrySource::Report,
+        llm_prefill_tps: Some(133.2),
+        ..Sample::default()
+    };
+    assert_eq!(llm_prefill_rate_label(&sample), "LAST PREFILL 133.2 tok/s");
 }

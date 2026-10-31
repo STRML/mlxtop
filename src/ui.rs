@@ -718,6 +718,7 @@ impl App {
     ) {
         self.charts.register(Chart::from(metric), area);
         let zoom = usize::from(self.charts.zoom(Chart::from(metric)));
+        let sample = &self.collector.current;
         let current = history.back().and_then(|point| point.value);
         let current_label = match metric {
             // Drop qualifiers before units: a bare number is never the reading.
@@ -727,10 +728,25 @@ impl App {
                     if area.width < 38 {
                         rate
                     } else {
-                        format!("LIVE {rate}")
+                        let live = match metric {
+                            ChartMetric::Generation => sample.llm_generation_tps_live,
+                            ChartMetric::Prefill => sample.llm_prefill_tps_live,
+                            _ => false,
+                        };
+                        if live {
+                            format!("LIVE {rate}")
+                        } else {
+                            format!("LAST {rate}")
+                        }
                     }
                 })
                 .unwrap_or_else(|| {
+                    if metric == ChartMetric::Prefill
+                        && sample.llm_prefill_tps.is_some()
+                        && area.width >= 38
+                    {
+                        return llm_prefill_rate_label(sample);
+                    }
                     let label = chart_inactive_rate_label(metric, &self.collector.current);
                     if area.width < 38 {
                         match label.as_str() {
@@ -859,7 +875,6 @@ impl App {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(DIM))
             .style(Style::default().bg(PANEL));
-        let sample = &self.collector.current;
         let summary = match metric {
             ChartMetric::Generation
                 if self.charts.expanded
